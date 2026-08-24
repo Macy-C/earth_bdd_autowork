@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bdd-autowork.local/ai/collaboration-review.schema.json",
+  "title": "BDD Autowork Collaboration Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "review_version",
+    "review_id",
+    "generated_at",
+    "repository",
+    "window",
+    "source_sessions",
+    "summary",
+    "candidates"
+  ],
+  "properties": {
+    "review_version": {
+      "const": "1.0"
+    },
+    "review_id": {
+      "type": "string",
+      "pattern": "^collaboration-review-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "root"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "root": {"const": "."},
+        "remote": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9.-]+/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"
+        },
+        "branch": {"type": ["string", "null"]}
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "from", "to"],
+      "properties": {
+        "requested": {"type": "string", "minLength": 1},
+        "from": {"type": "string", "format": "date-time"},
+        "to": {"type": "string", "format": "date-time"}
+      }
+    },
+    "source_sessions": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session_id", "agent_name", "updated_at"],
+        "properties": {
+          "session_id": {"type": "string", "minLength": 1},
+          "agent_name": {"type": ["string", "null"]},
+          "summary": {"type": ["string", "null"], "maxLength": 240},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessions_analyzed",
+        "user_turns_analyzed",
+        "candidate_count",
+        "insufficient_evidence"
+      ],
+      "properties": {
+        "sessions_analyzed": {"type": "integer", "minimum": 0},
+        "user_turns_analyzed": {"type": "integer", "minimum": 0},
+        "candidate_count": {"type": "integer", "minimum": 0, "maximum": 12},
+        "insufficient_evidence": {"type": "boolean"},
+        "limitations": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {"type": "string", "maxLength": 240}
+        }
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "maxItems": 12,
+      "uniqueItems": true,
+      "x-uniqueBy": "candidate_id",
+      "items": {"$ref": "#/$defs/candidate"}
+    }
+  },
+  "$defs": {
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "status",
+        "title",
+        "rule",
+        "scope",
+        "target",
+        "target_path",
+        "confidence",
+        "independent_session_count",
+        "occurrence_count",
+        "evidence",
+        "counterevidence",
+        "expected_benefit",
+        "risk",
+        "validation"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^candidate-[0-9]{2}-[a-z0-9-]+$"
+        },
+        "status": {"const": "proposed"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 100},
+        "rule": {"type": "string", "minLength": 1, "maxLength": 500},
+        "scope": {
+          "enum": ["user", "repository", "architecture"]
+        },
+        "target": {
+          "enum": [
+            "user_memory",
+            "copilot_instructions",
+            "file_instructions",
+            "prompt",
+            "ai_context",
+            "none"
+          ]
+        },
+        "target_path": {
+          "type": ["string", "null"],
+          "maxLength": 240
+        },
+        "confidence": {
+          "enum": ["low", "medium", "high"]
+        },
+        "independent_session_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "occurrence_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/evidence"}
+        },
+        "counterevidence": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/evidence"}
+        },
+        "expected_benefit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "risk": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "validation": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {"type": "string", "maxLength": 240}
+        },
+        "supersedes": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"type": "string", "maxLength": 120}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"confidence": {"const": "low"}}},
+          "then": {
+            "properties": {
+              "target": {"const": "none"},
+              "target_path": {"const": null}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"target": {"const": "none"}}},
+          "then": {"properties": {"target_path": {"const": null}}}
+        },
+        {
+          "if": {"properties": {"target": {"const": "user_memory"}}},
+          "then": {
+            "properties": {
+              "scope": {"const": "user"},
+              "target_path": {
+                "type": "string",
+                "pattern": "^/memories/[A-Za-z0-9._/-]+$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"target": {"const": "copilot_instructions"}}
+          },
+          "then": {
+            "properties": {
+              "scope": {"const": "repository"},
+              "target_path": {"const": ".github/copilot-instructions.md"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"target": {"const": "file_instructions"}}},
+          "then": {
+            "properties": {
+              "scope": {"const": "repository"},
+              "target_path": {
+                "type": "string",
+                "pattern": "^\\.github/instructions/[A-Za-z0-9._-]+\\.instructions\\.md$"
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"target": {"const": "prompt"}}},
+          "then": {
+            "properties": {
+              "scope": {"const": "repository"},
+              "target_path": {
+                "type": "string",
+                "pattern": "^ai/prompts/[A-Za-z0-9._-]+\\.md$"
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"target": {"const": "ai_context"}}},
+          "then": {
+            "properties": {
+              "scope": {"const": "architecture"},
+              "target_path": {
+                "type": "string",
+                "pattern": "^ai/context/[A-Za-z0-9._/-]+\\.md$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "turn_index", "kind", "summary"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "turn_index": {"type": "integer", "minimum": 0},
+        "kind": {
+          "enum": [
+            "user_correction",
+            "successful_pattern",
+            "failed_attempt",
+            "validation_result",
+            "explicit_preference"
+          ]
+        },
+        "summary": {"type": "string", "minLength": 1, "maxLength": 240}
+      }
+    }
+  }
+}

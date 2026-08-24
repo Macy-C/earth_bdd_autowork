@@ -1,0 +1,94 @@
+log:
+  file: "logs.logs"
+  level: "INFO"
+  rotation: "20 MB"
+  retention: "3 days"
+
+#+++++++++++++++++++++++ local debug ++++++++++++++++++++++
+draw_outline_location: false # true / false  #元素高亮
+#更详细日志
+#失败截图
+#保留现场
+#慢执行
+#OCR 中间结果输出
+#可选录屏
+#打印窗口树 / root 信息
+#----------------------- local debug ----------------------
+
+RECORD_SETTING:
+  MODE: "failed"            # off / failed / all；failed 只保留失败前最近 BUFFER_SECONDS 秒
+  FPS: 5                    # ffmpeg 录屏帧率；建议 3~5
+  BUFFER_SECONDS: 8         # failed 模式保留最近多少秒
+  SEGMENT_SECONDS: 2        # failed 模式分片长度；越小越接近失败瞬间，但片段更多
+  MAX_WIDTH: 1280           # 视频最大宽度；0 表示保留原始分辨率
+  MONITOR_INDEX: 1          # 屏幕索引；1 通常是主屏幕
+  FFMPEG_PATH: ""           # 空值使用 resources/ffmpeg/current/bin/ffmpeg.exe
+  FFMPEG_PRESET: "ultrafast" # x264 preset；录屏优先低开销
+  FFMPEG_CRF: 28            # 数值越大文件越小，质量越低
+  FFMPEG_DRAW_MOUSE: true   # 是否录制鼠标指针
+
+RUN_INDICATOR_SETTING:
+  ENABLED: true             # UI Scenario 运行时显示紧凑、鼠标穿透的状态提示
+  MAX_SCENARIO_CHARS: 28    # 第二行场景名称的最大字符数，超出时显示省略号
+
+OCR_SETTING:
+  MODE: "accurate"             # fast / balanced / accurate；只给未显式配置的字段提供预设默认值
+  WARMUP: true                 # 启动时预加载 OCR 模型并跑一次小图识别
+  CACHE_TTL: 0.0               # 精确优先：关闭短时缓存，避免界面变化后复用旧 OCR 结果
+  DET_LIMIT_SIDE_LEN: 1600     # 精确优先：提高检测输入尺寸，小字/密集文字更稳，但会更慢
+  DET_LIMIT_TYPE: "max"
+  DET_BOX_THRESH: 0.6          # 精确优先：降低漏检概率；误检太多时可调回 0.7/0.8
+  DET_UNCLIP_RATIO: 1.6        # 检测框外扩比例；文字被截断时可调大，文字粘连时调小
+  RECOGNITION_BATCH_SIZE: 4    # 降低批量大小，牺牲吞吐换更稳的 CPU/内存占用
+  TIMEOUT: 10                  # OCR 动作默认等待时间；调用时传 timeout 会覆盖
+  INTERVAL: 0.5                # OCR 轮询间隔；越小越灵敏但 CPU 占用更高
+  MATCH_MODE: "smart"          # smart / contains / exact；locator 可覆盖
+  DEBUG_ON_FAIL: true          # OCR 失败时自动保存调试截图
+
+PIC_SETTING:
+  MODE: "accurate"             # fast / balanced / accurate；只给未显式配置的字段提供预设默认值
+  THRESHOLD: 0.7               # 图片匹配阈值，越高越严格
+  POS: 5                       # 命中模板上的目标点，1-9 九宫格，5 为中心
+  RGB: true                    # 是否进行颜色匹配
+  METHOD: ""   #mstpl          # 空值使用 Airtest 默认策略；可选 tpl/mstpl/gmstpl/kaze/brisk/akaze/orb/sift/surf/brief
+  TIMEOUT: 10                  # 图片识别默认等待时间；调用时传 timeout 会覆盖
+  INTERVAL: 0.3                # 图片识别轮询间隔；越小越灵敏但 CPU 占用更高
+  DEBUG_ON_FAIL: true          # 图片识别失败时自动保存调试截图
+  SCALE_MAX: 1000              # 多尺度匹配最大缩放范围，仅 mstpl/gmstpl 等多尺度策略明显相关
+  SCALE_STEP: 0.005            # 多尺度匹配步长，越小越细但更慢
+
+SPARK_REPORT: true # true / false  # 自定义 Spark 风格报告
+
+APP_LAUNCH_MODE: "attach"   # auto / attach  #启动方式
+APP_SETTING:   ### 应用配置
+ APP_PATH: ""   # 启动路径；runtime 调用 Bdd.application 的 start/stop Hook
+ BACKEND: "uia"   # uia / win32
+ PROCESS_TRACK_MODE: "snapshot" # snapshot 在首个 Step 前等待 1 秒后采样；也支持 root / none
+
+
+
+
+
+
+###  数据库
+# mysql_conn_config:
+#   host: "XXX"
+#   port: 3306
+#   user: "XXX"
+#   password: "XXX"
+#   charset: "utf8"
+
+# oracle_conn_config:
+#   host: "XXX"
+#   port: 1521
+#   user: "XXX"
+#   password: "XXX"
+#   service_name: "XXX"
+#   charset: "utf8"
+
+# postgresql_conn_config:
+#   host: "XXX"
+#   port: 5432
+#   user: "XXX"
+#   password: "XXX"
+#   database: "XXX"

@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bdd-autowork.local/ai/collaboration-promotion.schema.json",
+  "title": "BDD Autowork Collaboration Promotion Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "promotion_version",
+    "promotion_id",
+    "promoted_at",
+    "source_review",
+    "approved_candidate_ids",
+    "changes",
+    "withheld",
+    "validation",
+    "rollback"
+  ],
+  "properties": {
+    "promotion_version": {"const": "1.0"},
+    "promotion_id": {
+      "type": "string",
+      "pattern": "^collaboration-promotion-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+    },
+    "promoted_at": {"type": "string", "format": "date-time"},
+    "source_review": {
+      "type": "string",
+      "pattern": "^Bdd/ai/knowledge/collaboration-reviews/collaboration-review-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\\.json$"
+    },
+    "approved_candidate_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^candidate-"}
+    },
+    "changes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidate_id", "target", "path", "summary"],
+        "properties": {
+          "candidate_id": {"type": "string", "pattern": "^candidate-"},
+          "target": {
+            "enum": [
+              "user_memory",
+              "copilot_instructions",
+              "file_instructions",
+              "prompt",
+              "ai_context"
+            ]
+          },
+          "path": {"$ref": "#/$defs/persistentPath"},
+          "summary": {"type": "string", "minLength": 1, "maxLength": 300}
+        }
+      }
+    },
+    "withheld": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidate_id", "reason"],
+        "properties": {
+          "candidate_id": {"type": "string", "pattern": "^candidate-"},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 300}
+        }
+      }
+    },
+    "validation": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["check", "status"],
+        "properties": {
+          "check": {"type": "string", "minLength": 1, "maxLength": 300},
+          "status": {"const": "passed"},
+          "detail": {"type": ["string", "null"], "maxLength": 500}
+        }
+      }
+    },
+    "rollback": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidate_id", "path", "action"],
+        "properties": {
+          "candidate_id": {"type": "string", "pattern": "^candidate-"},
+          "path": {"$ref": "#/$defs/persistentPath"},
+          "action": {"type": "string", "minLength": 1, "maxLength": 300}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "persistentPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "anyOf": [
+        {"pattern": "^/memories/[A-Za-z0-9._/-]+$"},
+        {"pattern": "^(?:\\.github|ai)/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"}
+      ]
+    }
+  }
+}

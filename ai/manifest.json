@@ -1,0 +1,123 @@
+{
+  "ai_asset_pack_version": "1.10",
+  "project_assets_root": "Bdd/ai",
+  "context": [
+    "context/project.md",
+    "context/continuity.md",
+    "context/portable-knowledge.schema.json",
+    "context/shadow-companion-policy.json",
+    "context/collaboration-review.schema.json",
+    "context/collaboration-promotion.schema.json"
+  ],
+  "prompts": [
+    "prompts/recorder-generate.md",
+    "prompts/recorder-adjust.md",
+    "prompts/collaboration-review.md",
+    "prompts/collaboration-promote.md"
+  ],
+  "instructions": [
+    "instructions/bdd-generation.md"
+  ],
+  "knowledge": {
+    "path": "knowledge",
+    "knowledge_store_version": "1.0",
+    "contains_raw_runtime_evidence": false,
+    "quarantine_path": "knowledge/quarantine",
+    "quarantine_in_portable_export": false,
+    "maintenance_requires_user_confirmation": true
+  },
+  "portable_knowledge": {
+    "attributes": ".gitattributes",
+    "path": "portable-knowledge",
+    "records_path": "portable-knowledge/records",
+    "schema": "context/portable-knowledge.schema.json",
+    "source": "knowledge/capabilities",
+    "version": "1.0",
+    "automatic_publish": false,
+    "default_context_injection": false,
+    "automatic_stage": false,
+    "automatic_commit": false,
+    "automatic_push": false,
+    "sync_requires_user_confirmation": true,
+    "query_max_items": 6,
+    "query_max_bytes": 8192
+  },
+  "discovery_adapters": [
+    ".github/copilot-instructions.md",
+    ".github/prompts/recorder-generate.prompt.md",
+    ".github/prompts/recorder-adjust.prompt.md",
+    ".github/prompts/collaboration-review.prompt.md",
+    ".github/prompts/collaboration-promote.prompt.md",
+    ".github/hooks/shadow-companion.json",
+    ".github/instructions/bdd-generation.instructions.md"
+  ],
+  "collaboration_learning": {
+    "review_schema": "context/collaboration-review.schema.json",
+    "promotion_schema": "context/collaboration-promotion.schema.json",
+    "runtime_reviews": "knowledge/collaboration-reviews",
+    "runtime_promotions": "knowledge/collaboration-promotions",
+    "operator_scope": "framework_maintainers",
+    "manual_review": true,
+    "manual_promotion": true,
+    "automatic_due_reminder": false,
+    "automatic_review": false,
+    "automatic_promotion": false,
+    "automatic_rule_mutation": false
+  },
+  "shadow_companion": {
+    "version": "1.0",
+    "policy": "context/shadow-companion-policy.json",
+    "runtime_store": "knowledge/shadow-companion",
+    "session_start_hook": ".github/hooks/shadow-companion.json",
+    "session_start_hook_windows_wrapper": ".github/hooks/scripts/shadow-companion.ps1",
+    "enabled": true,
+    "scope": "project_engineering_work",
+    "task_confirmation_required": false,
+    "write_mode": "semantic_milestone_only",
+    "session_start_detection": true,
+    "default_context_injection": "validated_pointer_only",
+    "local_only": true,
+    "advisory_only": true,
+    "restrict_search": false,
+    "restrict_file_reads": false,
+    "skip_tests": false,
+    "select_final_validation": false,
+    "mutate_instructions": false,
+    "mutate_source": false,
+    "record_source_content": false,
+    "record_terminal_output": false,
+    "automatic_git_operations": false,
+    "single_active_capsule": true,
+    "max_recent": 3,
+    "full_fallback": true
+  },
+  "project_context_hygiene": {
+    "mode": "reversible_advisory",
+    "scope": "project_engineering_work",
+    "semantic_milestones": true,
+    "automatic_context_discard": false,
+    "automatic_session_switch": false,
+    "fixed_budget_cutoff": false,
+    "persistent_runtime_state": false,
+    "raw_output_reference_required": true,
+    "capability_restrictions": false,
+    "full_fallback": true
+  },
+  "adaptive_work_loop": {
+    "enabled": true,
+    "mode": "adaptive_advisory",
+    "scope": "recorder_maintenance",
+    "milestone_driven": true,
+    "persistent_runtime_state": false,
+    "fixed_turn_or_tool_cutoff": false,
+    "restrict_search": false,
+    "restrict_file_reads": false,
+    "skip_tests": false,
+    "reuse_stale_validation": false,
+    "allow_validation_escalation": true,
+    "raw_output_in_default_context": false,
+    "shadow_handoff_optional": true,
+    "full_fallback": true
+  },
+  "temporary_run_workspace": "artifacts/recording_sessions/<run>/ai"
+}

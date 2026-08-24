@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python3 -B -m autowork_core.utils.debug_tools.shadow_companion session-start --project-root .",
+        "windows": "& .github/hooks/scripts/shadow-companion.ps1",
+        "linux": "python3 -B -m autowork_core.utils.debug_tools.shadow_companion session-start --project-root .",
+        "osx": "python3 -B -m autowork_core.utils.debug_tools.shadow_companion session-start --project-root .",
+        "cwd": ".",
+        "timeout": 5
+      }
+    ]
+  }
+}

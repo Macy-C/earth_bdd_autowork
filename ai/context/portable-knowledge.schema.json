@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bdd-autowork.local/ai/portable-knowledge.schema.json",
+  "title": "BDD Autowork Portable Knowledge Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "portable_knowledge_version",
+    "record_id",
+    "authority",
+    "kind",
+    "content_trust",
+    "instruction_authority",
+    "provenance",
+    "target",
+    "implementation",
+    "applicability",
+    "content_hash"
+  ],
+  "properties": {
+    "portable_knowledge_version": {
+      "const": "1.0"
+    },
+    "record_id": {
+      "type": "string",
+      "pattern": "^portable-knowledge-[0-9a-f]{32}$"
+    },
+    "authority": {
+      "const": "user_confirmed"
+    },
+    "kind": {
+      "const": "confirmed_capability"
+    },
+    "content_trust": {
+      "const": "untrusted_data"
+    },
+    "instruction_authority": {
+      "const": false
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_capability_id",
+        "source_capability_sha256",
+        "confirmation_source",
+        "plan_fingerprint",
+        "revision_seal"
+      ],
+      "properties": {
+        "source_capability_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "source_capability_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "confirmation_source": {
+          "const": "user_adjustment"
+        },
+        "plan_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "revision_seal": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "feature_id",
+        "feature_path",
+        "feature_name",
+        "scenario_id",
+        "scenario_name",
+        "step_id",
+        "step_keyword",
+        "step_text",
+        "example_columns",
+        "target_fingerprint"
+      ],
+      "properties": {
+        "feature_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "feature_path": {
+          "type": "string",
+          "maxLength": 300,
+          "pattern": "^Bdd/(?:features|test_features)/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n/][^\\r\\n]*$"
+        },
+        "feature_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 240
+        },
+        "scenario_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 240
+        },
+        "scenario_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 240
+        },
+        "step_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "step_keyword": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 40
+        },
+        "step_text": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "example_columns": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,160}$"
+          }
+        },
+        "target_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "behavior_owner",
+        "behavior_file",
+        "page_object",
+        "locator_file",
+        "data_file",
+        "operations"
+      ],
+      "properties": {
+        "behavior_owner": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 160
+        },
+        "behavior_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 300,
+          "pattern": "^Bdd/(?:steps|page_obj|locators|data)/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n/][^\\r\\n]*$"
+        },
+        "page_object": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 300,
+          "pattern": "^Bdd/(?:steps|page_obj|locators|data)/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n/][^\\r\\n]*$"
+        },
+        "locator_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 300,
+          "pattern": "^Bdd/(?:steps|page_obj|locators|data)/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n/][^\\r\\n]*$"
+        },
+        "data_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 300,
+          "pattern": "^Bdd/(?:steps|page_obj|locators|data)/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\r\\n/][^\\r\\n]*$"
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "target",
+              "source"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._:-]{1,160}$"
+              },
+              "target": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 160
+              },
+              "source": {
+                "type": "string",
+                "maxLength": 180,
+                "anyOf": [
+                  {
+                    "enum": [
+                      "literal",
+                      "observation",
+                      "observed",
+                      "step_text",
+                      "text_block",
+                      "unspecified"
+                    ]
+                  },
+                  {
+                    "pattern": "^(?:examples|data|context|table)\\.[A-Za-z0-9._:-]{1,160}$"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "applicability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "advisory_only",
+        "requires_current_code_validation",
+        "reopen_when"
+      ],
+      "properties": {
+        "advisory_only": {
+          "const": true
+        },
+        "requires_current_code_validation": {
+          "const": true
+        },
+        "reopen_when": {
+          "const": [
+            "current_code_or_locator_hash_changes",
+            "feature_scenario_or_step_identity_changes",
+            "framework_generation_contract_changes",
+            "current_evidence_or_user_instruction_conflicts"
+          ]
+        }
+      }
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

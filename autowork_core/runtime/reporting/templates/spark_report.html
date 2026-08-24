@@ -1,0 +1,2456 @@
+<!doctype html>
+<!-- Spark 测试报告模板；Template for the Spark-style test report. -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BDD Autowork Report</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --line: #dde2e8;
+      --text: #1f2933;
+      --muted: #687385;
+      --nav: #1f2329;
+      --nav2: #292f37;
+      --pass: #1e9b64;
+      --fail: #d14343;
+      --skip: #b7791f;
+      --info: #1b72c9;
+      --unknown: #737b88;
+      --shadow: 0 10px 26px rgba(31, 35, 41, 0.08);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .sidebar {
+      background: var(--nav);
+      color: #eef2f7;
+      padding: 20px 16px;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 22px;
+      padding: 6px 4px;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #1e9b64, #1b72c9);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+    }
+
+    .brand-title {
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .brand-subtitle {
+      color: #aab4c2;
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    .nav-section {
+      color: #8f9aaa;
+      font-size: 11px;
+      text-transform: uppercase;
+      margin: 20px 8px 8px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #d8dee8;
+      padding: 9px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 13px;
+    }
+
+    .nav-item:hover,
+    .nav-item.active {
+      background: var(--nav2);
+      color: #ffffff;
+    }
+
+    .nav-count {
+      min-width: 22px;
+      height: 20px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.1);
+      color: #dce3ee;
+      font-size: 11px;
+    }
+
+    .feature-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .feature-item {
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .feature-main {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .feature-name {
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .feature-meta {
+      color: #9ba6b5;
+      font-size: 11px;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+
+    .feature-badges {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      margin-top: 7px;
+    }
+
+    .mini-count {
+      height: 18px;
+      min-width: 18px;
+      padding: 0 6px;
+      border-radius: 9px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .mini-pass { color: #9be2be; }
+    .mini-fail { color: #ffb4b4; }
+    .mini-skip { color: #ffd58d; }
+
+    .content {
+      padding: 22px 26px 36px;
+      min-width: 0;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      font-size: 24px;
+      margin: 0 0 6px;
+      letter-spacing: 0;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .search {
+      min-width: 260px;
+      height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 10px;
+      background: #ffffff;
+      color: var(--text);
+      font-size: 13px;
+    }
+
+    .segmented {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #ffffff;
+    }
+
+    .segmented button {
+      border: 0;
+      background: transparent;
+      padding: 9px 12px;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .segmented button.active {
+      background: #edf2f7;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(140px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .metric {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    .metric-value {
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .metric.pass .metric-value { color: var(--pass); }
+    .metric.fail .metric-value { color: var(--fail); }
+    .metric.skip .metric-value { color: var(--skip); }
+    .metric.info .metric-value { color: var(--info); }
+
+    .main-grid {
+      display: grid;
+      grid-template-columns: minmax(360px, 1.05fr) minmax(420px, 1.35fr);
+      gap: 16px;
+      align-items: start;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      min-width: 0;
+    }
+
+    .panel-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .panel-title {
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .panel-body {
+      padding: 14px 16px;
+    }
+
+    .main-grid > .panel {
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .main-grid > .panel .panel-body {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    #detailBody {
+      overflow: auto;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 11px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .status-pass { background: rgba(30, 155, 100, 0.12); color: var(--pass); }
+    .status-fail { background: rgba(209, 67, 67, 0.12); color: var(--fail); }
+    .status-skip { background: rgba(183, 121, 31, 0.14); color: var(--skip); }
+    .status-unknown { background: rgba(115, 123, 136, 0.14); color: var(--unknown); }
+
+    .scenario-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      height: 100%;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .scenario-card {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 12px;
+      cursor: pointer;
+      background: #ffffff;
+      position: relative;
+      transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
+    }
+
+    .scenario-card.outline-row {
+      border-left: 4px solid var(--info);
+      background: #f7fbff;
+      box-shadow: inset 0 0 0 1px rgba(27, 114, 201, 0.08);
+    }
+
+    .scenario-card.example-row {
+      margin-left: 34px;
+      position: relative;
+      background: #fcfdff;
+      border-color: #cfdae6;
+    }
+
+    .scenario-card.example-row::before {
+      content: "";
+      position: absolute;
+      left: -15px;
+      top: -9px;
+      width: 18px;
+      height: calc(50% + 9px);
+      border-left: 2px solid #c9d6e2;
+      border-bottom: 2px solid #c9d6e2;
+      border-bottom-left-radius: 6px;
+    }
+
+    .outline-summary {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .outline-toggle {
+      display: inline-grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      margin-right: 6px;
+      background: #e9f1fb;
+      color: var(--info);
+      font-size: 10px;
+      font-weight: 900;
+      vertical-align: 1px;
+    }
+
+    .scenario-error {
+      margin-top: 9px;
+      border-left: 3px solid var(--fail);
+      background: #fff5f5;
+      color: #8f2f2f;
+      border-radius: 5px;
+      padding: 7px 9px;
+      font-size: 12px;
+      line-height: 1.45;
+      display: -webkit-box;
+      line-clamp: 2;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .scenario-card:hover {
+      border-color: #9bb7d4;
+      background: #f8fbff;
+    }
+
+    .scenario-card.active {
+      border-color: var(--info);
+      background: #eef6ff;
+      box-shadow: 0 0 0 2px rgba(27, 114, 201, 0.18), 0 10px 20px rgba(27, 114, 201, 0.12);
+    }
+
+    .scenario-card.active::after {
+      content: "";
+      position: absolute;
+      left: -1px;
+      top: 8px;
+      bottom: 8px;
+      width: 4px;
+      border-radius: 0 3px 3px 0;
+      background: var(--info);
+    }
+
+    .scenario-card.example-row.active::before {
+      border-left-color: var(--info);
+      border-bottom-color: var(--info);
+    }
+
+    .scenario-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+
+    .scenario-name {
+      font-weight: 700;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .scenario-path {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .scenario-type {
+      display: inline-flex;
+      align-items: center;
+      height: 20px;
+      padding: 0 7px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      background: #edf2f7;
+      color: #536173;
+      margin-right: 6px;
+    }
+
+    .example-params {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .param-chip {
+      border: 1px solid #d3dce6;
+      background: #fbfcfd;
+      border-radius: 10px;
+      padding: 2px 7px;
+      font-size: 11px;
+      color: #536173;
+    }
+
+    .scenario-tags {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }
+
+    .tag {
+      border: 1px solid var(--line);
+      background: #f7f9fb;
+      color: #536173;
+      border-radius: 11px;
+      padding: 2px 8px;
+      font-size: 11px;
+    }
+
+    .detail-title-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+
+    .detail-title {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.35;
+    }
+
+    .detail-subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 5px;
+    }
+
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin: 14px 0;
+    }
+
+    .fact {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 9px;
+      background: #fbfcfd;
+    }
+
+    .fact-label {
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 5px;
+    }
+
+    .fact-value {
+      font-size: 13px;
+      font-weight: 600;
+      overflow-wrap: anywhere;
+    }
+
+    .step-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .step {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      overflow: hidden;
+      background: #ffffff;
+    }
+
+    .step-main {
+      display: grid;
+      grid-template-columns: 26px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+    }
+
+    .step-index {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #edf2f7;
+      display: grid;
+      place-items: center;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .bdd-keyword {
+      display: inline-flex;
+      height: 20px;
+      align-items: center;
+      padding: 0 7px;
+      border-radius: 10px;
+      background: #e9f1fb;
+      color: #275f9b;
+      font-size: 11px;
+      font-weight: 800;
+      margin-right: 7px;
+    }
+
+    .action-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    .action-row {
+      display: grid;
+      grid-template-columns: 90px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 8px;
+      background: #ffffff;
+      font-size: 12px;
+    }
+
+    .action-name {
+      font-weight: 700;
+      color: #364152;
+    }
+
+    .action-target {
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
+    .examples-table-wrap {
+      margin: 12px 0;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      overflow: hidden;
+      background: #ffffff;
+    }
+
+    .examples-table-title {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      font-weight: 800;
+      color: #364152;
+      background: #fbfcfd;
+    }
+
+    .examples-table-scroll {
+      overflow: auto;
+      max-height: 220px;
+    }
+
+    .examples-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      min-width: 360px;
+    }
+
+    .examples-table th,
+    .examples-table td {
+      border-bottom: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .examples-table th {
+      background: #f4f7fa;
+      color: #536173;
+      font-weight: 800;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    .examples-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .examples-table tbody tr {
+      cursor: pointer;
+    }
+
+    .examples-table tbody tr:hover {
+      background: #f0f7ff;
+    }
+
+    .step-name {
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.45;
+    }
+
+    .step-meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 3px;
+    }
+
+    .step-extra {
+      border-top: 1px solid var(--line);
+      padding: 10px 12px;
+      background: #fbfcfd;
+      display: none;
+    }
+
+    .step.failed .step-extra,
+    .step.has-extra.open .step-extra {
+      display: block;
+    }
+
+    .error-box {
+      border-left: 4px solid var(--fail);
+      background: #fff5f5;
+      color: #8f2f2f;
+      padding: 10px;
+      border-radius: 6px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      overflow: auto;
+      max-height: 180px;
+    }
+
+    .error-detail {
+      margin-top: 10px;
+      border: 1px solid #f0c7c7;
+      border-radius: 7px;
+      overflow: hidden;
+      background: #fffafa;
+    }
+
+    .error-detail summary {
+      cursor: pointer;
+      padding: 9px 11px;
+      color: #8f2f2f;
+      font-weight: 700;
+      font-size: 12px;
+      user-select: none;
+    }
+
+    .error-detail pre {
+      margin: 0;
+      border-top: 1px solid #f0c7c7;
+      padding: 10px 12px;
+      background: #fff5f5;
+      color: #7a2525;
+      max-height: 280px;
+      overflow: auto;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+
+    .attachment-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .attachment {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      max-width: 100%;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+
+    .attachment-type {
+      display: inline-flex;
+      align-items: center;
+      height: 20px;
+      padding: 0 7px;
+      border-radius: 10px;
+      background: #edf2f7;
+      color: #536173;
+      font-size: 11px;
+      font-weight: 800;
+      flex: 0 0 auto;
+      text-transform: uppercase;
+    }
+
+    .attachment-main {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .attachment-source {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .attachment a {
+      color: var(--info);
+      text-decoration: none;
+      overflow-wrap: anywhere;
+    }
+
+    .empty {
+      border: 1px dashed var(--line);
+      border-radius: 7px;
+      padding: 18px;
+      color: var(--muted);
+      text-align: center;
+      background: #fbfcfd;
+    }
+
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .sidebar .brand {
+      flex: 0 0 auto;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 18px;
+      margin-bottom: 10px;
+    }
+
+    button.nav-item {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      text-align: left;
+      font-family: inherit;
+    }
+
+    button.nav-item.active {
+      background: var(--nav2);
+      color: #ffffff;
+      box-shadow: inset 3px 0 0 var(--pass);
+    }
+
+    .nav-symbol {
+      width: 22px;
+      height: 22px;
+      border: 1px solid currentColor;
+      border-radius: 5px;
+      display: inline-grid;
+      place-items: center;
+      margin-right: 9px;
+      font-size: 9px;
+      font-weight: 800;
+    }
+
+    .sidebar-run {
+      margin-top: auto;
+      padding: 12px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 7px;
+      color: #9ba6b5;
+      font-size: 10px;
+      line-height: 1.55;
+    }
+
+    .sidebar-run strong {
+      display: block;
+      color: #e5ebf2;
+      font-size: 11px;
+      margin-bottom: 2px;
+    }
+
+    .report-view {
+      display: none;
+      flex: 1;
+      min-height: 0;
+      flex-direction: column;
+    }
+
+    .report-view.active { display: flex; }
+    #overviewView { overflow-y: auto; padding-right: 2px; }
+
+    .overview-topbar,
+    .detail-topbar { min-height: 48px; margin-bottom: 10px; flex: 0 0 auto; }
+    .overview-topbar { align-items: center; }
+    .overview-topbar h1,
+    .detail-topbar h1 { font-size: 22px; }
+    .overview-kicker { margin-bottom: 4px; color: #356f82; font-size: 8px; font-weight: 800; text-transform: uppercase; }
+
+    .overview-summary-line { display: flex; align-items: stretch; border-left: 1px solid var(--line); color: var(--muted); }
+    .overview-summary-item { display: grid; min-width: 66px; min-height: 42px; align-content: center; gap: 2px; border-right: 1px solid var(--line); padding: 0 11px; font-size: 8px; }
+    .overview-summary-item strong { color: var(--text); font-size: 14px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .overview-summary-item:nth-child(4) strong { color: var(--pass); }
+    .overview-summary-item:nth-child(5) strong { color: var(--fail); }
+    .overview-summary-item:nth-child(6) strong { color: var(--unknown); }
+    .overview-summary-item:nth-child(7) strong { color: var(--skip); }
+
+    .overview-execution-toolbar { display: flex; min-height: 55px; align-items: center; justify-content: space-between; gap: 18px; border-block: 1px solid var(--line); padding: 8px 0; flex: 0 0 auto; }
+    .execution-toolbar-title { font-size: 13px; font-weight: 800; }
+    .execution-toolbar-subtitle { margin-top: 3px; color: var(--muted); font-size: 9px; }
+    .execution-toolbar-actions { display: flex; align-items: center; gap: 8px; }
+    .execution-search { width: 220px; height: 31px; border: 1px solid var(--line); border-radius: 4px; outline: 0; padding: 0 10px; color: var(--text); background: #ffffff; font-size: 10px; }
+    .execution-search:focus { border-color: #82a8b3; box-shadow: 0 0 0 2px rgba(53, 111, 130, 0.1); }
+    .execution-collapse-all { min-height: 31px; border: 1px solid var(--line); border-radius: 4px; padding: 0 9px; color: var(--muted); background: #ffffff; font-family: inherit; font-size: 9px; cursor: pointer; }
+
+    .feature-execution-panel { display: flex; flex: 1; min-height: 460px; flex-direction: column; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: #f8faf8; box-shadow: var(--shadow); }
+    .execution-filterbar { display: flex; min-height: 45px; align-items: center; gap: 6px; overflow-x: auto; border-bottom: 1px solid var(--line); padding: 0 12px; background: #f8faf8; flex: 0 0 auto; }
+    .execution-filter-label { margin-right: 4px; color: var(--muted); font-size: 8px; font-weight: 800; text-transform: uppercase; }
+    .execution-status-filter { display: inline-flex; min-height: 26px; align-items: center; gap: 6px; border: 1px solid transparent; border-radius: 3px; padding: 0 8px; color: var(--muted); background: transparent; font-family: inherit; font-size: 8px; white-space: nowrap; cursor: pointer; }
+    .execution-status-filter::before { content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--execution-color); }
+    .execution-status-filter.active { border-color: var(--line); color: var(--text); background: #ffffff; box-shadow: 0 1px 4px rgba(31, 45, 40, 0.07); }
+    .execution-filter-spacer { flex: 1; }
+    .execution-unit-note { color: var(--muted); font-size: 8px; white-space: nowrap; }
+    .execution-scroller { flex: 1; min-height: 0; overflow: auto; scrollbar-color: #b8c2bd #edf1ee; scrollbar-width: thin; }
+    .feature-execution-tree { min-width: 920px; }
+    .execution-column-header,
+    .feature-tree-row,
+    .scenario-execution-row { display: grid; grid-template-columns: 28px 72px minmax(320px, 1fr) 82px 72px 76px 28px; align-items: center; gap: 10px; }
+    .execution-column-header > :first-child,
+    .feature-tree-row > :first-child,
+    .scenario-execution-row > :first-child { justify-self: center; }
+    .execution-column-header { position: sticky; z-index: 10; top: 0; min-height: 40px; border-bottom: 1px solid #c9d1cd; padding: 0 25px 0 27px; color: var(--muted); background: #f7f9f7; font-size: 8px; font-weight: 800; text-transform: uppercase; }
+    .feature-execution-group { content-visibility: auto; contain-intrinsic-size: auto 250px; margin: 10px 10px 0; border: 1px solid #c9d1cd; border-left: 3px solid var(--feature-accent); border-radius: 5px; background: #ffffff; box-shadow: 0 5px 15px rgba(28, 47, 41, 0.045); }
+    .feature-execution-group:last-child { margin-bottom: 10px; }
+    .feature-tree-row { width: 100%; min-height: 62px; border: 0; border-bottom: 1px solid var(--line); border-radius: 4px 4px 0 0; padding: 7px 14px; color: var(--text); background: linear-gradient(90deg, color-mix(in srgb, var(--feature-accent) 8%, #f4f7f5), #f4f7f5 42%); font-family: inherit; text-align: left; cursor: pointer; }
+    .feature-tree-row:hover { background: linear-gradient(90deg, color-mix(in srgb, var(--feature-accent) 12%, #f0f5f2), #f0f5f2 42%); }
+    .feature-tree-row[aria-disabled="true"] { cursor: default; }
+    .feature-primary-status { width: 8px; height: 30px; border-radius: 2px; background: var(--feature-accent); }
+    .feature-tree-code { display: flex; align-items: center; gap: 7px; }
+    .feature-tree-chevron { display: grid; width: 19px; height: 19px; flex: 0 0 auto; place-items: center; border: 1px solid #c9d1cd; border-radius: 3px; color: #356f82; background: rgba(255,255,255,.8); font-size: 8px; transition: transform .12s ease; }
+    .feature-execution-group.collapsed .feature-tree-chevron { transform: rotate(-90deg); }
+    .feature-state-badge { position: relative; display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 50%; background: var(--feature-ring); box-shadow: 0 0 0 1px rgba(31,55,49,.12); }
+    .feature-state-badge::before { content: ""; position: absolute; inset: 5px; border-radius: 50%; background: #f9fbf9; }
+    .feature-state-badge span { position: relative; z-index: 1; color: #31575d; font-size: 8px; font-weight: 850; }
+    .feature-tree-copy { min-width: 0; }
+    .feature-tree-name { display: block; overflow: hidden; font-size: 12px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+    .feature-tree-path { display: block; margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+    .feature-result-cell { display: grid; align-content: center; gap: 2px; }
+    .feature-result-cell strong { color: var(--text); font-size: 10px; }
+    .feature-result-cell small { color: var(--muted); font-size: 7px; }
+    .feature-total-duration, .feature-failed-steps { color: var(--muted); font-size: 8px; font-variant-numeric: tabular-nums; }
+    .feature-failed-steps strong { color: var(--fail); font-size: 10px; }
+    .feature-execution-group.collapsed .scenario-execution-list { display: none; }
+    .scenario-execution-list { position: relative; }
+    .scenario-execution-list::before { content: ""; position: absolute; z-index: 1; top: 22px; bottom: 22px; left: 19px; width: 1px; background: #cad4cf; }
+    .scenario-execution-row { width: 100%; min-height: 64px; border: 0; border-bottom: 1px solid #edf0ee; padding: 0 14px; color: var(--text); background: #ffffff; font-family: inherit; text-align: left; cursor: pointer; }
+    .scenario-execution-row:hover { background: #f4f8f6; }
+    .scenario-execution-row.active { background: #edf5f2; box-shadow: inset 3px 0 0 #356f82; }
+    .scenario-status-mark { position: relative; z-index: 2; width: 10px; height: 10px; border: 2px solid #ffffff; border-radius: 2px; background: var(--execution-color); box-shadow: 0 0 0 1px #aebdb7; }
+    .scenario-execution-code { color: #356f82; font-size: 9px; font-weight: 800; }
+    .scenario-execution-type { display: block; margin-top: 3px; color: var(--muted); font-size: 7px; font-weight: 500; text-transform: uppercase; }
+    .scenario-execution-name { display: -webkit-box; overflow: hidden; font-size: 11px; font-weight: 750; line-height: 1.35; line-clamp: 2; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .scenario-result-label { display: inline-flex; width: fit-content; min-height: 23px; align-items: center; border-radius: 3px; padding: 0 7px; color: var(--execution-color); background: color-mix(in srgb, var(--execution-color) 11%, white); font-size: 8px; font-weight: 800; }
+    .scenario-duration, .scenario-failed-steps { color: var(--muted); font-size: 8px; font-variant-numeric: tabular-nums; }
+    .scenario-failed-steps strong { color: var(--fail); font-size: 9px; }
+    .execution-row-arrow { color: #9aa5a6; font-size: 13px; text-align: right; }
+    .execution-footer { display: flex; min-height: 32px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 0 12px; color: var(--muted); background: #f8faf8; font-size: 8px; }
+    .execution-legend { display: flex; gap: 12px; }
+    .execution-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .execution-legend i { width: 7px; height: 7px; border-radius: 2px; background: var(--execution-color); }
+    .execution-tooltip { position: fixed; z-index: 40; display: none; max-width: 360px; border: 1px solid #c9d1cd; border-radius: 4px; padding: 8px 9px; color: var(--text); background: rgba(255,255,255,.98); box-shadow: 0 10px 28px rgba(24,45,39,.14); font-size: 9px; line-height: 1.5; pointer-events: none; }
+    .execution-empty { display: grid; min-height: 240px; place-items: center; color: var(--muted); font-size: 10px; }
+
+    .detail-workspace {
+      display: grid;
+      grid-template-columns: minmax(280px, 0.72fr) minmax(520px, 1.7fr);
+      gap: 12px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .detail-workspace > .panel {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 0;
+    }
+
+    .detail-workspace > .panel > .panel-body {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .detail-workspace .scenario-list,
+    #detailBody { overflow: auto; }
+
+    .detail-heading { display: flex; align-items: flex-start; gap: 12px; }
+    .detail-heading h1 { margin-bottom: 3px; }
+    .detail-feature-select { width: min(300px, 34vw); height: 34px; border: 1px solid var(--line); border-radius: 5px; outline: 0; padding: 0 30px 0 9px; color: var(--text); background: #ffffff; font-family: inherit; font-size: 11px; }
+    .detail-feature-select:focus { border-color: #82a8b3; box-shadow: 0 0 0 2px rgba(53, 111, 130, 0.1); }
+    .scenario-panel-actions { display: flex; align-items: center; gap: 7px; }
+    .scenario-drawer-toggle { display: none; min-height: 28px; border: 1px solid var(--line); border-radius: 4px; padding: 0 8px; color: var(--text); background: #ffffff; font-family: inherit; font-size: 10px; cursor: pointer; }
+
+    .scenario-list { gap: 0; padding-right: 0; }
+    .scenario-card { min-height: 46px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 8px 10px; }
+    .scenario-card:hover { border-color: var(--line); background: #f6f9f7; }
+    .scenario-card.active { border-color: var(--line); background: #eef5f3; box-shadow: inset 3px 0 0 #356f82; }
+    .scenario-card.active::after { display: none; }
+    .scenario-card.outline-row { border-left: 0; background: #f7f9f8; box-shadow: none; }
+    .scenario-card.example-row { margin-left: 20px; border-color: var(--line); background: #fcfdfc; }
+    .scenario-card.example-row::before { left: -12px; width: 12px; border-color: #c9d1cd; }
+    .scenario-head { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-bottom: 0; }
+    .scenario-code { color: #356f82; font-size: 9px; font-weight: 850; font-variant-numeric: tabular-nums; }
+    .scenario-copy { min-width: 0; }
+    .scenario-name { overflow: hidden; font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+    .scenario-subline { margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+    .scenario-path { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .scenario-type { height: 18px; border-radius: 3px; padding: 0 5px; font-size: 9px; }
+    .scenario-tags { margin-top: 5px; }
+    .tag, .param-chip { border-radius: 3px; font-size: 9px; }
+    .scenario-error { margin-top: 4px; border-left: 0; border-radius: 3px; padding: 0 0 0 46px; background: transparent; font-size: 9px; line-clamp: 1; -webkit-line-clamp: 1; }
+
+    .step-list { position: relative; gap: 0; margin: 16px 0 0 12px; border-left: 1px solid #c9d1cd; }
+    .step { position: relative; margin-left: 15px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; overflow: visible; }
+    .step:last-child { border-bottom: 0; }
+    .step::before { content: ""; position: absolute; z-index: 2; top: 17px; left: -20px; width: 8px; height: 8px; border: 2px solid #ffffff; border-radius: 2px; background: var(--unknown); box-shadow: 0 0 0 1px #c9d1cd; }
+    .step.passed::before { background: var(--pass); }
+    .step.failed::before { background: var(--fail); }
+    .step.skipped::before { background: var(--skip); }
+    .step-main { grid-template-columns: 24px 1fr auto; min-height: 43px; gap: 9px; padding: 8px 9px; }
+    .step-index { width: 20px; height: 20px; border-radius: 3px; font-size: 9px; }
+    .bdd-keyword { min-width: 42px; height: 18px; justify-content: center; border-radius: 3px; padding: 0 5px; font-size: 9px; }
+    .step-name { font-size: 12px; }
+    .step-meta { margin-top: 2px; font-size: 10px; }
+    .step-extra { border-top: 1px solid var(--line); padding: 10px; background: #f9faf9; }
+    .step-extra .facts { margin: 0 0 10px; }
+
+    .scenario-evidence-summary { margin: 12px 0; border-left: 3px solid var(--fail); padding: 9px 11px; color: #8f2f2f; background: #fff5f5; font-size: 11px; line-height: 1.45; }
+    .evidence-section { margin: 14px 0; border-block: 1px solid var(--line); padding: 11px 0 12px; }
+    .evidence-section-title { color: var(--text); font-size: 11px; font-weight: 800; }
+    .evidence-section-note { margin-top: 3px; color: var(--muted); font-size: 9px; }
+    .evidence-section .attachment-grid { margin-top: 9px; }
+
+    .detail-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .detail-panel-heading,
+    .detail-panel-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .detail-position {
+      color: var(--muted);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .detail-nav-button {
+      display: inline-grid;
+      width: 28px;
+      height: 28px;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--text);
+      background: #ffffff;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .detail-nav-button.attention {
+      width: auto;
+      padding: 0 8px;
+      color: var(--fail);
+      font-size: 10px;
+    }
+
+    .detail-nav-button:disabled {
+      cursor: default;
+      opacity: 0.42;
+    }
+
+    .back-button {
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 11px;
+      color: var(--text);
+      background: #ffffff;
+      font-family: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    @media (max-width: 1100px) {
+      .shell { grid-template-columns: 72px 1fr; }
+      .sidebar { padding: 16px 9px; }
+      .brand { justify-content: center; padding: 0 0 14px; }
+      .brand > div:last-child,
+      .nav-section,
+      button.nav-item > span:not(.nav-symbol),
+      .sidebar-run { display: none; }
+      button.nav-item { justify-content: center; padding: 8px 0; }
+      .nav-symbol { margin-right: 0; }
+      .detail-workspace { grid-template-columns: minmax(250px, 0.65fr) minmax(420px, 1.35fr); }
+      .summary-grid { grid-template-columns: repeat(2, 1fr); }
+      .topbar { flex-direction: column; }
+      .toolbar { justify-content: flex-start; }
+      .search { min-width: min(100%, 320px); }
+    }
+
+    @media (max-width: 760px) {
+      html,
+      body { height: auto; overflow: auto; }
+      .shell { display: block; height: auto; }
+      .sidebar { position: static; height: auto; flex-direction: row; align-items: center; gap: 5px; padding: 8px 12px; }
+      .sidebar .brand { border: 0; margin: 0 auto 0 0; padding: 0; }
+      .sidebar .brand-mark { width: 30px; height: 30px; }
+      button.nav-item > span:not(.nav-symbol) { display: inline; }
+      button.nav-item { gap: 7px; padding: 8px 9px; }
+      .content { height: auto; min-height: calc(100vh - 46px); overflow: visible; }
+      .report-view { overflow: visible; }
+      .detail-workspace { grid-template-columns: 1fr; }
+      .overview-summary-line { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; padding-block: 6px; }
+      .overview-summary-item { display: grid; min-height: 42px; place-content: center; gap: 1px; padding: 3px 5px; text-align: center; }
+      .overview-summary-item:first-child { padding-left: 5px; }
+      .overview-summary-item:nth-child(4),
+      .overview-summary-item:nth-child(7) { border-left: 0; }
+      .overview-summary-item strong { font-size: 14px; }
+      .overview-topbar { align-items: stretch; }
+      .overview-summary-line { overflow-x: auto; }
+      .overview-execution-toolbar { align-items: flex-start; flex-direction: column; }
+      .execution-toolbar-actions { width: 100%; overflow-x: auto; }
+      .feature-execution-tree { min-width: 870px; }
+      .detail-topbar { gap: 10px; }
+      .detail-heading { width: 100%; }
+      .detail-actions { width: 100%; justify-content: flex-start; }
+      .detail-feature-select { width: 100%; max-width: none; }
+      #scenarioPanel { min-height: 0; height: auto; }
+      #scenarioPanel > .panel-body { display: none; max-height: 360px; }
+      #scenarioPanel.drawer-open > .panel-body { display: block; }
+      .scenario-drawer-toggle { display: inline-flex; align-items: center; }
+      #detailPanel .panel-header { align-items: flex-start; flex-direction: column; }
+      .detail-panel-actions { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
+      #detailPanel { min-height: 520px; }
+      .content { padding: 16px; }
+      .facts { grid-template-columns: 1fr 1fr; }
+      .step-main { grid-template-columns: 26px 1fr; }
+      .step-main .status-pill { grid-column: 2; width: fit-content; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">BA</div>
+        <div>
+          <div class="brand-title">BDD Autowork</div>
+          <div class="brand-subtitle">执行报告</div>
+        </div>
+      </div>
+      <div class="nav-section">报告</div>
+      <button class="nav-item active" data-view-target="overview"><span class="nav-symbol">01</span><span>执行场景</span></button>
+      <button class="nav-item" data-view-target="details"><span class="nav-symbol">02</span><span>测试详情</span></button>
+      <div class="sidebar-run">
+        <strong id="sidebarProject">BDD Autowork</strong>
+        <span id="sidebarRunMeta">本地执行报告</span>
+      </div>
+    </aside>
+
+    <main class="content">
+      <section class="report-view active" id="overviewView" data-view="overview">
+        <div class="topbar overview-topbar">
+          <div>
+            <div class="overview-kicker">BDD Autowork / Run Report</div>
+            <h1 id="reportTitle">Feature 分组执行表</h1>
+            <div class="meta" id="reportMeta"></div>
+          </div>
+          <section class="overview-summary-line" id="overviewSummaryLine"></section>
+        </div>
+
+        <div class="overview-execution-toolbar">
+          <div>
+            <div class="execution-toolbar-title">本次验收场景</div>
+            <div class="execution-toolbar-subtitle" id="executionSortDescription">Feature 内保持 Gherkin 规格顺序</div>
+          </div>
+          <div class="execution-toolbar-actions">
+            <input class="execution-search" id="executionSearchInput" type="search" placeholder="搜索 Feature、场景或 tag" aria-label="搜索 Feature、场景或 tag" />
+            <div class="segmented" id="featureSortControl" aria-label="Feature 排序">
+              <button class="active" data-feature-sort="original" aria-pressed="true">规格顺序</button>
+              <button data-feature-sort="attention" aria-pressed="false">需跟进优先</button>
+              <button data-feature-sort="duration" aria-pressed="false">最慢优先</button>
+            </div>
+            <button class="execution-collapse-all" id="executionCollapseAll" aria-expanded="false">全部展开</button>
+          </div>
+        </div>
+
+        <section class="feature-execution-panel">
+          <div class="execution-filterbar" id="executionStatusFilters"></div>
+          <div class="execution-scroller" id="executionScroll">
+            <div class="feature-execution-tree" id="featureExecutionTree">
+              <div class="execution-column-header"><span>状态</span><span>编号 / 类型</span><span>名称</span><span>执行结果</span><span>耗时</span><span>失败 Step</span><span>详情</span></div>
+              <div id="featureGroups"></div>
+            </div>
+          </div>
+          <div class="execution-footer">
+            <div class="execution-legend">
+              <span><i style="--execution-color:var(--pass)"></i>通过</span>
+              <span><i style="--execution-color:var(--fail)"></i>需跟进</span>
+              <span><i style="--execution-color:var(--skip)"></i>未执行</span>
+              <span><i style="--execution-color:var(--unknown)"></i>状态未知</span>
+            </div>
+            <span id="executionVisibleSummary"></span>
+          </div>
+        </section>
+        <div class="execution-tooltip" id="executionTooltip"></div>
+      </section>
+
+      <section class="report-view" id="detailView" data-view="details">
+        <div class="topbar detail-topbar">
+          <div class="detail-heading">
+            <button class="back-button" data-view-target="overview">← 返回执行场景</button>
+            <div>
+              <h1>测试执行详情</h1>
+              <div class="meta" id="detailBreadcrumb">Feature → Scenario / Example → Step</div>
+            </div>
+          </div>
+          <div class="detail-actions">
+            <select class="detail-feature-select" id="detailFeatureSelect" aria-label="选择 Feature"></select>
+            <input class="search" id="searchInput" placeholder="搜索 scenario / tag / step / locator" />
+            <div class="segmented" aria-label="状态筛选">
+              <button class="active" data-filter="all">全部</button>
+              <button data-filter="failed">需跟进</button>
+              <button data-filter="passed">通过</button>
+              <button data-filter="skipped">未执行</button>
+              <button data-filter="unknown">状态未知</button>
+            </div>
+          </div>
+        </div>
+
+        <section class="detail-workspace">
+          <div class="panel" id="scenarioPanel">
+            <div class="panel-header">
+              <div class="panel-title" id="scenarioPanelTitle">Scenario / Examples</div>
+              <div class="scenario-panel-actions"><span class="status-pill status-unknown" id="visibleCount">0</span><button class="scenario-drawer-toggle" id="scenarioDrawerToggle" aria-expanded="false">展开</button></div>
+            </div>
+            <div class="panel-body"><div class="scenario-list" id="scenarioList"></div></div>
+          </div>
+
+          <div class="panel" id="detailPanel">
+          <div class="panel-header">
+            <div class="detail-panel-heading"><div class="panel-title">Step 与证据</div><span class="detail-position" id="detailPosition">0 / 0</span></div>
+            <div class="detail-panel-actions"><button type="button" class="detail-nav-button" id="detailPrevScenario" aria-label="上一个场景">‹</button><button type="button" class="detail-nav-button" id="detailNextScenario" aria-label="下一个场景">›</button><button type="button" class="detail-nav-button attention" id="detailNextAttention">下个需跟进</button><span class="status-pill status-unknown" id="detailStatus">未选择</span></div>
+          </div>
+          <div class="panel-body" id="detailBody">
+            <div class="empty">选择中间的 Scenario 或 Example 查看步骤、失败原因和附件。</div>
+          </div>
+        </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    // 生成器只需要替换 reportData。结构面向 BDD：Feature -> Scenario/Outline Example -> Step。
+    const reportData = {
+      title: "桌面自动化回归测试",
+      project: "BDD Autowork",
+      startedAt: "2026-06-23 10:20:31",
+      duration: "00:03:42",
+      environment: {
+        OS: "Windows",
+        Python: "3.11.9",
+        Behave: "1.3.3",
+        Backend: "uia",
+        AppLaunchMode: "desktop",
+        Report: "Spark Style Prototype"
+      },
+      features: [
+        {
+          name: "Plan - 参数编辑",
+          file: "Bdd/test_features/plan/all_parameters.feature",
+          scenarios: [
+            {
+              type: "scenario",
+              name: "修改 Phase 参数后保存",
+              status: "failed",
+              duration: "00:00:38",
+              tags: ["plan", "smoke"],
+              owner: "QA",
+              steps: [
+                {
+                  keyword: "Given",
+                  name: "打开计划参数窗口",
+                  status: "passed",
+                  duration: "00:00:06",
+                  actions: [
+                    { name: "set_root", target: "ExamApplication_window", status: "passed" }
+                  ]
+                },
+                {
+                  keyword: "When",
+                  name: "点击 Phase 标签右侧输入框",
+                  status: "failed",
+                  duration: "00:00:11",
+                  error: "OCR 未找到文本: Phase",
+                  actions: [
+                    { name: "click_ocr_relative", target: "phase_label", root: "all_parameters_window", status: "failed" }
+                  ],
+                  attachments: [
+                  { name: "失败截图", type: "image", path: "../screenshots/Plan_Phase_failed.png" },
+                  { name: "OCR 调试图", type: "image", path: "../screenshots/ocr_failed_phase.png" },
+                  { name: "场景失败录屏", type: "video", path: "../videos/Plan_Phase.mp4" }
+                ]}
+              ]
+            },
+            {
+              type: "outline",
+              name: "配置绝对延迟重建相位",
+              tags: ["outline", "absolute-delay"],
+              owner: "QA",
+              examples: [
+                {
+                  name: "配置绝对延迟重建相位 -- @1.1",
+                  status: "passed",
+                  duration: "00:00:18",
+                  params: { phase: "20", mode: "Absolute", expected: "20ms" },
+                  steps: [
+                    { keyword: "When", name: "选择重建模式并输入延迟", status: "passed", duration: "00:00:09", actions: [
+                      { name: "click", target: "absolute_mode", status: "passed" },
+                      { name: "input_text", target: "delay_input", value: "20", status: "passed" }
+                    ]},
+                    { keyword: "Then", name: "Phase 展示为 20ms", status: "passed", duration: "00:00:03", actions: [
+                      { name: "assert_ocr_contains", target: "phase_result", value: "20ms", status: "passed" }
+                    ]}
+                  ]
+                },
+                {
+                  name: "配置绝对延迟重建相位 -- @1.2",
+                  status: "failed",
+                  duration: "00:00:22",
+                  params: { phase: "30", mode: "Absolute", expected: "30ms" },
+                  steps: [
+                    { keyword: "When", name: "选择重建模式并输入延迟", status: "passed", duration: "00:00:09", actions: [
+                      { name: "click", target: "absolute_mode", status: "passed" },
+                      { name: "input_text", target: "delay_input", value: "30", status: "passed" }
+                    ]},
+                    { keyword: "Then", name: "Phase 展示为 30ms", status: "failed", duration: "00:00:08", error: "断言失败：屏幕 OCR 文本不包含 -> 30ms", actions: [
+                      { name: "assert_ocr_contains", target: "phase_result", value: "30ms", status: "failed" }
+                    ], attachments: [
+                      { name: "失败截图", type: "image", path: "../screenshots/absolute_delay_1_2.png" },
+                      { name: "OCR 调试图", type: "image", path: "../screenshots/ocr_absolute_delay_1_2.png" }
+                    ]}
+                  ]
+                }
+              ]
+            },
+            {
+              type: "scenario",
+              name: "打开 All Parameters 页面",
+              status: "passed",
+              duration: "00:00:21",
+              tags: ["plan"],
+              owner: "QA",
+              steps: [
+                { keyword: "Given", name: "应用已启动", status: "passed", duration: "00:00:09", actions: [
+                  { name: "launch", target: "ExamApplication", status: "passed" }
+                ]},
+                { keyword: "Then", name: "All Parameters 标题出现", status: "passed", duration: "00:00:04", actions: [
+                  { name: "wait_ocr_text_present", target: "all_parameters_title", status: "passed" }
+                ]}
+              ]
+            }
+          ]
+        },
+        {
+          name: "Patient Directory",
+          file: "Bdd/test_features/patient_directory.feature",
+          scenarios: [
+            {
+              type: "scenario",
+              name: "搜索患者并进入详情页",
+              status: "skipped",
+              duration: "00:00:00",
+              tags: ["skip", "patient"],
+              owner: "QA",
+              steps: []
+            }
+          ]
+        }
+      ]
+    };
+
+    const state = {
+      view: "overview",
+      filter: "all",
+      search: "",
+      featureSearch: "",
+      featureSort: "original",
+      executionStatus: "all",
+      executionSearch: "",
+      executionScrollLeft: 0,
+      executionScrollTop: 0,
+      collapsedFeatures: new Set((reportData.features || []).map((_, index) => index)),
+      selectedFeatureId: null,
+      selectedId: null,
+      lastRenderedDetailId: null,
+      scenarioScrollTop: 0,
+      focusScenarioAfterRender: false,
+      scenarioDrawerOpen: false,
+      expandedOutlines: new Set()
+    };
+
+    function normalizeStatus(status) {
+      const text = String(status || "unknown").toLowerCase();
+      if (text.includes("fail") || text.includes("error") || text.includes("undefined")) return "failed";
+      if (text.includes("skip") || text.includes("untested")) return "skipped";
+      if (text.includes("pass")) return "passed";
+      return "unknown";
+    }
+
+    function aggregateStatus(items) {
+      const statuses = items.map(item => normalizeStatus(item.status));
+      if (statuses.includes("failed")) return "failed";
+      if (statuses.length && statuses.every(status => status === "skipped")) return "skipped";
+      if (statuses.length && statuses.every(status => status === "passed")) return "passed";
+      return "unknown";
+    }
+
+    function statusLabel(status) {
+      const normalized = normalizeStatus(status);
+      return ({ passed: "通过", failed: "需跟进", skipped: "未执行", unknown: "状态未知" })[normalized] || "状态未知";
+    }
+
+    function statusPill(status) {
+      const normalized = normalizeStatus(status);
+      const cls = normalized === "passed" ? "status-pass" : normalized === "failed" ? "status-fail" : normalized === "skipped" ? "status-skip" : "status-unknown";
+      return `<span class="status-pill ${cls}">${statusLabel(status)}</span>`;
+    }
+
+    function stepStats(steps) {
+      const list = steps || [];
+      return {
+        failedSteps: list.filter(step => normalizeStatus(step.status) === "failed").length,
+        attachmentCount: list.reduce((sum, step) => sum + ((step.attachments || []).length), 0)
+      };
+    }
+
+    function scenarioAttachmentCount(item) {
+      return (item.attachments || []).length;
+    }
+
+    function firstError(steps) {
+      const failed = (steps || []).find(step => normalizeStatus(step.status) === "failed" && step.error);
+      return failed ? failed.error : "";
+    }
+
+    function outlineFirstError(outline) {
+      for (const example of outline.examples || []) {
+        const error = firstError(example.steps || []);
+        if (error) return error;
+      }
+      return "";
+    }
+
+    function outlineStats(outline) {
+      const examples = outline.examples || [];
+      return examples.reduce((acc, example) => {
+        const stats = stepStats(example.steps);
+        acc.failedSteps += stats.failedSteps;
+        acc.attachmentCount += stats.attachmentCount + scenarioAttachmentCount(example);
+        return acc;
+      }, { failedSteps: 0, attachmentCount: 0 });
+    }
+
+    function featureRows(feature, featureIndex) {
+      const rows = [];
+      if (feature.skipScope === "feature" && normalizeStatus(feature.status) === "skipped") {
+        rows.push({
+          ...feature,
+          id: `${featureIndex}-feature-skip`,
+          rowType: "feature-skip",
+          feature: feature.name,
+          featureId: String(featureIndex),
+          file: feature.file,
+          duration: "-",
+          failedSteps: 0,
+          attachmentCount: 0,
+          steps: [],
+        });
+        return rows;
+      }
+      (feature.scenarios || []).forEach((scenario, scenarioIndex) => {
+        if (scenario.type === "outline") {
+          const examples = scenario.examples || [];
+          const stats = outlineStats(scenario);
+          const outlineId = `${featureIndex}-${scenarioIndex}`;
+          rows.push({
+            ...scenario,
+            id: outlineId,
+            rowType: "outline",
+            status: aggregateStatus(examples),
+            feature: feature.name,
+            featureId: String(featureIndex),
+            file: feature.file,
+            failedSteps: stats.failedSteps,
+            attachmentCount: stats.attachmentCount,
+            error: outlineFirstError(scenario)
+          });
+          examples.forEach((example, exampleIndex) => {
+            const exampleStats = stepStats(example.steps);
+            rows.push({
+              ...example,
+              id: `${featureIndex}-${scenarioIndex}-${exampleIndex}`,
+              parentId: outlineId,
+              rowType: "example",
+              parentName: scenario.name,
+              tags: scenario.tags || [],
+              owner: scenario.owner,
+              feature: feature.name,
+              featureId: String(featureIndex),
+              file: feature.file,
+              failedSteps: exampleStats.failedSteps,
+              attachmentCount: exampleStats.attachmentCount + scenarioAttachmentCount(example),
+              error: firstError(example.steps || [])
+            });
+          });
+          return;
+        }
+
+        const stats = stepStats(scenario.steps);
+        rows.push({
+          ...scenario,
+          id: `${featureIndex}-${scenarioIndex}`,
+          rowType: "scenario",
+          feature: feature.name,
+          featureId: String(featureIndex),
+          file: feature.file,
+          failedSteps: stats.failedSteps,
+          attachmentCount: stats.attachmentCount + scenarioAttachmentCount(scenario),
+          error: firstError(scenario.steps || [])
+        });
+      });
+      return rows;
+    }
+
+    function flattenRows() {
+      return reportData.features.flatMap((feature, index) => featureRows(feature, index));
+    }
+
+    function executableRows(rows) {
+      return rows.filter(row => row.rowType !== "outline" && row.rowType !== "feature-skip");
+    }
+
+    function computeSummary(rows, featureScope = reportData.features || []) {
+      const executable = executableRows(rows);
+      const passed = executable.filter(row => normalizeStatus(row.status) === "passed").length;
+      const failed = executable.filter(row => normalizeStatus(row.status) === "failed").length;
+      const unknown = executable.filter(row => normalizeStatus(row.status) === "unknown").length;
+      const skippedScenarios = executable.filter(row => normalizeStatus(row.status) === "skipped").length;
+      const skippedFeatures = featureScope.filter(feature => feature.skipScope === "feature" && normalizeStatus(feature.status) === "skipped").length;
+      const skippedFeatureUnits = featureScope.filter(feature => feature.skipScope === "feature").reduce((sum, feature) => sum + Number(feature.plannedUnits || 0), 0);
+      const executionRange = passed + failed + unknown;
+      const unexecutedScenarios = skippedScenarios + skippedFeatureUnits;
+      const plannedRange = executionRange + unexecutedScenarios;
+      const attachments = executable.reduce((sum, row) => sum + row.attachmentCount, 0);
+      return {
+        total: executionRange,
+        executionRange,
+        plannedRange,
+        passed,
+        failed,
+        skipped: skippedScenarios + skippedFeatures,
+        skippedScenarios,
+        skippedFeatures,
+        skippedFeatureUnits,
+        unexecutedScenarios,
+        unknown,
+        attachments,
+        passRate: executionRange ? Math.round(passed / executionRange * 1000) / 10 : 0
+      };
+    }
+
+    function computeFeatureSummary(feature, featureIndex) {
+      return computeSummary(featureRows(feature, featureIndex), [feature]);
+    }
+
+    function featureMatchesSearch(feature) {
+      if (!state.featureSearch) return true;
+      const haystack = `${feature.name || ""} ${feature.file || ""} ${(feature.tags || []).join(" ")}`.toLowerCase();
+      return haystack.includes(state.featureSearch.toLowerCase());
+    }
+
+    function featureHasStatus(feature, index, status) {
+      return featureRows(feature, index).some(row => row.rowType !== "outline" && normalizeStatus(row.status) === status);
+    }
+
+    function featureMatchesStatus(feature, index) {
+      return state.filter === "all" || featureHasStatus(feature, index, state.filter);
+    }
+
+    function visibleFeatureEntries() {
+      return (reportData.features || [])
+        .map((feature, index) => ({ feature, index }))
+        .filter(({ feature, index }) => featureMatchesSearch(feature) && featureMatchesStatus(feature, index));
+    }
+
+    function selectedFeature() {
+      const features = reportData.features || [];
+      if (!features.length) return null;
+      const visible = visibleFeatureEntries();
+      if (!visible.length) return null;
+      if (!visible.some(({ index }) => String(index) === state.selectedFeatureId)) state.selectedFeatureId = String(visible[0].index);
+      return features[Number(state.selectedFeatureId)];
+    }
+
+    function matchesFilter(row) {
+      if (state.filter !== "all" && normalizeStatus(row.status) !== state.filter) return false;
+      if (!state.search) return true;
+      const params = row.params ? Object.entries(row.params).map(([key, value]) => `${key}=${value}`).join(" ") : "";
+      const actionText = (row.steps || []).flatMap(step => step.actions || []).map(action => `${action.name || ""} ${action.target || ""} ${action.value || ""} ${action.root || ""}`).join(" ");
+      const haystack = [row.feature, row.parentName, row.name, row.file, row.owner, params, ...(row.tags || []), ...(row.steps || []).map(step => `${step.keyword || ""} ${step.name || ""}`), actionText].join(" ").toLowerCase();
+      return haystack.includes(state.search.toLowerCase());
+    }
+
+    function isOutlineExpanded(row) {
+      return state.expandedOutlines.has(row.id);
+    }
+
+    function shouldShowRow(row) {
+      if (row.rowType !== "example") return true;
+      if (state.search || state.filter !== "all") return true;
+      return state.expandedOutlines.has(row.parentId);
+    }
+
+    function toggleOutline(row) {
+      if (state.expandedOutlines.has(row.id)) {
+        state.expandedOutlines.delete(row.id);
+        if (state.selectedId && state.selectedId.startsWith(`${row.id}-`)) {
+          state.selectedId = row.id;
+        }
+      } else {
+        state.expandedOutlines.add(row.id);
+      }
+    }
+
+    function scenarioNavigationCode(row) {
+      const parts = String(row.id || "").split("-").map(part => Number(part));
+      if (row.rowType === "feature-skip") return "Feature";
+      if (row.rowType === "example") return row.exampleId || `E${String((parts[2] || 0) + 1).padStart(2, "0")}`;
+      if (row.rowType === "outline") return `O${String((parts[1] || 0) + 1).padStart(2, "0")}`;
+      return `S${String((parts[1] || 0) + 1).padStart(2, "0")}`;
+    }
+
+    function scenarioTypeLabel(row) {
+      return row.rowType === "outline" ? "Scenario Outline" : row.rowType === "example" ? "Example" : row.rowType === "feature-skip" ? "Feature" : "Scenario";
+    }
+
+    function scenarioNavigationMeta(row) {
+      const meta = [];
+      if (row.duration && row.duration !== "-") meta.push(row.duration);
+      if (row.rowType === "outline") meta.push(`${(row.examples || []).length} Examples`);
+      if (row.rowType === "example" && row.params) {
+        meta.push(Object.entries(row.params).map(([key, value]) => `${key}=${value}`).join(" · "));
+      }
+      if (row.attachmentCount) meta.push(`${row.attachmentCount} 附件`);
+      return meta.join(" · ");
+    }
+
+    function renderFeatureSelect() {
+      const features = reportData.features || [];
+      const visibleFeatures = visibleFeatureEntries();
+      if (!visibleFeatures.some(({ index }) => String(index) === state.selectedFeatureId)) {
+        state.selectedFeatureId = visibleFeatures.length ? String(visibleFeatures[0].index) : null;
+        state.selectedId = null;
+      }
+      const select = document.getElementById("detailFeatureSelect");
+      select.innerHTML = visibleFeatures.map(({ feature, index }) => {
+        const summary = computeFeatureSummary(feature, index);
+        const result = [
+          summary.failed ? `${summary.failed} 需跟进` : "",
+          summary.unknown ? `${summary.unknown} 状态未知` : "",
+        ].filter(Boolean).join(" · ") || "无异常";
+        return `<option value="${index}">F${String(index + 1).padStart(2, "0")} · ${escapeHtml(feature.name)} · ${result}</option>`;
+      }).join("");
+      select.disabled = !visibleFeatures.length;
+      if (state.selectedFeatureId !== null) select.value = state.selectedFeatureId;
+      const selected = features[Number(state.selectedFeatureId)];
+      document.getElementById("detailBreadcrumb").textContent = selected
+        ? `${selected.name} → Scenario / Example → Step 与证据`
+        : "Scenario / Example → Step 与证据";
+    }
+
+    function renderSummaryLine(summary) {
+      const features = (reportData.features || []).length;
+      document.getElementById("overviewSummaryLine").innerHTML = [
+        ["Feature", features],
+        ["测试场景", summary.plannedRange],
+        ["已执行", summary.executionRange],
+        ["符合预期", summary.passed],
+        ["需跟进", summary.failed],
+        ["状态未知", summary.unknown],
+        ["未执行", summary.unexecutedScenarios],
+        ["通过率", `${summary.passRate}%`],
+        ["总耗时", reportData.duration || "-"]
+      ].map(([label, value]) => `<span class="overview-summary-item">${escapeHtml(label)}<strong>${escapeHtml(value)}</strong></span>`).join("");
+    }
+
+    function durationSeconds(value) {
+      const parts = String(value || "").split(":").map(Number);
+      if (!parts.length || parts.some(part => !Number.isFinite(part))) return 0;
+      return parts.reduce((total, part) => total * 60 + part, 0);
+    }
+
+    function formatExecutionDuration(seconds) {
+      if (!seconds) return "—";
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor(seconds % 3600 / 60);
+      const remainder = seconds % 60;
+      return hours
+        ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+        : `${minutes}:${String(remainder).padStart(2, "0")}`;
+    }
+
+    function executionColor(status) {
+      return ({ passed: "var(--pass)", failed: "var(--fail)", skipped: "var(--skip)", unknown: "var(--unknown)" })[normalizeStatus(status)];
+    }
+
+    function executionRowsForFeature(feature, featureIndex) {
+      const rows = featureRows(feature, featureIndex);
+      return rows.filter(row => row.rowType !== "outline").map((row, index) => ({
+        ...row,
+        executionName: row.rowType === "feature-skip"
+          ? `整项 Feature 未执行 · 计划 ${Number(feature.plannedUnits || 0)} 个场景 · ${feature.skipReason || "skipped"}`
+          : row.name,
+        executionPosition: index + 1,
+        executionUnits: row.rowType === "feature-skip" ? Math.max(1, Number(feature.plannedUnits || 0)) : 1,
+      }));
+    }
+
+    function executionCounts(items) {
+      return items.reduce((result, item) => {
+        result[normalizeStatus(item.status)] += item.executionUnits;
+        return result;
+      }, { passed: 0, failed: 0, skipped: 0, unknown: 0 });
+    }
+
+    function executionItemMatches(item, feature) {
+      if (!state.executionSearch) return true;
+      const params = item.params ? Object.entries(item.params).map(([key, value]) => `${key}=${value}`).join(" ") : "";
+      const haystack = [feature.name, feature.file, item.executionName, item.parentName, item.exampleId, params, ...(item.tags || [])].join(" ").toLowerCase();
+      return haystack.includes(state.executionSearch.toLowerCase());
+    }
+
+    function visibleExecutionItems(feature, featureIndex) {
+      return executionRowsForFeature(feature, featureIndex).filter(item =>
+        (state.executionStatus === "all" || normalizeStatus(item.status) === state.executionStatus)
+        && executionItemMatches(item, feature)
+      );
+    }
+
+    function executionFilterActive() {
+      return Boolean(state.executionSearch) || state.executionStatus !== "all";
+    }
+
+    function featureExecutionStats(feature, featureIndex) {
+      const items = executionRowsForFeature(feature, featureIndex);
+      const counts = executionCounts(items);
+      const executed = counts.passed + counts.failed + counts.unknown;
+      const planned = counts.passed + counts.failed + counts.skipped + counts.unknown;
+      const totalDuration = items.reduce((sum, item) => sum + durationSeconds(item.duration), 0);
+      const failedSteps = items.reduce((sum, item) => sum + Number(item.failedSteps || 0), 0);
+      const passRate = executed ? Math.round(counts.passed / executed * 100) : null;
+      return { items, counts, executed, planned, totalDuration, failedSteps, passRate };
+    }
+
+    function orderedFeatureEntries() {
+      const entries = (reportData.features || []).map((feature, featureIndex) => ({
+        feature,
+        featureIndex,
+        visibleItems: visibleExecutionItems(feature, featureIndex),
+        stats: featureExecutionStats(feature, featureIndex),
+      })).filter(entry => entry.visibleItems.length);
+      if (state.featureSort === "attention") {
+        entries.sort((left, right) => right.stats.counts.failed - left.stats.counts.failed || right.stats.counts.unknown - left.stats.counts.unknown || left.featureIndex - right.featureIndex);
+      } else if (state.featureSort === "duration") {
+        entries.sort((left, right) => right.stats.totalDuration - left.stats.totalDuration || left.featureIndex - right.featureIndex);
+      }
+      return entries;
+    }
+
+    function featureStateRing(stats) {
+      const total = Math.max(stats.planned, 1);
+      let cursor = 0;
+      const segments = ["passed", "failed", "skipped", "unknown"].filter(status => stats.counts[status]).map(status => {
+        const start = cursor / total * 100;
+        cursor += stats.counts[status];
+        return `${executionColor(status)} ${start}% ${cursor / total * 100}%`;
+      });
+      return `conic-gradient(${segments.join(", ") || "#d6ddda 0 100%"})`;
+    }
+
+    function renderExecutionFilters(summary) {
+      const filters = [
+        ["all", "全部", summary.plannedRange, "#5f7076"],
+        ["failed", "需跟进", summary.failed, "var(--fail)"],
+        ["skipped", "未执行", summary.unexecutedScenarios, "var(--skip)"],
+        ["unknown", "状态未知", summary.unknown, "var(--unknown)"],
+        ["passed", "通过", summary.passed, "var(--pass)"],
+      ];
+      document.getElementById("executionStatusFilters").innerHTML = `<span class="execution-filter-label">筛选</span>${filters.map(([status, label, count, color]) => `<button class="execution-status-filter ${state.executionStatus === status ? "active" : ""}" data-execution-status="${status}" aria-pressed="${state.executionStatus === status}" style="--execution-color:${color}">${label} ${count}</button>`).join("")}<span class="execution-filter-spacer"></span><span class="execution-unit-note">Feature 内始终保持 Gherkin 规格顺序</span>`;
+    }
+
+    function executionCode(item) {
+      if (item.rowType === "feature-skip") return "Feature";
+      if (item.rowType === "example") return item.exampleId || `E${item.executionPosition}`;
+      return `S${String(item.executionPosition).padStart(2, "0")}`;
+    }
+
+    function renderScenarioExecutionRow(item, featureIndex) {
+      const status = normalizeStatus(item.status);
+      const type = item.rowType === "example" ? "Example" : item.rowType === "feature-skip" ? "Feature" : "Scenario";
+      const failedSteps = item.rowType === "feature-skip" ? `${item.executionUnits} 计划场景` : item.failedSteps ? `<strong>${item.failedSteps}</strong> 个` : "—";
+      return `<button class="scenario-execution-row ${item.id === state.selectedId ? "active" : ""}" data-execution-row-id="${escapeAttr(item.id)}" data-execution-feature-id="${featureIndex}" data-execution-name="${escapeAttr(item.executionName)}" data-execution-status="${escapeAttr(status)}" data-execution-duration="${escapeAttr(item.duration || "-")}" style="--execution-color:${executionColor(status)}" aria-label="${escapeAttr(`${item.executionName}，${statusLabel(status)}，${item.duration || "-"}`)}"><span class="scenario-status-mark"></span><span class="scenario-execution-code">${escapeHtml(executionCode(item))}<small class="scenario-execution-type">${type}</small></span><span class="scenario-execution-name" title="${escapeAttr(item.executionName)}">${escapeHtml(item.executionName)}</span><span class="scenario-result-label">${statusLabel(status)}</span><span class="scenario-duration">${escapeHtml(item.duration || "-")}</span><span class="scenario-failed-steps">${failedSteps}</span><span class="execution-row-arrow">›</span></button>`;
+    }
+
+    function renderGroupedExecution(rows, summary) {
+      renderExecutionFilters(summary);
+      const entries = orderedFeatureEntries();
+      const filtersActive = executionFilterActive();
+      const groups = entries.map(({ feature, featureIndex, visibleItems, stats }) => {
+        const collapsed = state.collapsedFeatures.has(featureIndex) && !filtersActive;
+        const featureAccent = stats.counts.failed ? "var(--fail)" : stats.counts.unknown ? "var(--unknown)" : stats.passRate === null ? "var(--skip)" : "var(--pass)";
+        const resultRatio = stats.executed ? `${stats.counts.passed}/${stats.executed}` : "—";
+        const resultLabel = stats.passRate === null ? `${stats.planned} 未执行` : `${stats.passRate}% 通过`;
+        const failedSteps = stats.failedSteps ? `<strong>${stats.failedSteps}</strong> 个` : "—";
+        return `<section class="feature-execution-group ${collapsed ? "collapsed" : ""}" data-feature-group-id="${featureIndex}" style="--feature-accent:${featureAccent};--feature-ring:${featureStateRing(stats)}"><button class="feature-tree-row" data-toggle-feature="${featureIndex}" aria-expanded="${!collapsed}" aria-disabled="${filtersActive}"><span class="feature-primary-status"></span><span class="feature-tree-code"><span class="feature-tree-chevron">▼</span><span class="feature-state-badge"><span>F${String(featureIndex + 1).padStart(2, "0")}</span></span></span><span class="feature-tree-copy"><strong class="feature-tree-name">${escapeHtml(feature.name)}</strong><small class="feature-tree-path">${escapeHtml(feature.file || "")} · ${stats.planned} 场景</small></span><span class="feature-result-cell"><strong>${resultRatio}</strong><small>${resultLabel}</small></span><span class="feature-total-duration">${formatExecutionDuration(stats.totalDuration)}</span><span class="feature-failed-steps">${failedSteps}</span><span class="execution-row-arrow">›</span></button><div class="scenario-execution-list">${visibleItems.map(item => renderScenarioExecutionRow(item, featureIndex)).join("")}</div></section>`;
+      }).join("");
+      document.getElementById("featureGroups").innerHTML = groups || `<div class="execution-empty">没有匹配的 Feature 或 Scenario</div>`;
+      const visibleUnits = entries.reduce((total, entry) => total + entry.visibleItems.reduce((sum, item) => sum + item.executionUnits, 0), 0);
+      document.getElementById("executionVisibleSummary").textContent = `${entries.length} Feature · ${visibleUnits} 测试场景`;
+      const allCollapsed = entries.length > 0 && entries.every(entry => state.collapsedFeatures.has(entry.featureIndex));
+      const collapseButton = document.getElementById("executionCollapseAll");
+      collapseButton.disabled = filtersActive;
+      collapseButton.setAttribute("aria-expanded", String(filtersActive || !allCollapsed));
+      collapseButton.textContent = filtersActive ? "筛选结果已展开" : allCollapsed ? "全部展开" : "全部收起";
+      requestAnimationFrame(() => {
+        const scroller = document.getElementById("executionScroll");
+        scroller.scrollLeft = state.executionScrollLeft;
+        scroller.scrollTop = state.executionScrollTop;
+      });
+    }
+
+    function renderOverview(rows, summary) {
+      renderSummaryLine(summary);
+      renderGroupedExecution(rows, summary);
+    }
+
+    function setView(view) {
+      state.view = view === "details" ? "details" : "overview";
+      document.querySelectorAll("[data-view]").forEach(item => item.classList.toggle("active", item.dataset.view === state.view));
+      document.querySelectorAll(".sidebar [data-view-target]").forEach(item => item.classList.toggle("active", item.dataset.viewTarget === state.view));
+    }
+
+    function firstFeatureWithStatus(status) {
+      const features = reportData.features || [];
+      return features.findIndex((feature, index) => featureHasStatus(feature, index, status));
+    }
+
+    function openDetails({ featureId = null, rowId = null, filter = null } = {}) {
+      if (featureId !== null) state.selectedFeatureId = String(featureId);
+      if (rowId !== null) {
+        if (filter === null) state.filter = "all";
+        state.selectedId = String(rowId);
+        const parts = String(rowId).split("-");
+        state.selectedFeatureId = parts[0];
+        if (parts.length === 3) state.expandedOutlines.add(parts.slice(0, 2).join("-"));
+      }
+      if (filter !== null) {
+        state.filter = filter;
+        if (featureId === null && rowId === null && filter !== "all") {
+          const matchingFeature = firstFeatureWithStatus(filter);
+          if (matchingFeature >= 0) state.selectedFeatureId = String(matchingFeature);
+        }
+      }
+      state.search = "";
+      state.featureSearch = "";
+      state.scenarioScrollTop = 0;
+      document.getElementById("searchInput").value = "";
+      state.scenarioDrawerOpen = false;
+      setView("details");
+      render();
+    }
+
+    function restoreScenarioListScroll() {
+      const list = document.getElementById("scenarioList");
+      const active = list.querySelector(".scenario-card.active");
+      list.scrollTop = state.scenarioScrollTop;
+      if (!active) {
+        state.focusScenarioAfterRender = false;
+        return;
+      }
+      const listRect = list.getBoundingClientRect();
+      const activeRect = active.getBoundingClientRect();
+      if (activeRect.top < listRect.top || activeRect.bottom > listRect.bottom) {
+        active.scrollIntoView({ block: "nearest" });
+      }
+      if (state.focusScenarioAfterRender) {
+        try {
+          active.focus({ preventScroll: true });
+        } catch (error) {
+          active.focus();
+        }
+        state.focusScenarioAfterRender = false;
+      }
+    }
+
+    function renderList(rows) {
+      const feature = selectedFeature();
+      const featureIndex = Number(state.selectedFeatureId || 0);
+      const featureOnlyRows = feature ? featureRows(feature, featureIndex) : [];
+      const visible = featureOnlyRows.filter(row => matchesFilter(row) && shouldShowRow(row));
+      document.getElementById("scenarioPanelTitle").textContent = feature ? `${feature.name} · Scenario / Examples` : "Scenario / Examples";
+      document.getElementById("visibleCount").textContent = `${visible.length} 项`;
+
+      if (!visible.length) {
+        state.selectedId = null;
+        document.getElementById("scenarioList").innerHTML = `<div class="empty">当前 Feature 下没有匹配的 Scenario 或 Example。</div>`;
+        state.scenarioScrollTop = 0;
+        state.focusScenarioAfterRender = false;
+        return;
+      }
+
+      if (!state.selectedId || !visible.some(row => row.id === state.selectedId)) {
+        const firstExecutable = visible.find(row => row.rowType !== "outline");
+        state.selectedId = (firstExecutable || visible[0]).id;
+      }
+
+      document.getElementById("scenarioList").innerHTML = visible.map(row => `
+        <div class="scenario-card ${row.id === state.selectedId ? "active" : ""} ${row.rowType === "outline" ? "outline-row" : ""} ${row.rowType === "example" ? "example-row" : ""}" data-id="${row.id}" role="button" tabindex="0" aria-pressed="${row.id === state.selectedId}">
+          <div class="scenario-head">
+            <div class="scenario-code">${escapeHtml(scenarioNavigationCode(row))}</div>
+            <div class="scenario-copy">
+              <div class="scenario-name" title="${escapeAttr(row.name)}">${row.rowType === "outline" ? `<span class="outline-toggle">${isOutlineExpanded(row) ? "▼" : "▶"}</span>` : ""}<span class="scenario-type">${scenarioTypeLabel(row)}</span>${escapeHtml(row.name)}</div>
+              <div class="scenario-subline">${escapeHtml(scenarioNavigationMeta(row) || (row.rowType === "example" ? row.parentName : row.feature))}</div>
+            </div>
+            ${statusPill(row.status)}
+          </div>
+          ${row.rowType === "outline" ? renderOutlineSummary(row) : ""}
+          ${row.error ? `<div class="scenario-error">${escapeHtml(row.error)}</div>` : ""}
+        </div>
+      `).join("");
+
+      document.querySelectorAll(".scenario-card").forEach(card => {
+        const selectCard = () => {
+          const row = featureOnlyRows.find(item => item.id === card.dataset.id);
+          state.scenarioScrollTop = document.getElementById("scenarioList").scrollTop;
+          if (row && row.rowType === "outline") {
+            toggleOutline(row);
+          }
+          state.selectedId = card.dataset.id;
+          state.focusScenarioAfterRender = true;
+          state.scenarioDrawerOpen = false;
+          render();
+        };
+        card.addEventListener("click", selectCard);
+        card.addEventListener("keydown", event => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          selectCard();
+        });
+      });
+      requestAnimationFrame(restoreScenarioListScroll);
+    }
+
+    function renderOutlineSummary(row) {
+      const examples = row.examples || [];
+      const passed = examples.filter(item => normalizeStatus(item.status) === "passed").length;
+      const failed = examples.filter(item => normalizeStatus(item.status) === "failed").length;
+      const skipped = examples.filter(item => normalizeStatus(item.status) === "skipped").length;
+      return `<div class="outline-summary">
+        <span class="param-chip">Examples ${examples.length}</span>
+        <span class="param-chip">P ${passed}</span>
+        <span class="param-chip">F ${failed}</span>
+        <span class="param-chip">S ${skipped}</span>
+      </div>`;
+    }
+
+    function visibleScenarioRows() {
+      const feature = selectedFeature();
+      const featureIndex = Number(state.selectedFeatureId || 0);
+      const featureOnlyRows = feature ? featureRows(feature, featureIndex) : [];
+      return featureOnlyRows.filter(row => matchesFilter(row) && shouldShowRow(row));
+    }
+
+    function selectableScenarioRows() {
+      return visibleScenarioRows().filter(row => row.rowType !== "outline");
+    }
+
+    function selectScenarioRow(row) {
+      if (!row) return;
+      if (row.parentId) state.expandedOutlines.add(row.parentId);
+      state.selectedId = row.id;
+      const list = document.getElementById("scenarioList");
+      state.scenarioScrollTop = list ? list.scrollTop : 0;
+      state.scenarioDrawerOpen = false;
+      render();
+    }
+
+    function selectAdjacentScenario(delta) {
+      const rows = selectableScenarioRows();
+      if (!rows.length) return;
+      const index = rows.findIndex(row => row.id === state.selectedId);
+      const nextIndex = index < 0 ? (delta > 0 ? 0 : rows.length - 1) : index + delta;
+      if (nextIndex < 0 || nextIndex >= rows.length) return;
+      selectScenarioRow(rows[nextIndex]);
+    }
+
+    function selectNextAttentionScenario() {
+      const rows = selectableScenarioRows();
+      if (!rows.length) return;
+      const index = Math.max(0, rows.findIndex(row => row.id === state.selectedId));
+      const ordered = [...rows.slice(index + 1), ...rows.slice(0, index + 1)];
+      const target = ordered.find(row => ["failed", "unknown"].includes(normalizeStatus(row.status)) && row.id !== state.selectedId);
+      selectScenarioRow(target);
+    }
+
+    function renderDetailNavigation() {
+      const rows = selectableScenarioRows();
+      const index = rows.findIndex(row => row.id === state.selectedId);
+      const attentionRows = rows.filter(row => ["failed", "unknown"].includes(normalizeStatus(row.status)));
+      const onlyCurrentAttention = attentionRows.length === 1 && attentionRows[0].id === state.selectedId;
+      document.getElementById("detailPosition").textContent = index >= 0 ? `${index + 1} / ${rows.length}` : `0 / ${rows.length}`;
+      document.getElementById("detailPrevScenario").disabled = index <= 0;
+      document.getElementById("detailNextScenario").disabled = index < 0 || index >= rows.length - 1;
+      document.getElementById("detailNextAttention").disabled = !attentionRows.length || onlyCurrentAttention;
+    }
+
+    function renderDetail(rows) {
+      const row = rows.find(item => item.id === state.selectedId);
+      const detailStatus = document.getElementById("detailStatus");
+      const detailBody = document.getElementById("detailBody");
+      if (!row) {
+        detailStatus.className = "status-pill status-unknown";
+        detailStatus.textContent = "未选择";
+        detailBody.innerHTML = `<div class="empty">选择中间的 Scenario 或 Example 查看 Step 时间线。</div>`;
+        return;
+      }
+
+      const normalized = normalizeStatus(row.status);
+      detailStatus.className = `status-pill ${normalized === "passed" ? "status-pass" : normalized === "failed" ? "status-fail" : normalized === "skipped" ? "status-skip" : "status-unknown"}`;
+      detailStatus.textContent = statusLabel(row.status);
+
+      if (row.rowType === "outline") {
+        detailBody.innerHTML = renderOutlineDetail(row);
+        bindOutlineExampleLinks(detailBody);
+        return;
+      }
+
+      if (row.rowType === "feature-skip") {
+        detailBody.innerHTML = `
+          <div class="detail-title-row"><div><div class="detail-title">${escapeHtml(row.name)}</div><div class="detail-subtitle">Feature 跳过 · ${escapeHtml(row.file || "")}</div></div></div>
+          <div class="facts">
+            <div class="fact"><div class="fact-label">跳过层级</div><div class="fact-value">Feature</div></div>
+            <div class="fact"><div class="fact-label">包含测试场景</div><div class="fact-value">${Number(row.plannedUnits || 0)}</div></div>
+            <div class="fact"><div class="fact-label">计划 BDD Step</div><div class="fact-value">${Number(row.plannedSteps || 0)}</div></div>
+            <div class="fact"><div class="fact-label">原因</div><div class="fact-value">${escapeHtml(row.skipReason || "skipped")}</div></div>
+          </div>
+          <div class="scenario-tags">${(row.tags || []).map(tag => `<span class="tag">@${escapeHtml(tag)}</span>`).join("")}</div>`;
+        return;
+      }
+
+      detailBody.innerHTML = `
+        <div class="detail-title-row">
+          <div>
+            <div class="detail-title">${escapeHtml(row.name)}</div>
+            <div class="detail-subtitle">${escapeHtml(row.rowType === "example" ? row.parentName : row.feature)} · ${escapeHtml(row.file || "")}</div>
+          </div>
+        </div>
+        ${row.params ? `<div class="example-params">${Object.entries(row.params).map(([key, value]) => `<span class="param-chip">${escapeHtml(key)}=${escapeHtml(value)}</span>`).join("")}</div>` : ""}
+        <div class="facts">
+          <div class="fact"><div class="fact-label">类型</div><div class="fact-value">${row.rowType === "example" ? "Example" : "Scenario"}</div></div>
+          <div class="fact"><div class="fact-label">耗时</div><div class="fact-value">${escapeHtml(row.duration || "-")}</div></div>
+          <div class="fact"><div class="fact-label">失败步骤</div><div class="fact-value">${row.failedSteps}</div></div>
+          <div class="fact"><div class="fact-label">附件</div><div class="fact-value">${row.attachmentCount}</div></div>
+        </div>
+        ${row.error ? `<div class="scenario-evidence-summary"><strong>失败摘要</strong><br>${escapeHtml(row.error)}</div>` : ""}
+        <div class="scenario-tags">${(row.tags || []).map(tag => `<span class="tag">@${escapeHtml(tag)}</span>`).join("")}</div>
+        ${renderScenarioAttachments(collectAttachments(row))}
+        <div class="step-list">${renderSteps(row.steps || [])}</div>
+      `;
+    }
+
+    function collectAttachments(row) {
+      const result = [];
+      (row.attachments || []).forEach(att => result.push({ ...att, source: "场景" }));
+      (row.steps || []).forEach((step, index) => {
+        (step.attachments || []).forEach(att => {
+          const keyword = step.keyword || "Step";
+          const name = step.name ? ` · ${step.name}` : "";
+          result.push({ ...att, source: `${index + 1}. ${keyword}${name}` });
+        });
+      });
+      return result;
+    }
+
+    function renderScenarioAttachments(attachments) {
+      if (!attachments.length) return "";
+      return `
+        <div class="evidence-section">
+          <div class="evidence-section-title">场景证据</div>
+          <div class="evidence-section-note">失败截图、录屏和调试附件按来源汇总</div>
+          ${renderAttachments(attachments)}
+        </div>
+      `;
+    }
+
+    function renderOutlineDetail(row) {
+      const examples = row.examples || [];
+      return `
+        <div class="detail-title-row">
+          <div>
+            <div class="detail-title">${escapeHtml(row.name)}</div>
+            <div class="detail-subtitle">Scenario Outline · ${escapeHtml(row.file || "")}</div>
+          </div>
+        </div>
+        <div class="facts">
+          <div class="fact"><div class="fact-label">Examples</div><div class="fact-value">${examples.length}</div></div>
+          <div class="fact"><div class="fact-label">通过</div><div class="fact-value">${examples.filter(item => normalizeStatus(item.status) === "passed").length}</div></div>
+          <div class="fact"><div class="fact-label">失败</div><div class="fact-value">${examples.filter(item => normalizeStatus(item.status) === "failed").length}</div></div>
+          <div class="fact"><div class="fact-label">跳过</div><div class="fact-value">${examples.filter(item => normalizeStatus(item.status) === "skipped").length}</div></div>
+        </div>
+        ${renderExamplesTable(row)}
+        <div class="empty" style="margin-top: 12px;">点击表格中的 Example 行，或展开中间 Scenario Outline 后点击 Example，可查看该行的 Step 时间线。</div>
+      `;
+    }
+
+    function renderExamplesTable(row) {
+      const examples = row.examples || [];
+      const paramKeys = [...new Set(examples.flatMap(example => Object.keys(example.params || {})))];
+      if (!examples.length) return "";
+      const columns = ["Example", ...paramKeys, "状态"];
+      return `<div class="examples-table-wrap">
+        <div class="examples-table-title">Examples</div>
+        <div class="examples-table-scroll">
+          <table class="examples-table">
+            <thead><tr>${columns.map(column => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead>
+            <tbody>${examples.map((example, index) => `<tr data-detail-example-id="${row.id}-${index}" role="button" tabindex="0">
+              <td>${escapeHtml(example.exampleId || example.name)}</td>
+              ${paramKeys.map(key => `<td>${escapeHtml((example.params || {})[key] ?? "-")}</td>`).join("")}
+              <td>${statusPill(example.status)}</td>
+            </tr>`).join("")}</tbody>
+          </table>
+        </div>
+      </div>`;
+    }
+
+    function bindOutlineExampleLinks(container) {
+      container.querySelectorAll("[data-detail-example-id]").forEach(item => {
+        const selectExample = () => {
+          const id = item.dataset.detailExampleId;
+          const parentId = id.split("-").slice(0, 2).join("-");
+          state.expandedOutlines.add(parentId);
+          state.selectedId = id;
+          render();
+        };
+        item.addEventListener("click", selectExample);
+        item.addEventListener("keydown", event => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          selectExample();
+        });
+      });
+    }
+
+    function renderSteps(steps) {
+      if (!steps.length) return `<div class="empty">该场景没有步骤明细。</div>`;
+      return steps.map((step, index) => {
+        const normalized = normalizeStatus(step.status);
+        const attachments = step.attachments || [];
+        const actions = step.actions || [];
+        const failedActions = actions.filter(action => normalizeStatus(action.status) === "failed");
+        const hasExtra = step.error || step.diagnostic || failedActions.length || step.locator || step.root || step.action;
+        return `
+          <div class="step ${normalized} ${hasExtra ? "has-extra open" : ""}">
+            <div class="step-main">
+              <div class="step-index">${index + 1}</div>
+              <div>
+                <div class="step-name"><span class="bdd-keyword">${escapeHtml(step.keyword || "Step")}</span>${escapeHtml(step.name)}</div>
+                <div class="step-meta">BDD Step · ${escapeHtml(step.duration || "-")}</div>
+              </div>
+              ${statusPill(step.status)}
+            </div>
+            ${hasExtra ? `<div class="step-extra">
+              <div class="facts">
+                <div class="fact"><div class="fact-label">关键字</div><div class="fact-value">${escapeHtml(step.keyword || "-")}</div></div>
+                <div class="fact"><div class="fact-label">状态</div><div class="fact-value">${statusLabel(step.status)}</div></div>
+              </div>
+              ${renderActions(failedActions)}
+              ${renderFailure(step)}
+            </div>` : ""}
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderActions(actions) {
+      if (!actions.length) return "";
+      return `<div class="action-list">${actions.map(action => {
+        const target = [action.target, action.value ? `value=${action.value}` : "", action.root ? `root=${action.root}` : ""].filter(Boolean).join(" · ");
+        return `<div class="action-row">
+          <div class="action-name">${escapeHtml(action.name || "action")}</div>
+          <div class="action-target">${escapeHtml(target || "-")}</div>
+          ${statusPill(action.status || "unknown")}
+        </div>`;
+      }).join("")}</div>`;
+    }
+
+    function renderFailure(step) {
+      return step.diagnostic
+        ? renderDiagnostic(step.diagnostic, step)
+        : renderError(step);
+    }
+
+    function renderError(step) {
+      if (!step.error && !step.errorDetail) return "";
+      const summary = step.error || "查看错误详情";
+      const detail = step.errorDetail || step.error || "";
+      return `
+        <div class="error-box">${escapeHtml(summary)}</div>
+        ${detail ? `<details class="error-detail"><summary>展开详细错误信息</summary><pre>${escapeHtml(detail)}</pre></details>` : ""}
+      `;
+    }
+
+    function renderDiagnostic(diagnostic, step) {
+      if (!diagnostic) return "";
+      const rawDetail = step.errorDetail || step.error || "";
+      const facts = [
+        diagnostic.locator_name ? `目标=${diagnostic.locator_name}` : "",
+        diagnostic.root_name ? `窗口=${diagnostic.root_name}` : "",
+        diagnostic.wait_type ? `等待=${diagnostic.wait_type}` : "",
+        diagnostic.probe_count != null ? `检查=${diagnostic.probe_count}次` : "",
+        diagnostic.candidate_count != null ? `候选=${diagnostic.candidate_count}` : "",
+      ].filter(Boolean).join(" · ");
+      const cause = rawDetail
+        ? ""
+        : [diagnostic.cause_type, diagnostic.cause_message].filter(Boolean).join(": ");
+      return `
+        <div class="error-box"><strong>排障摘要：</strong>${escapeHtml(diagnostic.summary || diagnostic.code || "运行失败")}</div>
+        <details class="error-detail"><summary>展开技术诊断</summary><pre>${escapeHtml([
+          `code=${diagnostic.code || "-"}`,
+          `category=${diagnostic.category || "-"}`,
+          `stage=${diagnostic.stage || "-"}`,
+          facts,
+          cause ? `cause=${cause}` : "",
+          rawDetail ? `原始错误:\n${rawDetail}` : "",
+        ].filter(Boolean).join("\n"))}</pre></details>
+      `;
+    }
+
+    function renderAttachments(attachments) {
+      if (!attachments.length) return "";
+      return `<div class="attachment-grid">${attachments.map(att => {
+        return `<div class="attachment">
+          <span class="attachment-type">${escapeHtml(att.type || "file")}</span>
+          <span class="attachment-main">
+            <span class="attachment-source">${escapeHtml(att.source || "")}</span>
+            <a href="${safeAttachmentHref(att.path)}" target="_blank" rel="noopener noreferrer">${escapeHtml(att.name || "附件")}</a>
+          </span>
+        </div>`;
+      }).join("")}</div>`;
+    }
+
+    function render() {
+      const rows = flattenRows();
+      const summary = computeSummary(rows);
+      document.getElementById("reportTitle").textContent = "Feature 分组执行表";
+      document.getElementById("reportMeta").textContent = `${reportData.title || "测试执行报告"} · ${reportData.project || ""} · ${reportData.startedAt || ""} · ${reportData.duration || ""}`;
+      document.getElementById("sidebarProject").textContent = reportData.project || "BDD Autowork";
+      document.getElementById("sidebarRunMeta").textContent = `${reportData.startedAt || ""} · ${reportData.duration || ""}`;
+      if (state.view === "overview") {
+        renderOverview(rows, summary);
+      } else {
+        const previousDetailId = state.lastRenderedDetailId;
+        renderFeatureSelect();
+        renderList(rows);
+        renderDetail(rows);
+        renderDetailNavigation();
+        if (previousDetailId !== state.selectedId) {
+          document.getElementById("detailBody").scrollTop = 0;
+          state.lastRenderedDetailId = state.selectedId;
+        }
+        const scenarioPanel = document.getElementById("scenarioPanel");
+        const drawerToggle = document.getElementById("scenarioDrawerToggle");
+        scenarioPanel.classList.toggle("drawer-open", state.scenarioDrawerOpen);
+        drawerToggle.setAttribute("aria-expanded", String(state.scenarioDrawerOpen));
+        drawerToggle.textContent = state.scenarioDrawerOpen ? "收起" : "展开";
+      }
+      setView(state.view);
+      document.querySelectorAll("[data-filter]").forEach(item => item.classList.toggle("active", item.dataset.filter === state.filter));
+    }
+
+    function setFilter(filter) {
+      state.filter = filter;
+      document.querySelectorAll("[data-filter]").forEach(item => item.classList.toggle("active", item.dataset.filter === filter));
+      render();
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
+    }
+
+    function escapeAttr(value) {
+      return escapeHtml(value).replace(/`/g, "&#96;");
+    }
+
+    function safeAttachmentHref(value) {
+      const path = String(value ?? "").trim();
+      const normalized = [...path].filter(char => char.charCodeAt(0) > 32 && char.charCodeAt(0) !== 127).join("");
+      if (!path || /^[a-z][a-z0-9+.-]*:/i.test(normalized) || normalized.startsWith("/") || normalized.charCodeAt(0) === 92) return "#";
+      return escapeAttr(path);
+    }
+
+    document.querySelectorAll("[data-filter]").forEach(item => {
+      item.addEventListener("click", () => setFilter(item.dataset.filter));
+    });
+
+    document.querySelectorAll("[data-view-target]").forEach(item => {
+      item.addEventListener("click", () => {
+        if (item.dataset.viewTarget === "details") openDetails();
+        else {
+          state.view = "overview";
+          render();
+        }
+      });
+    });
+
+    document.getElementById("featureExecutionTree").addEventListener("click", event => {
+      const featureRow = event.target.closest("[data-toggle-feature]");
+      if (featureRow) {
+        if (executionFilterActive()) return;
+        const featureId = Number(featureRow.dataset.toggleFeature);
+        if (state.collapsedFeatures.has(featureId)) state.collapsedFeatures.delete(featureId);
+        else state.collapsedFeatures.add(featureId);
+        render();
+        return;
+      }
+      const row = event.target.closest("[data-execution-row-id]");
+      if (!row) return;
+      const scroller = document.getElementById("executionScroll");
+      state.executionScrollLeft = scroller.scrollLeft;
+      state.executionScrollTop = scroller.scrollTop;
+      const featureId = row.dataset.executionFeatureId;
+      const rowId = row.dataset.executionRowId;
+      openDetails({ featureId, rowId });
+    });
+
+    document.getElementById("executionStatusFilters").addEventListener("click", event => {
+      const button = event.target.closest("[data-execution-status]");
+      if (!button) return;
+      state.executionStatus = button.dataset.executionStatus;
+      render();
+    });
+
+    document.getElementById("featureSortControl").addEventListener("click", event => {
+      const button = event.target.closest("[data-feature-sort]");
+      if (!button) return;
+      state.featureSort = button.dataset.featureSort;
+      document.querySelectorAll("#featureSortControl [data-feature-sort]").forEach(item => {
+        const active = item === button;
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-pressed", String(active));
+      });
+      document.getElementById("executionSortDescription").textContent = ({
+        original: "Feature 内按 Gherkin 原始顺序排列",
+        attention: "Feature 按需跟进数量排序；组内规格顺序不变",
+        duration: "Feature 按总耗时排序；组内规格顺序不变",
+      })[state.featureSort];
+      render();
+    });
+
+    document.getElementById("executionSearchInput").addEventListener("input", event => {
+      state.executionSearch = event.target.value.trim();
+      render();
+    });
+
+    document.getElementById("executionScroll").addEventListener("scroll", event => {
+      if (state.view !== "overview") return;
+      state.executionScrollLeft = event.currentTarget.scrollLeft;
+      state.executionScrollTop = event.currentTarget.scrollTop;
+    });
+
+    document.getElementById("executionCollapseAll").addEventListener("click", () => {
+      const entries = orderedFeatureEntries();
+      const allCollapsed = entries.length > 0 && entries.every(entry => state.collapsedFeatures.has(entry.featureIndex));
+      entries.forEach(entry => allCollapsed ? state.collapsedFeatures.delete(entry.featureIndex) : state.collapsedFeatures.add(entry.featureIndex));
+      render();
+    });
+
+    const executionTooltip = document.getElementById("executionTooltip");
+    document.getElementById("featureExecutionTree").addEventListener("pointermove", event => {
+      const row = event.target.closest("[data-execution-row-id]");
+      if (!row) {
+        executionTooltip.style.display = "none";
+        return;
+      }
+      executionTooltip.innerHTML = `<strong>${escapeHtml(row.dataset.executionName)}</strong><br>${statusLabel(row.dataset.executionStatus)} · ${escapeHtml(row.dataset.executionDuration || "-")}`;
+      executionTooltip.style.display = "block";
+      executionTooltip.style.left = `${Math.min(innerWidth - 380, event.clientX + 12)}px`;
+      executionTooltip.style.top = `${Math.min(innerHeight - 70, event.clientY + 12)}px`;
+    });
+    document.getElementById("featureExecutionTree").addEventListener("pointerleave", () => {
+      executionTooltip.style.display = "none";
+    });
+
+    document.getElementById("detailFeatureSelect").addEventListener("change", event => {
+      state.selectedFeatureId = event.target.value;
+      state.selectedId = null;
+      state.scenarioScrollTop = 0;
+      state.scenarioDrawerOpen = false;
+      render();
+    });
+
+    document.getElementById("scenarioDrawerToggle").addEventListener("click", () => {
+      state.scenarioDrawerOpen = !state.scenarioDrawerOpen;
+      render();
+    });
+
+    document.getElementById("detailPrevScenario").addEventListener("click", () => selectAdjacentScenario(-1));
+    document.getElementById("detailNextScenario").addEventListener("click", () => selectAdjacentScenario(1));
+    document.getElementById("detailNextAttention").addEventListener("click", selectNextAttentionScenario);
+
+    document.getElementById("searchInput").addEventListener("input", event => {
+      state.search = event.target.value.trim();
+      state.scenarioScrollTop = 0;
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>
