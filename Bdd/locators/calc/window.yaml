@@ -1,0 +1,68 @@
+calc_window:
+  top_level: true
+  backend: uia
+  control_type: Window
+  title: '计算器'
+  class_name: 'ApplicationFrameWindow'
+
+num1_button:
+  root: calc_window
+  control_type: Button
+  auto_id: num1Button
+
+num2_button:
+  root: calc_window
+  by: xpath
+  value: //Button[@auto_id='num2Button']
+
+num3_button:
+  region: calc_window
+  by: ocr
+  value: 3
+  #----可选-----
+  index: -1                  # 可选：任意整数；0=首个，1=第二个，-1=最后一个
+  match_mode: exact          # 可选：exact（精确）/ contains（包含）/ smart（优先精确）
+  timeout: 10                # 可选：非负数，最长等待秒数
+  interval: 0.5              # 可选：非负数，轮询间隔秒数
+  debug_on_fail: true        # 可选：true / false；失败时是否保存调试图
+  use_cache: false           # 可选：true / false；是否复用 OCR 缓存
+  cache_ttl: 0               # 可选：非负数，缓存秒数；0=禁用
+  det_unclip_ratio: 1.6      # 可选：正数；常用 1.0~2.0，越大检测框外扩越多
+  det_limit_side_len: 1600   # 可选：正整数；越大越利于小字识别，但速度越慢
+  det_limit_type: max        # 可选：max（限制最长边）/ min（限制最短边）
+  det_box_thresh: 0.6        # 可选：0~1；越低越少漏检，越高越少误检
+
+num4_button:
+  region: calc_window
+  by: pic
+  file: calc/num4_button.png     # 必填：模板图片；默认从 Bdd/data/ 读取
+  # ----可选----
+  index: -1                   # 任意整数；0=首个，1=第二个，-1=最后一个
+  pos: 5                      # 1~9 九宫格位置；5=图片中心
+  threshold: 0.7              # 0~1；越高越严格，越低越容易误匹配
+  method: tpl                 # tpl/mstpl/gmstpl/sift/brisk/akaze/orb/kaze/surf/brief
+  rgb: true                   # true/false；是否比较颜色
+  timeout: 10                 # 非负数；最长等待秒数
+  interval: 0.5               # 非负数；轮询间隔秒数
+  debug_on_fail: true         # true/false；失败时保存调试图片
+  scale_max: 1000             # 正整数；多尺度匹配的最大缩放范围
+  scale_step: 0.005           # 正数；多尺度步长，越小越精细但越慢
+
+plus_button: {root: 'calc_window', by: 'xpath',value: "//Button[@auto_id='plusButton']"}
+equal_button: {root: 'calc_window', by: 'xpath',value: "//Button[@auto_id='equalButton']"}
+minus_button: {root: 'calc_window', by: 'xpath',value: "//Button[@auto_id='minusButton']"}
+multiply_button: {root: 'calc_window', by: 'xpath',value: "//Button[@auto_id='multiplyButton']"}
+calc_result: {root: 'calc_window', by: 'xpath',value: "//Text[@auto_id='CalculatorResults']"}
+
+
+
+
+
+
+
+pos_demo:
+  by: pos
+  coords: [ 570, 745, 1920, 1080 ]  # 必填：[x, y, source_width, source_height]
+
+
+

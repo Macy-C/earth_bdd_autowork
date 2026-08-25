@@ -2,7 +2,8 @@ import sys
 from autowork_core.runtime.local_runner import main
 
 if __name__ == "__main__":
-    feature_path = r'Bdd\test_features\...'
+    # feature_path = r'Bdd\test_features\...'
+    feature_path = r'C:\Users\320321651\Messy\projects\earth_bdd_autowork\Bdd\test_features\calc\calc.feature'
     debug_settings_overrides = {
         # 应用启动方式
         "app_launch_mode": "attach",  # auto / attach
