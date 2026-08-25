@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +10,7 @@ from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
 WORKFLOW_STATE_VERSION = "3.0"
-JOB_WORKFLOW_STATE_VERSION = "4.0"
+JOB_WORKFLOW_STATE_VERSION = "5.0"
 WORKFLOW_STATUSES = {
     "draft",
     "ready",
@@ -32,6 +33,37 @@ def load_workflow_state(session_dir, request_id):
     except (OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def retired_job_entry(state, *, job_id, job_fingerprint=None):
+    for entry in reversed(list((state or {}).get("retired_jobs") or ())):
+        pointer = (entry or {}).get("job") or {}
+        if pointer.get("job_id") != job_id:
+            continue
+        if (
+            job_fingerprint is not None
+            and pointer.get("job_fingerprint") != job_fingerprint
+        ):
+            continue
+        return entry
+    return None
+
+
+def retired_job_entry_for_result(state, result_pointer):
+    pointer = result_pointer or {}
+    entry = retired_job_entry(
+        state,
+        job_id=pointer.get("job_id"),
+    )
+    if entry is None:
+        return None
+    stored = (entry.get("last_job_result") or {})
+    if any((
+        stored.get("result_id") != pointer.get("result_id"),
+        stored.get("result_fingerprint") != pointer.get("result_fingerprint"),
+    )):
+        return None
+    return entry
 
 
 def write_workflow_state(session_dir, state):
@@ -117,9 +149,67 @@ def publish_generation_job(
             "last_issue_fingerprint": None,
         },
         "attempt_history": [],
-        "last_job_result": None,
+        "retired_jobs": list(state.get("retired_jobs") or []),
+        "last_job_result": state.get("last_job_result"),
         "plan": {},
         "active_transaction": None,
+    })
+    write_workflow_state(session_dir, state)
+    return state
+
+
+def replace_generation_job(
+        session_dir,
+        request_id,
+        pointer,
+        *,
+        expected_job_pointer,
+        expected_epoch,
+    retire_reason="new_generation_job",
+    ):
+    state = load_workflow_state(session_dir, request_id)
+    execution = state.get("job_execution") or {}
+    if any((
+        state.get("workflow_state_version") != JOB_WORKFLOW_STATE_VERSION,
+        state.get("status") == "running",
+        execution.get("phase") in {"design", "implementation", "runtime", "oracle"},
+        execution.get("epoch") != expected_epoch,
+        state.get("current_job") != expected_job_pointer,
+    )):
+        raise ValueError("Generation Job replacement CAS冲突")
+    _assert_job_pointer(pointer, request_id=request_id)
+    retired = list(state.get("retired_jobs") or [])
+    retired.append(_retired_job_entry(
+        expected_job_pointer,
+        status=state.get("status"),
+        execution=execution,
+        reason=retire_reason or "new_generation_job",
+        last_job_result=state.get("last_job_result"),
+        errors=state.get("errors"),
+    ))
+    state.update({
+        "status": "ready",
+        "next_action": "start_generation_job",
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "current_job": dict(pointer),
+        "job_execution": {
+            "phase": "ready",
+            "epoch": int(execution["epoch"]) + 1,
+            "claim_id": None,
+            "claimed_at": None,
+            "attempt_no": 0,
+            "plan": None,
+            "transaction": None,
+            "last_issue_fingerprint": None,
+        },
+        "retired_jobs": retired,
+        "attempt_history": [],
+        "last_job_result": state.get("last_job_result"),
+        "last_result": None,
+        "plan": {},
+        "active_transaction": None,
+        "errors": [],
+        "warnings": [],
     })
     write_workflow_state(session_dir, state)
     return state
@@ -158,6 +248,45 @@ def claim_generation_job(
     })
     write_workflow_state(session_dir, state)
     return state
+
+
+def fail_generation_job_integrity(
+        session_dir,
+        request_id,
+        *,
+        expected_epoch,
+        error_code,
+    ):
+    state = load_workflow_state(session_dir, request_id)
+    execution = state.get("job_execution") or {}
+    if any((
+        state.get("workflow_state_version") != JOB_WORKFLOW_STATE_VERSION,
+        not state.get("current_job"),
+        state.get("status") != "ready",
+        execution.get("phase") != "ready",
+        execution.get("claim_id") is not None,
+        execution.get("epoch") != expected_epoch,
+    )):
+        raise ValueError("Generation Job integrity CAS冲突")
+    error_code = str(error_code or "job_integrity_failed")
+    failed_execution = {
+        **execution,
+        "phase": "failed",
+        "epoch": int(execution["epoch"]) + 1,
+        "last_issue_fingerprint": hashlib.sha256(
+            error_code.encode("utf-8")
+        ).hexdigest(),
+    }
+    return _retire_current_generation_job(
+        session_dir,
+        state,
+        status="failed",
+        next_action="review_generation_failure",
+        execution=failed_execution,
+        reason="integrity_failed",
+        errors=[error_code],
+        result=None,
+    )
 
 
 def transition_generation_job(
@@ -206,35 +335,45 @@ def transition_generation_job(
             "issue_fingerprint": execution.get("last_issue_fingerprint"),
         })
     terminal = phase in {"completed", "failed"}
+    next_execution = {
+        **execution,
+        "phase": phase,
+        "epoch": int(execution["epoch"]) + 1,
+        "attempt_no": (
+            int(execution.get("attempt_no") or 0) + 1
+            if plan is not None
+            else int(execution.get("attempt_no") or 0)
+        ),
+        "plan": plan if plan is not None else execution.get("plan"),
+        "transaction": (
+            transaction if transaction is not None else execution.get("transaction")
+        ),
+        "last_issue_fingerprint": (
+            issue_fingerprint
+            if issue_fingerprint is not None
+            else execution.get("last_issue_fingerprint")
+        ),
+    }
+    if terminal:
+        return _retire_current_generation_job(
+            session_dir,
+            state,
+            status=phase,
+            next_action=next_action,
+            execution=next_execution,
+            reason="terminal_result",
+            errors=state.get("errors"),
+            result=result,
+            history=history,
+            plan=plan,
+        )
     state.update({
-        "status": phase if terminal else "running",
+        "status": "running",
         "next_action": next_action,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
-        "job_execution": {
-            **execution,
-            "phase": phase,
-            "epoch": int(execution["epoch"]) + 1,
-            "attempt_no": (
-                int(execution.get("attempt_no") or 0) + 1
-                if plan is not None
-                else int(execution.get("attempt_no") or 0)
-            ),
-            "plan": plan if plan is not None else execution.get("plan"),
-            "transaction": (
-                transaction
-                if transaction is not None
-                else execution.get("transaction")
-            ),
-            "last_issue_fingerprint": (
-                issue_fingerprint
-                if issue_fingerprint is not None
-                else execution.get("last_issue_fingerprint")
-            ),
-        },
+        "job_execution": next_execution,
         "attempt_history": history,
     })
-    if result is not None:
-        state["last_job_result"] = dict(result)
     if plan is not None:
         state["plan"] = dict(plan)
     if transaction is not None:
@@ -243,6 +382,86 @@ def transition_generation_job(
         state["active_transaction"] = None
     write_workflow_state(session_dir, state)
     return state
+
+
+def _retire_current_generation_job(
+        session_dir,
+        state,
+        *,
+        status,
+        next_action,
+        execution,
+        reason,
+        errors,
+        result,
+        history=None,
+        plan=None,
+    ):
+    pointer = dict(state.get("current_job") or {})
+    _assert_job_pointer(pointer, request_id=state.get("request_id"))
+    retired = list(state.get("retired_jobs") or [])
+    result_pointer = dict(result or {})
+    previous_result = dict(state.get("last_job_result") or {})
+    retired.append(_retired_job_entry(
+        pointer,
+        status=status,
+        execution=execution,
+        reason=reason,
+        last_job_result=result_pointer,
+        errors=errors,
+    ))
+    state.update({
+        "status": status,
+        "next_action": next_action,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "current_job": None,
+        "job_execution": None,
+        "retired_jobs": retired,
+        "attempt_history": list(history or state.get("attempt_history") or []),
+        "last_job_result": result_pointer or previous_result or None,
+        "last_result": _terminal_transaction_result(execution)
+        or state.get("last_result"),
+        "active_transaction": None,
+        "errors": list(errors or []),
+    })
+    if plan is not None:
+        state["plan"] = dict(plan)
+    write_workflow_state(session_dir, state)
+    return state
+
+
+def _retired_job_entry(
+        pointer,
+        *,
+        status,
+        execution,
+        reason,
+        last_job_result,
+        errors,
+    ):
+    return {
+        "job": dict(pointer or {}),
+        "status": str(status or "failed"),
+        "phase": (execution or {}).get("phase"),
+        "job_execution": dict(execution or {}),
+        "reason": str(reason or "terminal_result"),
+        "last_job_result": dict(last_job_result or {}),
+        "errors": list(errors or []),
+        "retired_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _terminal_transaction_result(execution):
+    owner = (execution or {}).get("transaction") or {}
+    if owner.get("owner") != "generation_transaction":
+        return None
+    return {
+        "transaction_id": owner.get("transaction_id"),
+        "report_path": owner.get("path"),
+        "status": owner.get("status"),
+        "completion_fingerprint": owner.get("completion_fingerprint"),
+        "result_fingerprint": owner.get("result_fingerprint"),
+    }
 
 
 def workflow_status_for_request(session_dir, request):
@@ -277,25 +496,25 @@ def _assert_state(state):
     if not state.get("request_id"):
         raise ValueError("workflow state 缺少 request_id")
     if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
-        _assert_job_pointer(
-            state.get("current_job") or {},
-            request_id=state.get("request_id"),
-        )
-        execution = state.get("job_execution") or {}
-        if any((
-            execution.get("phase") not in {
-                "ready",
-                "design",
-                "implementation",
-                "runtime",
-                "oracle",
-                "completed",
-                "failed",
-            },
-            not isinstance(execution.get("epoch"), int),
-            execution.get("epoch", 0) < 1,
-        )):
-            raise ValueError("WorkflowStateV4 Job execution无效")
+        pointer = state.get("current_job")
+        execution = state.get("job_execution")
+        if pointer is not None:
+            _assert_job_pointer(pointer, request_id=state.get("request_id"))
+            if any((
+                not isinstance(execution, dict),
+                execution.get("phase") not in {
+                    "ready", "design", "implementation", "runtime", "oracle",
+                },
+                not isinstance(execution.get("epoch"), int),
+                execution.get("epoch", 0) < 1,
+            )):
+                raise ValueError("WorkflowStateV5 active Job execution无效")
+        elif execution is not None:
+            raise ValueError("WorkflowStateV5 terminal state不能保留job_execution")
+        for entry in state.get("retired_jobs") or []:
+            if not isinstance(entry, dict):
+                raise ValueError("WorkflowStateV5 retired_jobs无效")
+            _assert_job_pointer(entry.get("job") or {}, request_id=state.get("request_id"))
 
 
 def _assert_job_cas(

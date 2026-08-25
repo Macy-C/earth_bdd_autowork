@@ -12,6 +12,9 @@ from autowork_core.utils.debug_tools.recorder.generation_plan import (
     SUPPORTED_PLAN_VERSIONS,
     plan_artifact_identity_is_valid,
 )
+from autowork_core.utils.debug_tools.recorder.generation_job_result import (
+    load_generation_job_result,
+)
 from autowork_core.utils.debug_tools.recorder.generation_transaction import (
     transaction_code_snapshot_matches,
 )
@@ -31,6 +34,7 @@ from autowork_core.utils.debug_tools.recorder.transaction_integrity import (
 )
 from autowork_core.utils.debug_tools.recorder.workflow_state import (
     load_workflow_state,
+    retired_job_entry_for_result,
 )
 
 
@@ -344,15 +348,49 @@ def validate_accepted_transaction_capability_source(
     )
     report_path = Path(report_path).resolve()
     state = load_workflow_state(session_dir, report.get("request_id"))
-    result = state.get("last_result") or {}
+    job_result = None
+    terminal_entry = None
+    terminal_job_result = bool(
+        state.get("last_job_result")
+        and (
+            not state.get("current_job")
+            or state.get("status") in {"completed", "failed"}
+        )
+    )
+    if terminal_job_result:
+        job_result = load_generation_job_result(
+            session_dir,
+            state.get("last_job_result") or {},
+        )
+        terminal_entry = retired_job_entry_for_result(
+            state,
+            state.get("last_job_result") or {},
+        )
+    if state.get("current_job") or terminal_entry is not None:
+        workflow_valid = _job_result_matches_transaction(
+            session_dir,
+            state,
+            report_path,
+            report,
+        )
+    else:
+        result = state.get("last_result") or {}
+        workflow_valid = not any((
+            state.get("status") != "completed",
+            result.get("transaction_id") != report.get("transaction_id"),
+            Path(result.get("report_path") or "").resolve() != report_path,
+            result.get("status") != report.get("status"),
+            result.get("completion_fingerprint")
+            != report.get("completion_fingerprint"),
+            result.get("result_fingerprint")
+            != report.get("result_fingerprint"),
+        ))
+    if job_result is not None:
+        runtime_verification = _runtime_verification_from_job_result(
+            job_result
+        )
     if any((
-        state.get("status") != "completed",
-        result.get("transaction_id") != report.get("transaction_id"),
-        Path(result.get("report_path") or "").resolve() != report_path,
-        result.get("status") != report.get("status"),
-        result.get("completion_fingerprint")
-        != report.get("completion_fingerprint"),
-        result.get("result_fingerprint") != report.get("result_fingerprint"),
+        not workflow_valid,
         plan.get("plan_fingerprint")
         != (state.get("plan") or {}).get("plan_fingerprint"),
     )):
@@ -364,6 +402,67 @@ def validate_accepted_transaction_capability_source(
     ):
         raise ValueError("legacy_import Plan 不能提升为当前 confirmed Capability")
     return session_dir, request, plan, runtime_verification
+
+
+def _runtime_verification_from_job_result(job_result):
+    stages = (job_result or {}).get("stages") or {}
+    if job_result.get("status") != "completed":
+        return "not_run"
+    if (
+        (stages.get("runtime") or {}).get("status") == "passed"
+        and (stages.get("oracle") or {}).get("status") == "passed"
+    ):
+        return "oracle_verified"
+    if (stages.get("runtime") or {}).get("status") == "passed":
+        return "passed"
+    return "not_run"
+
+
+def _job_result_matches_transaction(
+        session_dir,
+        state,
+        report_path,
+        report,
+    ):
+    result = load_generation_job_result(
+        session_dir,
+        state.get("last_job_result") or {},
+    )
+    if result is None or result.get("status") != "completed":
+        return False
+    terminal = retired_job_entry_for_result(
+        state,
+        state.get("last_job_result") or {},
+    )
+    pointer = (
+        (state.get("current_job") or {})
+        if state.get("current_job")
+        else ((terminal or {}).get("job") or {})
+    )
+    if (result.get("job") or {}).get("job_id") != pointer.get("job_id"):
+        return False
+    owner = (
+        ((result.get("stages") or {}).get("transaction") or {}).get(
+            "owner"
+        ) or {}
+    )
+    if not isinstance(owner, dict) or owner.get(
+            "owner"
+    ) != "generation_transaction":
+        return False
+    path = Path(str(owner.get("path") or ""))
+    path = path.resolve() if path.is_absolute() else (
+        Path(session_dir).resolve() / path
+    ).resolve()
+    return not any((
+        state.get("status") != "completed",
+        path != Path(report_path).resolve(),
+        owner.get("transaction_id") != report.get("transaction_id"),
+        owner.get("status") != report.get("status"),
+        owner.get("completion_fingerprint")
+        != report.get("completion_fingerprint"),
+        owner.get("result_fingerprint") != report.get("result_fingerprint"),
+    ))
 
 
 def validate_completed_transaction_artifact_source(

@@ -806,6 +806,7 @@ def _bind_runtime_root_if_needed(context, locator: CompiledLocator):
     scenario = context.autowork_scenario
     if locator.root_name and not scenario.windows.has(locator.root_name):
         root = locator.root_locator or feature.locators.get(locator.root_name)
+
         if root is None:
             raise KeyError(f"locator 引用了不存在的 root: {locator.root_name}")
         if not _is_self_top_root_locator(root):
@@ -813,6 +814,7 @@ def _bind_runtime_root_if_needed(context, locator: CompiledLocator):
 
     if locator.region_name:
         region = locator.region_locator or feature.locators.get(locator.region_name)
+
         if region is None:
             raise KeyError(f"locator 引用了不存在的 region: {locator.region_name}")
         if region.prefix not in ("child", "xpath"):

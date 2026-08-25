@@ -36,6 +36,21 @@ FEEDBACK_LABELS = {
 }
 
 
+def _feedback_saved_message(label, event):
+    payload = (event or {}).get("payload") or {}
+    tier = payload.get("accepted_feedback_tier")
+    if FEEDBACK_LABELS.get(label) == "accepted":
+        if tier == "accepted_oracle_verified":
+            detail = "已通过独立业务验证，可作为复用候选。"
+        elif tier == "accepted_runtime_verified":
+            detail = "已通过真实运行，可作为复用候选。"
+        else:
+            detail = "缺少真实运行或独立业务验证，仅作为建议性反馈。"
+    else:
+        detail = "它会作为后续生成的参考。"
+    return f"结果确认已保存（{label}）。{detail}"
+
+
 class RecorderReviewWindow:
     def __init__(
             self,
@@ -67,6 +82,7 @@ class RecorderReviewWindow:
         self.request_refresh_running = False
         self.request_refresh_error = None
         self.request_refresh_sequence = 0
+        self.job_operation_after_id = None
         self.operations = operation_coordinator or OperationCoordinator(
             max_workers=2,
             thread_name_prefix="recorder-review",
@@ -75,6 +91,7 @@ class RecorderReviewWindow:
         self.request_operation_prefix = (
             f"request:{session.run_id}:{uuid.uuid4().hex}:"
         )
+        self.job_operation_key = f"{self.request_operation_prefix}job"
         self.closed = False
         self.take_map = {}
         self.diagnostics = []
@@ -197,14 +214,21 @@ class RecorderReviewWindow:
             label="打开任务目录",
             command=self.open_session_dir,
         )
+        self.tools_menu.add_separator()
+        self.tools_menu.add_command(
+            label="重试生成",
+            command=self.retry_generation_job,
+        )
+        self.tools_menu.add_command(
+            label="终止未开始的生成任务",
+            command=self.retire_generation_job,
+        )
         self.tools_button.configure(menu=self.tools_menu)
         profile_frame = ttk.Frame(actions)
         profile_frame.pack(side="left", padx=(8, 0))
         ttk.Label(profile_frame, text="生成方式").pack(side="left")
         for profile_id, label, enabled in (
             ("generation_first", "专心生成", True),
-            ("precision", "专心精确", True),
-            ("legacy_script_maintenance", "老脚本维护", False),
         ):
             button = ttk.Radiobutton(
                 profile_frame,
@@ -659,13 +683,20 @@ class RecorderReviewWindow:
             if step.step_id in incomplete
         )
 
-    def _scenario_generation_ready(self):
+    def _capture_generation_candidate(self):
         model = getattr(self, "model", None)
         return bool(
             model is not None
             and model.scope is not None
-            and model.scope.generation_ready
+            and getattr(
+                model.scope,
+                "capture_generation_candidate",
+                False,
+            )
         )
+
+    def _scenario_generation_ready(self):
+        return self._capture_generation_candidate()
 
     def selected_take_entry(self):
         step = self._selected_step_workspace()
@@ -832,7 +863,7 @@ class RecorderReviewWindow:
 
     def _restore_or_schedule_request(self):
         step_ids = self.scenario_step_ids()
-        if not self._scenario_generation_ready():
+        if not self._capture_generation_candidate():
             self.last_request_path = None
             if self.request_refresh_error is not None:
                 self.request_refresh_error = None
@@ -915,7 +946,7 @@ class RecorderReviewWindow:
                 not self.closed
                 and sequence == self.request_refresh_sequence
                 and tuple(step_ids) == self.scenario_step_ids()
-                and self._scenario_generation_ready()
+                and self._capture_generation_candidate()
                 and task.status not in {"cancelled", "superseded"}
             )
             if is_current and error is None:
@@ -956,6 +987,7 @@ class RecorderReviewWindow:
         for after_id in (
             self.request_refresh_after_id,
             self.request_refresh_poll_after_id,
+            self.job_operation_after_id,
         ):
             if after_id is None:
                 continue
@@ -965,6 +997,7 @@ class RecorderReviewWindow:
                 pass
         self.request_refresh_after_id = None
         self.request_refresh_poll_after_id = None
+        self.job_operation_after_id = None
         self.operations.abandon_prefix(
             self.request_operation_prefix,
             wait=True,
@@ -1052,9 +1085,9 @@ class RecorderReviewWindow:
         self.parent.clipboard_clear()
         self.parent.clipboard_append(command)
         self.status_var.set(
-            f"已复制{self._scenario_scope_label()}的 Copilot 任务"
+            f"已创建{self._scenario_scope_label()}的 Generation Job"
             f"（{len(step_ids)} 个 Step）；"
-            "粘贴到 Copilot Chat 即可继续。"
+            "已复制 /recorder-generate Job 命令，粘贴到 Copilot Chat 即可继续。"
         )
         self._reload_model()
         self._refresh_decision_questions()
@@ -1100,6 +1133,106 @@ class RecorderReviewWindow:
         else:
             self.status_var.set("当前 Step 尚未完成录制。")
 
+    def retry_generation_job(self):
+        generation = self.model.generation if self.model else None
+        history = getattr(generation, "job_history", ()) if generation else ()
+        terminal = next((item for item in history if not item.is_current), None)
+        if terminal is None:
+            self.status_var.set("当前没有可重试的已结束生成任务。")
+            return
+        self._run_job_lifecycle(
+            "retry",
+            terminal.job_id,
+            terminal.profile_id,
+        )
+
+    def retire_generation_job(self):
+        generation = self.model.generation if self.model else None
+        if generation is None or not generation.job_id or generation.job_phase != "ready":
+            self.status_var.set("只有尚未开始的生成任务可以在此终止。")
+            return
+        self._run_job_lifecycle("retire", generation.job_id, None)
+
+    def _run_job_lifecycle(self, action, job_id, profile_id):
+        history = (
+            self.model.generation.job_history
+            if self.model and self.model.generation else ()
+        )
+        job = next((item for item in history if item.job_id == job_id), None)
+        if job is None:
+            self.status_var.set("Generation Job历史已变化，请刷新后重试。")
+            return
+        if not job.job_path:
+            self.status_var.set("无法解析Generation Job路径。")
+            return
+        workflow = self.request_service.workflow_state(self.scenario_step_ids())
+        epoch = (workflow.get("job_execution") or {}).get("epoch")
+        if action == "retire" and epoch is None:
+            self.status_var.set("Generation Job状态已变化，请刷新后重试。")
+            return
+        try:
+            self.operations.submit(
+                self.job_operation_key,
+                self._execute_job_lifecycle,
+                action,
+                job.job_path,
+                profile_id,
+                epoch,
+                context=action,
+            )
+        except Exception as error:
+            self.status_var.set(f"Generation Job操作失败: {type(error).__name__}: {error}")
+            return
+        self.status_var.set("正在更新 Generation Job...")
+        self._schedule_job_operation_poll()
+
+    def _execute_job_lifecycle(
+            self,
+            action,
+            job_path,
+            profile_id,
+            epoch,
+        ):
+        if action == "retry":
+            return self.request_service.retry_job(job_path, profile_id=profile_id)
+        return self.request_service.retire_job(
+            job_path,
+            expected_epoch=epoch,
+            reason="operator_retired_from_workbench",
+        )
+
+    def _schedule_job_operation_poll(self):
+        if self.closed or self.job_operation_after_id is not None:
+            return
+        self.job_operation_after_id = self.window.after(
+            40,
+            self._poll_job_operation,
+        )
+
+    def _poll_job_operation(self):
+        self.job_operation_after_id = None
+        result = self.operations.next_result(key=self.job_operation_key)
+        if result is None:
+            if self.operations.list_active(key=self.job_operation_key):
+                self._schedule_job_operation_poll()
+            return
+        if result.status == "completed" and result.error is None:
+            self._reload_model()
+            self._update_controls()
+            self.status_var.set(
+                "已创建新的 Generation Job。"
+                if result.context == "retry"
+                else "未开始的 Generation Job 已终止。"
+            )
+        else:
+            error = result.error
+            self.status_var.set(
+                "Generation Job操作失败: "
+                f"{type(error).__name__}: {error}"
+                if error is not None
+                else "Generation Job操作未完成。"
+            )
+
     def record_transaction_feedback(self):
         step_ids = self.scenario_step_ids()
         if not step_ids:
@@ -1136,10 +1269,10 @@ class RecorderReviewWindow:
             )
             return
         self.feedback_note_var.set("")
-        self.status_var.set(
-            f"结果确认已保存（{self.feedback_var.get()}）。"
-            "它只用于以后复用已验证的实现。"
-        )
+        self.status_var.set(_feedback_saved_message(
+            self.feedback_var.get(),
+            event,
+        ))
 
     def open_project_memory(self):
         memory_dir = (
@@ -2005,6 +2138,25 @@ def _generation_summary_text(generation):
         return "生成：缺少必要证据，请按右侧提示校正或补录"
     if generation.workflow_status == "stale":
         return "生成：录制已变化，正在自动准备最新任务"
+    history = getattr(generation, "job_history", ())
+    feedback = getattr(generation, "feedback_history", ())
+    history_text = f"；任务历史 {len(history)}" if history else ""
+    effective_feedback = [item for item in feedback if item.is_effective]
+    tier_counts = {
+        tier: sum(item.tier == tier for item in effective_feedback)
+        for tier in (
+            "accepted_static_only",
+            "accepted_runtime_verified",
+            "accepted_oracle_verified",
+        )
+    }
+    feedback_text = (
+        "；反馈 静态/运行/Oracle "
+        f"{tier_counts['accepted_static_only']}/"
+        f"{tier_counts['accepted_runtime_verified']}/"
+        f"{tier_counts['accepted_oracle_verified']}"
+        if effective_feedback else ""
+    )
     if generation.result is not None:
         result = generation.result
         verification = generation.verification
@@ -2012,9 +2164,11 @@ def _generation_summary_text(generation):
             f"生成：{(verification.label if verification else _generation_status_label(generation.display_status))}；"
             f"修改文件 {len(result.changed_files)}，"
             f"失败检查 {len(result.failed_checks)}"
+            f"{history_text}{feedback_text}"
         )
     return (
         f"生成：{_generation_status_label(generation.display_status)}"
+        f"{history_text}{feedback_text}"
     )
 
 

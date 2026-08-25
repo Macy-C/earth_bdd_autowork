@@ -277,6 +277,12 @@ def _admission_receipt(admission):
         "job_creation_allowed": admission.get("job_creation_allowed"),
         "request_id": admission.get("request_id"),
         "checks": copy.deepcopy(admission.get("checks") or []),
+        "performance_checks": copy.deepcopy(
+            admission.get("performance_checks") or []
+        ),
+        "performance_warnings": copy.deepcopy(
+            admission.get("performance_warnings") or []
+        ),
         "blocking_codes": copy.deepcopy(
             admission.get("blocking_codes") or []
         ),

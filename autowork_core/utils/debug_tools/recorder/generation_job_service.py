@@ -10,6 +10,12 @@ from autowork_core.utils.debug_tools.recorder.decision_pack import (
 from autowork_core.utils.debug_tools.recorder.action_knowledge import (
     query_action_knowledge,
 )
+from autowork_core.utils.debug_tools.recorder.ai_context_envelope import (
+    build_ai_context_envelope,
+)
+from autowork_core.utils.debug_tools.recorder.ai_plan_context import (
+    build_ai_plan_context,
+)
 from autowork_core.utils.debug_tools.recorder.evidence_context import (
     compare_request_takes,
     query_request_evidence,
@@ -27,6 +33,8 @@ from autowork_core.utils.debug_tools.recorder.generation_job import (
 )
 from autowork_core.utils.debug_tools.recorder.generation_job_result import (
     advance_job_to_oracle,
+    load_generation_job_result,
+    publish_pretransaction_job_failure,
     publish_runtime_job_outcome,
 )
 from autowork_core.utils.debug_tools.recorder.generation_plan import (
@@ -55,8 +63,11 @@ from autowork_core.utils.debug_tools.recorder.run_lock import RunWriteLock
 from autowork_core.utils.debug_tools.recorder.workflow_state import (
     JOB_WORKFLOW_STATE_VERSION,
     claim_generation_job,
+    fail_generation_job_integrity,
     load_workflow_state,
     publish_generation_job,
+    replace_generation_job,
+    retired_job_entry,
     transition_generation_job,
 )
 from autowork_core.utils.debug_tools.recorder.workflow_service import (
@@ -82,6 +93,7 @@ def admit_generation_job(request_path, *, profile_id=None):
             session_dir,
             request.get("request_id"),
         )
+        replacement = None
         if existing.get("workflow_state_version") == (
                 JOB_WORKFLOW_STATE_VERSION
         ) and existing.get("current_job"):
@@ -90,13 +102,46 @@ def admit_generation_job(request_path, *, profile_id=None):
                 existing.get("current_job") or {},
             )
             if job is None:
-                raise ValueError("Workflow current Job identity无效")
-            selected = str(profile_id or "generation_first")
-            if (job.get("profile_lease") or {}).get("profile_id") != selected:
-                raise ValueError(
-                    "当前Request已有其他Generation Profile的Job"
-                )
-            return _job_result(session_dir, job, existing)
+                if any((
+                    existing.get("status") != "failed",
+                    (existing.get("job_execution") or {}).get("phase")
+                    != "failed",
+                    "job_integrity_failed"
+                    not in set(existing.get("errors") or ()),
+                )):
+                    raise ValueError("Workflow current Job identity无效")
+                replacement = {
+                    "pointer": dict(existing["current_job"]),
+                    "epoch": (existing.get("job_execution") or {})[
+                        "epoch"
+                    ],
+                    "reason": "integrity_failed",
+                }
+            else:
+                selected = str(profile_id or "generation_first")
+                current_profile = (job.get("profile_lease") or {}).get("profile_id")
+                execution = existing.get("job_execution") or {}
+                if existing.get("status") == "running" or execution.get("phase") in {
+                    "design", "implementation", "runtime", "oracle",
+                }:
+                    if current_profile != selected:
+                        raise ValueError(
+                            "运行中的Generation Job不能切换Profile"
+                        )
+                    return _job_result(session_dir, job, existing)
+                replacement = {
+                    "pointer": dict(existing["current_job"]),
+                    "epoch": execution.get("epoch"),
+                    "reason": (
+                        "switch_profile"
+                        if current_profile != selected
+                        else "retry_generation"
+                    ),
+                }
+                if replacement["epoch"] is None:
+                    raise ValueError(
+                        "当前Generation Job缺少可替换epoch"
+                    )
 
         from autowork_core.utils.debug_tools.recorder.generation_workflow import (
             inspect_generation,
@@ -110,45 +155,94 @@ def admit_generation_job(request_path, *, profile_id=None):
             session_dir,
             request.get("request_id"),
         )
+        shadow_admission = inspected.get("generation_admission") or {}
+        if shadow_admission.get("status") != "passed":
+            return {
+                "generation_job_service_version": "1.0",
+                "status": "rejected",
+                "request_id": request.get("request_id"),
+                "generation_admission": shadow_admission,
+                "errors": list(
+                    shadow_admission.get("blocking_codes") or []
+                ),
+                "warnings": [],
+            }
         pack, answers = _decision_artifacts(session_dir, request, state)
         contract_lease = generation_contract_lease(
             session_dir,
             write=False,
         )
-        admission = project_generation_admission(
-            request=request,
-            state=state,
-            context_budget=inspected.get("ai_context_budget") or {},
-            request_identity_valid=request_identity_is_valid(request),
-            profile_id=profile_id,
-            decision_pack=pack,
-            answer_record=answers,
-            enforcement="active",
-            generation_contract_lease=contract_lease,
+        from autowork_core.utils.debug_tools.recorder.generation_workflow import (
+            build_ai_context_budget,
         )
-        if admission.get("status") != "passed":
-            return {
-                "generation_job_service_version": "1.0",
-                "status": "rejected",
-                "request_id": request.get("request_id"),
-                "generation_admission": admission,
-                "errors": list(admission.get("blocking_codes") or []),
-                "warnings": [],
-            }
-        job = build_generation_job(
-            request,
-            state,
-            admission,
-            contract_lease,
-            activation="active",
-        )
+
+        context_budget = inspected.get("ai_context_budget") or {}
+        job = None
+        admission = None
+        for _attempt in range(8):
+            admission = project_generation_admission(
+                request=request,
+                state=state,
+                context_budget=context_budget,
+                request_identity_valid=request_identity_is_valid(request),
+                profile_id=profile_id,
+                decision_pack=pack,
+                answer_record=answers,
+                enforcement="active",
+                generation_contract_lease=contract_lease,
+            )
+            if admission.get("status") != "passed":
+                return _admission_rejected_result(request, admission)
+            job = build_generation_job(
+                request,
+                state,
+                admission,
+                contract_lease,
+                activation="active",
+            )
+            projected = _candidate_job_inspect(
+                session_dir,
+                request,
+                state,
+                job,
+            )
+            next_budget = build_ai_context_budget(
+                session_dir=session_dir,
+                request_path=request_path,
+                request=request,
+                state=state,
+                inspect_result=projected,
+                capability_contract=projected["ai_capabilities"],
+                brief_path=_brief_path_for_job(session_dir, job),
+                plan_path=None,
+                plan_context=None,
+                job_value=job,
+            )
+            if next_budget == context_budget:
+                break
+            context_budget = next_budget
+        else:
+            raise RuntimeError("Generation Job context budget未能收敛")
+        if job is None or admission is None:
+            raise RuntimeError("Generation Job admission未生成候选")
         path, job = persist_generation_job(session_dir, job)
         pointer = generation_job_pointer(session_dir, job, path)
-        workflow = publish_generation_job(
-            session_dir,
-            request["request_id"],
-            pointer,
-            expected_epoch=0,
+        workflow = (
+            replace_generation_job(
+                session_dir,
+                request["request_id"],
+                pointer,
+                expected_job_pointer=replacement["pointer"],
+                expected_epoch=replacement["epoch"],
+                retire_reason=replacement.get("reason"),
+            )
+            if replacement is not None
+            else publish_generation_job(
+                session_dir,
+                request["request_id"],
+                pointer,
+                expected_epoch=0,
+            )
         )
         return _job_result(session_dir, job, workflow)
     finally:
@@ -156,13 +250,68 @@ def admit_generation_job(request_path, *, profile_id=None):
 
 
 def start_generation_job(job_path, *, expected_epoch):
-    session_dir, job, state = _resolve_current_job(job_path)
+    job_path = Path(job_path).resolve()
+    if len(job_path.parents) < 4:
+        raise ValueError("Generation Job path无效")
+    session_dir = job_path.parents[3]
+    request_id = job_path.parent.name
     lock = RunWriteLock(session_dir).acquire()
     try:
+        current = load_workflow_state(session_dir, request_id)
+        pointer_path = _session_pointer_path(
+            session_dir,
+            (current.get("current_job") or {}).get("path"),
+        )
+        if pointer_path != job_path:
+            raise ValueError("Generation Job不是Workflow current Job")
+        job = load_generation_job(
+            session_dir,
+            current.get("current_job") or {},
+        )
+        if job is None:
+            fail_generation_job_integrity(
+                session_dir,
+                request_id,
+                expected_epoch=expected_epoch,
+                error_code="job_integrity_failed",
+            )
+            raise ValueError("Generation Job identity无效")
         current = load_workflow_state(
             session_dir,
             (job.get("request") or {}).get("request_id"),
         )
+        current_execution = current.get("job_execution") or {}
+        if any((
+            current.get("status") != "ready",
+            current_execution.get("phase") != "ready",
+            current_execution.get("epoch") != expected_epoch,
+        )):
+            raise ValueError("Generation Job CAS冲突: status、phase或epoch")
+        request_path = _request_path_for_job(session_dir, job)
+        fresh = inspect_workflow(request_path, write=False)
+        if any((
+            fresh.get("status") != "ready",
+            (fresh.get("job_execution") or {}).get("phase") != "ready",
+            fresh.get("current_job") != current.get("current_job"),
+        )):
+            errors = list(fresh.get("errors") or ["job_freshness_failed"])
+            publish_pretransaction_job_failure(
+                session_dir,
+                (job.get("request") or {})["request_id"],
+                claim_id=None,
+                expected_epoch=current_execution["epoch"],
+                expected_phase="ready",
+                category=str(errors[0]),
+                next_action="review_generation_failure",
+                issue_owner={
+                    "type": "generation_admission_gap",
+                    "errors": errors,
+                },
+            )
+            raise ValueError(
+                "Generation Job freshness校验失败: "
+                + "; ".join(str(item) for item in errors)
+            )
         workflow = claim_generation_job(
             session_dir,
             (job.get("request") or {})["request_id"],
@@ -177,27 +326,137 @@ def start_generation_job(job_path, *, expected_epoch):
         lock.release()
 
 
-def inspect_generation_job(job_path):
-    session_dir, job, _state = _resolve_current_job(job_path)
+def retry_generation_job(job_path, *, profile_id=None):
+    session_dir, job, state = _resolve_known_job(job_path)
+    active_pointer = state.get("current_job") or {}
+    if active_pointer and active_pointer.get("job_id") != job.get("job_id"):
+        raise ValueError("当前已有活动Generation Job，不能重试历史Job")
+    execution = state.get("job_execution") or {}
+    if state.get("status") == "running" or execution.get("phase") in {
+        "design",
+        "implementation",
+        "runtime",
+        "oracle",
+    }:
+        raise ValueError("运行中的Generation Job不能retry")
     request_path = _request_path_for_job(session_dir, job)
-    state = inspect_workflow(request_path, write=False)
+    selected_profile = profile_id or (
+        (job.get("profile_lease") or {}).get("profile_id")
+    ) or "generation_first"
+    if profile_id is None and selected_profile == "precision":
+        selected_profile = "generation_first"
+    return admit_generation_job(request_path, profile_id=selected_profile)
+
+
+def retire_generation_job(
+        job_path,
+        *,
+        reason,
+        expected_epoch,
+        claim_id=None,
+    ):
+    session_dir, job, state = _resolve_current_job(job_path)
+    lock = RunWriteLock(session_dir).acquire()
+    try:
+        session_dir, job, state = _resolve_current_job(job_path)
+        execution = state.get("job_execution") or {}
+        phase = execution.get("phase")
+        if phase in {"implementation", "runtime", "oracle"}:
+            raise ValueError(
+                "已进入Transaction的Generation Job必须使用abort-job或finish-job"
+            )
+        if phase not in {"ready", "design"}:
+            return _job_result(session_dir, job, state)
+        if phase == "design" and execution.get("claim_id") != claim_id:
+            raise ValueError("Generation Job retire claim_id无效")
+        issue_owner = {
+            "type": "operator_retire",
+            "reason": str(reason or "operator_retired"),
+        }
+        return publish_pretransaction_job_failure(
+            session_dir,
+            (job.get("request") or {})["request_id"],
+            claim_id=claim_id,
+            expected_epoch=expected_epoch,
+            expected_phase=phase,
+            category="operator_retired",
+            next_action="review_generation_result",
+            issue_owner=issue_owner,
+        )
+    finally:
+        lock.release()
+
+
+def inspect_generation_job(job_path):
+    session_dir, job, state = _resolve_known_job(job_path)
+    request_path = _request_path_for_job(session_dir, job)
+    retired = retired_job_entry(state, job_id=job.get("job_id"))
+    if retired is None:
+        state = inspect_workflow(request_path, write=False)
+    else:
+        result_pointer = retired.get("last_job_result") or {}
+        terminal_result = load_generation_job_result(
+            session_dir,
+            result_pointer,
+        ) if result_pointer else None
+        state = {
+            **state,
+            "status": retired.get("status"),
+            "next_action": (
+                terminal_result.get("next_action")
+                if terminal_result is not None
+                else "review_generation_failure"
+            ),
+            "current_job": None,
+            "job_execution": retired.get("job_execution"),
+            "last_job_result": result_pointer or None,
+            "plan": (
+                (retired.get("job_execution") or {}).get("plan")
+                or state.get("plan")
+                or {}
+            ),
+        }
     result = _job_result(session_dir, job, state)
-    result["status"] = state.get("status")
-    result["next_action"] = state.get("next_action")
     request = _read_json(request_path)
     brief_path = _brief_path_for_job(session_dir, job)
     plan_value = state.get("plan") or {}
     plan_path = _session_pointer_path(session_dir, plan_value.get("path"))
     result.update({
-        "request_path": str(request_path),
-        "brief_path": str(brief_path),
-        "plan_path": str(plan_path) if plan_path else None,
-        "execution_boundary": job.get("execution_boundary") or {},
+        "job_path": Path(job_path).resolve().relative_to(
+            session_dir
+        ).as_posix(),
+        "request_path": request_path.relative_to(session_dir).as_posix(),
+        "brief_path": brief_path.relative_to(session_dir).as_posix(),
+        "plan_path": (
+            plan_path.relative_to(session_dir).as_posix()
+            if plan_path
+            else None
+        ),
+        "execution_boundary": _projected_execution_boundary(job),
         "ai_capabilities": compact_ai_capability_contract(),
     })
+    plan_artifact = load_generation_plan(session_dir, state, request)
+    plan_context = (
+        build_ai_plan_context(plan_artifact)
+        if plan_artifact is not None
+        else None
+    )
     from autowork_core.utils.debug_tools.recorder.generation_workflow import (
+        _compact_workflow_context,
         _with_context_budget,
         build_ai_context_budget,
+    )
+
+    result["ai_context_envelope"] = build_ai_context_envelope(
+        session_dir=session_dir,
+        request=request,
+        state=state,
+        brief_path=brief_path,
+        job_value=job,
+        job_path=job_path,
+        workflow_context=_compact_workflow_context(state),
+        ai_capabilities=result["ai_capabilities"],
+        plan_context=plan_context,
     )
 
     budget = build_ai_context_budget(
@@ -209,8 +468,9 @@ def inspect_generation_job(job_path):
         capability_contract=result["ai_capabilities"],
         brief_path=brief_path,
         plan_path=plan_path,
-        plan_context=None,
+        plan_context=plan_context,
         job_path=job_path,
+        job_value=job,
     )
     return _with_context_budget(result, budget)
 
@@ -223,7 +483,7 @@ def query_generation_job_evidence(
         action_id=None,
         list_only=False,
     ):
-    session_dir, job, _state = _resolve_current_job(job_path)
+    session_dir, job, _state = _resolve_known_job(job_path)
     result = query_request_evidence(
         _request_path_for_job(session_dir, job),
         evidence_id=evidence_id,
@@ -235,7 +495,7 @@ def query_generation_job_evidence(
 
 
 def compare_generation_job_takes(job_path, *, step_id, take_ids=()):
-    session_dir, job, _state = _resolve_current_job(job_path)
+    session_dir, job, _state = _resolve_known_job(job_path)
     result = compare_request_takes(
         _request_path_for_job(session_dir, job),
         step_id=step_id,
@@ -252,7 +512,7 @@ def query_generation_job_action_knowledge(
         operation_names=(),
         list_only=False,
     ):
-    session_dir, job, _state = _resolve_current_job(job_path)
+    session_dir, job, _state = _resolve_known_job(job_path)
     brief = load_generation_brief(_brief_path_for_job(session_dir, job))
     return {
         "status": "projected",
@@ -325,13 +585,33 @@ def prepare_generation_job(
     ):
     session_dir, job, _state = _resolve_current_job(job_path)
     request_path = _request_path_for_job(session_dir, job)
-    return prepare_generation_transaction(
+    result = prepare_generation_transaction(
         request_path,
         project_root=project_root,
         generation_job_lease=generation_job_lease(job),
         generation_job_claim_id=claim_id,
         generation_job_expected_epoch=expected_epoch,
     )
+    if result.get("status") == "job_blocked":
+        issue_owner = {
+            "type": "generation_admission_gap",
+            "category": result.get("job_failure_category"),
+            "errors": list(result.get("errors") or []),
+        }
+        return publish_pretransaction_job_failure(
+            session_dir,
+            (job.get("request") or {})["request_id"],
+            claim_id=claim_id,
+            expected_epoch=expected_epoch,
+            expected_phase="implementation",
+            category=str(
+                result.get("job_failure_category")
+                or "transaction_prepare_failed"
+            ),
+            next_action="review_generation_failure",
+            issue_owner=issue_owner,
+        )
+    return result
 
 
 def validate_generation_job_implementation(
@@ -393,7 +673,50 @@ def reconcile_generation_job_runtime(
         claim_id,
         expected_epoch,
     ):
-    session_dir, job, state = _resolve_current_job(job_path)
+    session_dir, job, state = _resolve_known_job(job_path)
+    lock = RunWriteLock(session_dir).acquire()
+    try:
+        session_dir, job, state = _resolve_known_job(job_path)
+        retired = retired_job_entry(state, job_id=job.get("job_id"))
+        if retired is not None:
+            execution = retired.get("job_execution") or {}
+            result = load_generation_job_result(
+                session_dir,
+                retired.get("last_job_result") or {},
+            )
+            if any((
+                execution.get("claim_id") != claim_id,
+                result is None,
+                (result.get("job") or {}).get("job_id")
+                != job.get("job_id"),
+                (result.get("job") or {}).get("job_fingerprint")
+                != job.get("job_fingerprint"),
+            )):
+                raise ValueError("Generation Job terminal result不匹配")
+            return {
+                **_job_result(session_dir, job, state),
+                "last_job_result": retired.get("last_job_result") or {},
+            }
+        session_dir, job, state = _resolve_current_job(job_path)
+        return _reconcile_generation_job_runtime_locked(
+            session_dir,
+            job,
+            state,
+            claim_id=claim_id,
+            expected_epoch=expected_epoch,
+        )
+    finally:
+        lock.release()
+
+
+def _reconcile_generation_job_runtime_locked(
+        session_dir,
+        job,
+        state,
+        *,
+        claim_id,
+        expected_epoch,
+    ):
     execution = state.get("job_execution") or {}
     if any((
         state.get("status") != "running",
@@ -495,7 +818,7 @@ def reconcile_generation_job_runtime(
             "fingerprint": matrix[1].get("fingerprint"),
             "status": (
                 "passed"
-                if quality.get("independent_oracle_passed") is True
+                if _oracle_passed(quality) is True
                 else "failed"
             ),
         }
@@ -503,10 +826,10 @@ def reconcile_generation_job_runtime(
         else None
     )
     passed = bool(
-        quality.get("runtime_passed") is True
+        _quality_passed(quality) is True
         and (
             not quality.get("runtime_matrix_required")
-            or quality.get("independent_oracle_passed") is True
+            or _oracle_passed(quality) is True
         )
     )
     return publish_runtime_job_outcome(
@@ -536,26 +859,56 @@ def reconcile_generation_job_runtime(
     )
 
 
+def _quality_passed(quality):
+    if not isinstance(quality, dict):
+        return None
+    if "quality_passed" in quality:
+        return quality.get("quality_passed")
+    return quality.get("runtime_passed")
+
+
+def _oracle_passed(quality):
+    if not isinstance(quality, dict):
+        return None
+    if "oracle_passed" in quality:
+        return quality.get("oracle_passed")
+    return quality.get("independent_oracle_passed")
+
+
 def _resolve_current_job(job_path):
+    session_dir, job, state = _resolve_known_job(job_path)
+    pointer = state.get("current_job") or {}
+    if pointer.get("job_id") != job.get("job_id"):
+        raise ValueError("Generation Job不是Workflow current Job")
+    return session_dir, job, state
+
+
+def _resolve_known_job(job_path):
     job_path = Path(job_path).resolve()
     if len(job_path.parents) < 4:
         raise ValueError("Generation Job path无效")
     session_dir = job_path.parents[3]
     request_id = job_path.parent.name
     state = load_workflow_state(session_dir, request_id)
-    pointer = state.get("current_job") or {}
-    expected_path = Path(str(pointer.get("path") or ""))
-    expected_path = (
-        expected_path.resolve()
-        if expected_path.is_absolute()
-        else (session_dir / expected_path).resolve()
+    pointers = [state.get("current_job") or {}]
+    pointers.extend(
+        (entry or {}).get("job") or {}
+        for entry in state.get("retired_jobs") or ()
     )
-    if expected_path != job_path:
-        raise ValueError("Generation Job不是Workflow current Job")
-    job = load_generation_job(session_dir, pointer)
-    if job is None:
-        raise ValueError("Generation Job identity无效")
-    return session_dir, job, state
+    for pointer in pointers:
+        expected_path = Path(str(pointer.get("path") or ""))
+        expected_path = (
+            expected_path.resolve()
+            if expected_path.is_absolute()
+            else (session_dir / expected_path).resolve()
+        )
+        if expected_path != job_path:
+            continue
+        job = load_generation_job(session_dir, pointer)
+        if job is None:
+            raise ValueError("Generation Job identity无效")
+        return session_dir, job, state
+    raise ValueError("Generation Job不是Workflow active或retired Job")
 
 
 def _decision_artifacts(session_dir, request, state):
@@ -577,6 +930,49 @@ def _decision_artifacts(session_dir, request, state):
         pack,
     )
     return pack, answers or {}
+
+
+def _candidate_job_inspect(session_dir, request, state, job):
+    return {
+        "generation_job_service_version": "1.0",
+        "status": "ready",
+        "next_action": "start_generation_job",
+        "request_id": request.get("request_id"),
+        "job_id": job.get("job_id"),
+        "job_path": (
+            Path("ai")
+            / "generation-jobs"
+            / request["request_id"]
+            / f"job-{job['job_fingerprint']}.json"
+        ).as_posix(),
+        "job_fingerprint": job.get("job_fingerprint"),
+        "generation_profile": _projected_generation_profile(job),
+        "generation_admission": job.get("admission_receipt") or {},
+        "job_execution": {
+            "phase": "ready",
+            "epoch": 1,
+            "claim_id": None,
+            "attempt_no": 0,
+        },
+        "execution_boundary": _projected_execution_boundary(job),
+        "request_path": (job.get("request") or {}).get("path"),
+        "brief_path": (job.get("brief") or {}).get("path"),
+        "plan_path": None,
+        "ai_capabilities": compact_ai_capability_contract(),
+        "errors": [],
+        "warnings": [],
+    }
+
+
+def _admission_rejected_result(request, admission):
+    return {
+        "generation_job_service_version": "1.0",
+        "status": "rejected",
+        "request_id": request.get("request_id"),
+        "generation_admission": admission,
+        "errors": list(admission.get("blocking_codes") or []),
+        "warnings": [],
+    }
 
 
 def _request_path_for_job(session_dir, job):
@@ -644,20 +1040,52 @@ def _job_result(session_dir, job, workflow):
         / (job.get("request") or {})["request_id"]
         / f"job-{job['job_fingerprint']}.json"
     ).resolve()
+    retired = retired_job_entry(
+        workflow,
+        job_id=job.get("job_id"),
+    )
+    retired = retired_job_entry(workflow, job_id=job.get("job_id"))
     return {
         "generation_job_service_version": "1.0",
-        "status": workflow.get("status"),
-        "next_action": workflow.get("next_action"),
+        "status": (retired or {}).get("status") or workflow.get("status"),
+        "next_action": (retired or {}).get("next_action") or workflow.get("next_action"),
         "request_id": (job.get("request") or {}).get("request_id"),
         "job_id": job.get("job_id"),
         "job_path": str(path),
         "job_fingerprint": job.get("job_fingerprint"),
-        "generation_profile": job.get("profile_lease") or {},
+        "generation_profile": _projected_generation_profile(job),
         "generation_admission": job.get("admission_receipt") or {},
-        "job_execution": workflow.get("job_execution") or {},
-        "execution_boundary": job.get("execution_boundary") or {},
-        "errors": [],
+        "job_execution": (
+            (retired or {}).get("job_execution")
+            or workflow.get("job_execution")
+            or {}
+        ),
+        "execution_boundary": _projected_execution_boundary(job),
+        "errors": list((retired or {}).get("errors") or ()),
         "warnings": [],
+    }
+
+
+def _projected_generation_profile(job):
+    profile = job.get("profile_lease") or {}
+    return {
+        key: profile.get(key)
+        for key in (
+            "generation_profile_version",
+            "profile_id",
+            "label",
+            "profile_fingerprint",
+        )
+        if profile.get(key) not in (None, "", [], {})
+    }
+
+
+def _projected_execution_boundary(job):
+    boundary = job.get("execution_boundary") or {}
+    return {
+        key: boundary.get(key)
+        for key in ("allowed_queries", "validation_stages")
+        if boundary.get(key) not in (None, "", [], {})
     }
 
 

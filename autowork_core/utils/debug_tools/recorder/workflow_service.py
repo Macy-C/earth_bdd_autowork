@@ -39,6 +39,7 @@ from autowork_core.utils.debug_tools.recorder.generation_job import (
     load_generation_job,
 )
 from autowork_core.utils.debug_tools.recorder.generation_profile import (
+    profile_lease_is_recognized,
     resolve_generation_profile,
 )
 from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION
@@ -84,6 +85,11 @@ def inspect_workflow(
     request = _read_json(request_path)
     session_dir = session_dir_for_request_path(request_path, request)
     existing = load_workflow_state(session_dir, request.get("request_id"))
+    terminal_job_workflow = bool(
+        existing.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION
+        and not existing.get("current_job")
+        and existing.get("last_job_result")
+    )
     if (
         existing.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION
         and existing.get("current_job")
@@ -173,7 +179,14 @@ def inspect_workflow(
                 brief = None
             else:
                 try:
-                    if (existing.get("plan") or {}).get("path"):
+                    if terminal_job_workflow:
+                        brief = build_generation_brief(
+                            session_dir,
+                            request,
+                            write=write,
+                        )
+                        plan_artifact = None
+                    elif (existing.get("plan") or {}).get("path"):
                         brief = load_generation_brief(
                             _brief_path(session_dir, existing)
                         )
@@ -228,7 +241,12 @@ def inspect_workflow(
 
     state = {
         "schema_version": SCHEMA_VERSION,
-        "workflow_state_version": "3.0",
+        "workflow_state_version": (
+            JOB_WORKFLOW_STATE_VERSION
+            if existing.get("workflow_state_version")
+            == JOB_WORKFLOW_STATE_VERSION
+            else "3.0"
+        ),
         "request_id": request.get("request_id"),
         "request_path": str(request_path),
         "session_dir": str(session_dir),
@@ -253,6 +271,14 @@ def inspect_workflow(
         ),
         "active_transaction": None,
     }
+    if state["workflow_state_version"] == JOB_WORKFLOW_STATE_VERSION:
+        state.update({
+            "current_job": existing.get("current_job"),
+            "job_execution": existing.get("job_execution"),
+            "retired_jobs": list(existing.get("retired_jobs") or []),
+            "last_job_result": existing.get("last_job_result"),
+            "attempt_history": list(existing.get("attempt_history") or []),
+        })
     if (
         status == "ready"
         and existing.get("status") == "ready"
@@ -272,6 +298,10 @@ def inspect_workflow(
         state["status"] = existing["status"]
         state["next_action"] = existing.get("next_action")
         state["active_transaction"] = existing.get("active_transaction")
+        state["last_result"] = existing.get("last_result")
+    elif terminal_job_workflow and status == "ready":
+        state["status"] = existing.get("status")
+        state["next_action"] = existing.get("next_action")
         state["last_result"] = existing.get("last_result")
     if write:
         write_workflow_state(session_dir, state)
@@ -1008,12 +1038,6 @@ def _inspect_job_workflow(
     else:
         job_request = job.get("request") or {}
         profile = job.get("profile_lease") or {}
-        try:
-            current_profile = resolve_generation_profile(
-                profile.get("profile_id")
-            )
-        except ValueError:
-            current_profile = {}
         if any((
             not request_identity_is_valid(request),
             job_request.get("request_id") != request.get("request_id"),
@@ -1036,9 +1060,7 @@ def _inspect_job_workflow(
             job.get("generation_contract_lease") or {},
         ):
             errors.append("job_contract_stale")
-        if current_profile.get("profile_fingerprint") != profile.get(
-            "profile_fingerprint"
-        ):
+        if not profile_lease_is_recognized(profile):
             errors.append("job_profile_stale")
     if errors:
         state = dict(state)

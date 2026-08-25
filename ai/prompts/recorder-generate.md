@@ -1,48 +1,31 @@
 # Recorder Generate
 
-Follow `ai/instructions/bdd-generation.md`.
+Accept only a Workbench-created Generation Job path. Never answer Decisions,
+switch Profile, replace the Request, or reopen admission here.
 
-1. Inspect once:
+```powershell
+$gw = "autowork_core.utils.debug_tools.recorder.generation_workflow"
+python -m $gw inspect-job <job-path>
+python -m $gw start-job <job-path> --expected-epoch <epoch>
+python -m $gw retire-job <job-path> --expected-epoch <epoch> --reason <reason> [--claim-id <id>]
+python -m $gw design-contract
+python -m $gw design-job <job-path> --claim-id <claim-id> --expected-epoch <epoch> --design-file <design.json>
+python -m $gw prepare-job <job-path> --claim-id <id> --expected-epoch <epoch>
+python -m $gw validate-job-implementation <report> --claim-id <id> --expected-epoch <epoch>
+python -m $gw finish-job <report> --claim-id <id> --expected-epoch <epoch>
+```
 
-   ```powershell
-   python -m autowork_core.utils.debug_tools.recorder.generation_workflow inspect <request-path>
-   ```
+Use latest claim/epoch. Expand named uncertainties with `job-evidence`,
+`job-compare-takes`, or `job-action-knowledge`. Edit only `ai_editable_changes`.
+Before `prepare-job`, use `retire-job` for terminal authority/evidence gaps;
+after `prepare-job`, use `abort-job`.
 
-   Answer one Decision batch only for `needs_adjustment`. For `draft`, `ready`,
-   or `forensic`, expand only named evidence/code candidates and submit one
-   complete Design. Stop on `blocked`/`stale`. On `failed`, repair only the
-   implicated AI choice once. Use compact `plan_context` for `completed`.
+If `execution.runtime_policy=allowed`, run the bound profile and reconcile:
 
-2. Submit the Design:
+```powershell
+python -B -m Bdd.runner <feature> --generation-transaction-report <report> --execution-request <request-path>
+python -m $gw reconcile-job-runtime <job-path> --claim-id <id> --expected-epoch <epoch>
+```
 
-   ```powershell
-   python -m autowork_core.utils.debug_tools.recorder.generation_workflow design-contract
-   python -m autowork_core.utils.debug_tools.recorder.generation_workflow design <request-path> --design-file <design.json>
-   ```
-
-   Use `evidence`, `compare-takes`, `action-knowledge`, or `decision-media`
-   only when needed. Rejected only: diagnose read-only with:
-
-   ```powershell
-   python -m autowork_core.utils.debug_tools.recorder.generation_workflow validate-design <request-path> --design-file <design.json>
-   ```
-
-   If the Contract cannot express it, report `framework_defect` and stop.
-
-3. Transact:
-
-   ```powershell
-   python -m autowork_core.utils.debug_tools.recorder.generation_workflow prepare <request-path>
-   python -m autowork_core.utils.debug_tools.recorder.generation_workflow validate-implementation <report>
-   python -m autowork_core.utils.debug_tools.recorder.generation_workflow finish <report>
-   ```
-
-   Edit only `ai_editable_changes`. If repair cannot stay there, run
-   `abort <report> --reason <reason>` and stop for separate maintenance.
-
-4. Runtime: if Request `runtime_policy` is not `allowed`, report
-   `static_validated/runtime_not_run`. Otherwise run only the bound profile:
-
-   ```powershell
-   python -B -m Bdd.runner <feature> --generation-transaction-report <report> --execution-request <request-path>
-   ```
+Repeat reconciliation only when the Job advances to required Oracle evidence.
+Report completion from a terminal content-addressed Job Result.

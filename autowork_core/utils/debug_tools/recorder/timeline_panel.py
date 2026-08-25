@@ -150,6 +150,10 @@ class TimelineEditorWindow:
             f"timeline:{id(self)}:observation:"
         )
         self.observation_poll_after_id = None
+        self.keyboard_fragments_frame = None
+        self.keyboard_fragments_body = None
+        self.keyboard_fragments_toggle = None
+        self.keyboard_fragments_expanded = False
 
         self._build_ui()
         self.refresh(notify=False)
@@ -309,6 +313,14 @@ class TimelineEditorWindow:
         self._build_observation_editor(self.observations_frame)
         self.detail_notebook.hide(self.observations_frame)
 
+        self.keyboard_fragments_frame = ttk.Frame(self.detail_notebook)
+        self.detail_notebook.add(
+            self.keyboard_fragments_frame,
+            text="键盘片段",
+        )
+        self._build_keyboard_fragments(self.keyboard_fragments_frame)
+        self.detail_notebook.hide(self.keyboard_fragments_frame)
+
         self.busy_frame = ttk.Frame(self.window)
         ttk.Label(
             self.busy_frame,
@@ -458,6 +470,127 @@ class TimelineEditorWindow:
             text="定位到对应动作",
             command=self.ignore_selected_observation,
         ).pack(side="left", padx=6)
+
+    def _build_keyboard_fragments(self, parent):
+        parent.columnconfigure(0, weight=1)
+        self.keyboard_fragments_toggle = ttk.Button(
+            parent,
+            text="展开键盘片段",
+            command=self._toggle_keyboard_fragments,
+        )
+        self.keyboard_fragments_toggle.grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=8,
+            pady=8,
+        )
+        self.keyboard_fragments_body = ttk.Frame(parent)
+        self.keyboard_fragments_body.columnconfigure(0, weight=1)
+
+    def _set_keyboard_fragments_visible(self, visible):
+        if self.keyboard_fragments_frame is None:
+            return
+        frame_id = str(self.keyboard_fragments_frame)
+        tabs = set(self.detail_notebook.tabs())
+        if visible:
+            if frame_id not in tabs:
+                self.detail_notebook.add(
+                    self.keyboard_fragments_frame,
+                    text="键盘片段",
+                )
+            self.keyboard_fragments_expanded = False
+            self._render_keyboard_fragments()
+            return
+        if frame_id in tabs:
+            self.detail_notebook.hide(self.keyboard_fragments_frame)
+
+    def _toggle_keyboard_fragments(self):
+        self.keyboard_fragments_expanded = not self.keyboard_fragments_expanded
+        self._render_keyboard_fragments()
+
+    def _render_keyboard_fragments(self):
+        body = self.keyboard_fragments_body
+        toggle = self.keyboard_fragments_toggle
+        if body is None or toggle is None:
+            return
+        body.grid_forget()
+        body.destroy()
+        body = ttk.Frame(self.keyboard_fragments_frame)
+        body.columnconfigure(0, weight=1)
+        self.keyboard_fragments_body = body
+        toggle.configure(
+            text=(
+                "收起键盘片段"
+                if self.keyboard_fragments_expanded
+                else "展开键盘片段"
+            )
+        )
+        if not self.keyboard_fragments_expanded:
+            return
+        action = self.current_action or {}
+        try:
+            fragments = self.store.keyboard_fragments(action.get("id"))
+        except (KeyError, ValueError):
+            fragments = []
+        for index, fragment in enumerate(fragments, start=1):
+            row = ttk.Frame(body)
+            row.grid(
+                row=index - 1,
+                column=0,
+                sticky="ew",
+                padx=10,
+                pady=3,
+            )
+            row.columnconfigure(0, weight=1)
+            ttk.Label(
+                row,
+                text=f"{index}. {_keyboard_fragment_label(fragment)}",
+                anchor="w",
+            ).grid(
+                row=0,
+                column=0,
+                sticky="ew",
+            )
+            button = ttk.Button(
+                row,
+                text="恢复" if not fragment.get("included") else "忽略",
+                command=lambda value=fragment: self._toggle_keyboard_fragment(
+                    value
+                ),
+            )
+            button.grid(row=0, column=1, padx=(8, 0))
+            self.mutation_controls.append(button)
+        body.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=2,
+            pady=(0, 8),
+        )
+
+    def _toggle_keyboard_fragment(self, fragment):
+        action = self.current_action or {}
+        action_id = action.get("id")
+        key_event_ids = fragment.get("key_event_ids") or ()
+        if not action_id or not key_event_ids:
+            self.status_var.set("当前键盘片段无可校正的原始事件。")
+            return
+        include = not bool(fragment.get("included"))
+        self._apply(
+            lambda store, _ids: store.set_keyboard_fragment_included(
+                action_id,
+                key_event_ids,
+                include,
+            ),
+            [],
+            select_ids=[action_id],
+            completion_message=(
+                "已恢复键盘片段。"
+                if include
+                else "已忽略键盘片段；原始录制仍然保留。"
+            ),
+        )
 
     def _refresh_observations(self, select_event_id=None):
         if self.observation_tree is None:
@@ -1349,6 +1482,9 @@ class TimelineEditorWindow:
         )
         self.current_action = action
         self.current_action_media = self.action_media_map.get(action.get("id"))
+        self._set_keyboard_fragments_visible(
+            action.get("type") == "keyboard"
+        )
         self._render_action_view()
 
     def _show_image(self, path):
@@ -1616,6 +1752,49 @@ def _action_summary_label(action):
     if not action.get("included", True) or action.get("role") == "noise":
         return "已忽略 · " + text
     return text
+
+
+def _keyboard_fragment_label(fragment):
+    key = (fragment or {}).get("key") or {}
+    name = str(key.get("name") or "")
+    return (
+        "输入 " + name
+        if len(name) == 1 and name.isprintable()
+        else _keyboard_key_label(name)
+    )
+
+
+def _keyboard_fragments(action):
+    keys = list((action or {}).get("keys") or ())
+    fragments = []
+    text = []
+    for item in keys:
+        name = str((item or {}).get("name") or "")
+        if len(name) == 1 and name.isprintable():
+            text.append(name)
+            continue
+        if text:
+            fragments.append("输入 " + "".join(text))
+            text = []
+        if name:
+            fragments.append(_keyboard_key_label(name))
+    if text:
+        fragments.append("输入 " + "".join(text))
+    return fragments or ["未记录可展示的键盘片段"]
+
+
+def _keyboard_key_label(name):
+    return {
+        "Left": "左方向键",
+        "Right": "右方向键",
+        "Up": "上方向键",
+        "Down": "下方向键",
+        "Back": "退格键",
+        "Delete": "删除键",
+        "Enter": "回车键",
+        "Tab": "Tab 键",
+        "Escape": "Esc 键",
+    }.get(name, f"按键 {name}")
 
 
 def _first_media(event_media, event_ids):

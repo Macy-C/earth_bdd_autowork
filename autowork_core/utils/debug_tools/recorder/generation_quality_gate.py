@@ -32,8 +32,8 @@ from autowork_core.utils.debug_tools.recorder.runtime_risk_policy import (
 )
 
 
-QUALITY_GATE_VERSION = "1.2"
-SUPPORTED_QUALITY_GATE_VERSIONS = {"1.1", QUALITY_GATE_VERSION}
+QUALITY_GATE_VERSION = "1.3"
+SUPPORTED_QUALITY_GATE_VERSIONS = {"1.1", "1.2", QUALITY_GATE_VERSION}
 def evaluate_generation_quality(
         request,
         plan_artifact,
@@ -97,7 +97,7 @@ def evaluate_generation_quality(
         protocol_e2e_passed and origin_valid and external_ai
     )
 
-    runtime_passed, runtime_reasons = _runtime_passed(
+    single_run_passed, runtime_reasons = _single_run_passed(
         request,
         plan_artifact,
         transaction_report,
@@ -149,7 +149,7 @@ def evaluate_generation_quality(
         and risk_policy.get("requires_runtime_matrix") is True
     )
     runtime_quality_passed = bool(
-        runtime_passed
+        single_run_passed
         and risk_policy_valid
         and (matrix_passed if risk_policy_present else True)
     )
@@ -178,11 +178,11 @@ def evaluate_generation_quality(
         "plan_origin": plan_origin,
         "protocol_e2e_passed": protocol_e2e_passed,
         "ai_plan_validated": ai_plan_validated,
-        "runtime_passed": runtime_quality_passed,
-        "single_run_passed": runtime_passed,
+        "quality_passed": runtime_quality_passed,
+        "single_run_passed": single_run_passed,
         "runtime_matrix_required": high_risk,
         "runtime_matrix_passed": matrix_passed if high_risk else None,
-        "independent_oracle_passed": matrix_passed if high_risk else None,
+        "oracle_passed": matrix_passed if high_risk else None,
         "request_id": request.get("request_id"),
         "plan_id": plan_artifact.get("plan_id"),
         "transaction_id": transaction_report.get("transaction_id"),
@@ -279,7 +279,7 @@ def _transaction_passed(report, request, plan_artifact):
     return not reasons, reasons
 
 
-def _runtime_passed(request, plan_artifact, transaction_report, run_result):
+def _single_run_passed(request, plan_artifact, transaction_report, run_result):
     if not isinstance(run_result, dict):
         return False, ["缺少匹配的真实运行结果"]
     if not run_result_identity_is_valid(run_result):

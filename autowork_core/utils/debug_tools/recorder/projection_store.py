@@ -205,12 +205,15 @@ class ProjectionStore:
             return None
 
     def artifact_path(self, key, *, legacy=None, snapshot=_LOAD_CURRENT):
+        loading_current = snapshot is _LOAD_CURRENT
         if snapshot is _LOAD_CURRENT:
             snapshot = self.current()
         if snapshot is not None:
             path = snapshot.path(key)
             if path is not None:
                 return path
+        if loading_current and self.pointer_path.exists():
+            return None
         legacy_names = (
             (legacy,)
             if isinstance(legacy, (str, Path))

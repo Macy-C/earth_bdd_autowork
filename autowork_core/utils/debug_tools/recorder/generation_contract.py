@@ -21,6 +21,9 @@ from autowork_core.utils.debug_tools.recorder.ai_capability_registry import (
     plan_operation_names,
     validate_base_page_action_classification,
 )
+from autowork_core.utils.debug_tools.recorder.ai_context_envelope import (
+    compact_ai_context_envelope_contract,
+)
 from autowork_core.utils.debug_tools.recorder.generation_design import (
     compact_generation_design_contract,
 )
@@ -30,7 +33,7 @@ from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-GENERATION_CONTRACT_VERSION = "6.17"
+GENERATION_CONTRACT_VERSION = "6.19"
 FRAMEWORK_CONTRACT_VERSION = "3.1"
 GENERATION_CONTRACT_LEASE_VERSION = "1.0"
 
@@ -42,6 +45,7 @@ def build_generation_contract(manifest):
     framework_contract = _framework_contract()
     design_contract = compact_generation_design_contract()
     implementation_contract = compact_implementation_manifest_contract()
+    envelope_contract = compact_ai_context_envelope_contract()
     contract = {
         "schema_version": SCHEMA_VERSION,
         "generation_contract_version": GENERATION_CONTRACT_VERSION,
@@ -56,27 +60,48 @@ def build_generation_contract(manifest):
             ],
             "fingerprint": _hash_value(implementation_contract),
         },
+        "ai_context_envelope_contract": {
+            "version": envelope_contract["ai_context_envelope_version"],
+            "fingerprint": envelope_contract["contract_fingerprint"],
+        },
         "framework_contract": framework_contract,
         "purpose": (
-            "Generate evidence-traceable BDD code through a lightweight V3 "
-            "Generation Brief with automatic forensic escalation and validation."
+            "Generate evidence-traceable BDD code through an immutable "
+            "Generation Job with frontloaded Decisions and fail-closed "
+            "Plan/Transaction validation."
         ),
-        "entrypoint": "ai/requests/<request-id>.json",
-        "v3_workflow": {
+        "entrypoint": "ai/generation-jobs/<request-id>/job-<fingerprint>.json",
+        "job_workflow": {
             "inspect": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow inspect <request-path>"
+                "generation_workflow inspect-job <job-path>"
             ),
-            "plan": (
+            "start": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow plan <request-path> "
-                "[--step-id <step-id> | --section <section>]"
+                "generation_workflow start-job <job-path> --expected-epoch <epoch>"
+            ),
+            "retry": (
+                "python -m autowork_core.utils.debug_tools.recorder."
+                "generation_workflow retry-job <job-path>"
+            ),
+            "retire": (
+                "python -m autowork_core.utils.debug_tools.recorder."
+                "generation_workflow retire-job <job-path> --expected-epoch <epoch> "
+                "--reason <reason> [--claim-id <claim-id>]"
+            ),
+            "evidence": (
+                "python -m autowork_core.utils.debug_tools.recorder."
+                "generation_workflow job-evidence <job-path> "
+                "[--evidence-id <id> | --step-id <step-id> | --action-id <action-id>]"
+            ),
+            "compare_takes": (
+                "python -m autowork_core.utils.debug_tools.recorder."
+                "generation_workflow job-compare-takes <job-path> --step-id <step-id>"
             ),
             "action_knowledge": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow action-knowledge <request-path> "
-                "[--step-id <step-id> --action-id <action-id>] "
-                "[--operation <operation>]"
+                "generation_workflow job-action-knowledge <job-path> "
+                "[--step-id <step-id> --action-id <action-id>] [--operation <operation>]"
             ),
             "design_contract": (
                 "python -m autowork_core.utils.debug_tools.recorder."
@@ -84,20 +109,33 @@ def build_generation_contract(manifest):
             ),
             "design": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow design <request-path> "
-                "--design-file <design.json>"
+                "generation_workflow design-job <job-path> --claim-id <claim-id> "
+                "--expected-epoch <epoch> --design-file <design.json>"
             ),
             "prepare": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow prepare <request-path>"
+                "generation_workflow prepare-job <job-path> --claim-id <claim-id> "
+                "--expected-epoch <epoch>"
+            ),
+            "validate_implementation": (
+                "python -m autowork_core.utils.debug_tools.recorder."
+                "generation_workflow validate-job-implementation <report-path> "
+                "--claim-id <claim-id> --expected-epoch <epoch>"
             ),
             "finish": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow finish <report-path>"
+                "generation_workflow finish-job <report-path> --claim-id <claim-id> "
+                "--expected-epoch <epoch>"
             ),
             "abort": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow abort <report-path> --reason <reason>"
+                "generation_workflow abort-job <report-path> --claim-id <claim-id> "
+                "--expected-epoch <epoch> --reason <reason>"
+            ),
+            "runtime_reconcile": (
+                "python -m autowork_core.utils.debug_tools.recorder."
+                "generation_workflow reconcile-job-runtime <job-path> "
+                "--claim-id <claim-id> --expected-epoch <epoch>"
             ),
             "risk_modes": ["fast", "clarify", "forensic", "blocked"],
             "workflow_states": [
@@ -481,7 +519,7 @@ def build_generation_contract(manifest):
                 "Search resolved capabilities and existing code before generating a new implementation.",
                 "When a generation request is provided, generate only its target Steps.",
                 "Prefer exact id/key/ordinal/name matches before unique partial text matches.",
-                "Use target_generation_ready for a targeted request; do not require unrelated pending Steps to be complete.",
+                "Use target_capture_generation_candidate for a targeted request; do not treat readiness as admission.",
                 "Do not merge evidence from different runs unless explicitly requested.",
             ],
         },
@@ -538,7 +576,8 @@ def build_generation_contract(manifest):
         "plan_contract": {
             "command": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow design <request-path> "
+                "generation_workflow design-job <job-path> --claim-id <claim-id> "
+                "--expected-epoch <epoch> "
                 "--design-file <design.json>"
             ),
             "protocol": "ai/plans/<request-id>/plan-*.json",
@@ -577,18 +616,36 @@ def build_generation_contract(manifest):
             ),
         },
         "legacy_compatibility": {
+            "historical_v3_recovery": {
+                "inspect": (
+                    "python -m autowork_core.utils.debug_tools.recorder."
+                    "generation_workflow inspect <request-path>"
+                ),
+                "plan": (
+                    "python -m autowork_core.utils.debug_tools.recorder."
+                    "generation_workflow plan <request-path> "
+                    "[--step-id <step-id> | --section <section>]"
+                ),
+                "finish_running_transaction": (
+                    "python -m autowork_core.utils.debug_tools.recorder."
+                    "generation_workflow finish <report-path>"
+                ),
+                "abort_running_transaction": (
+                    "python -m autowork_core.utils.debug_tools.recorder."
+                    "generation_workflow abort <report-path> --reason <reason>"
+                ),
+            },
             "intent_contract": (
                 "python -m autowork_core.utils.debug_tools.recorder."
                 "generation_workflow intent-contract"
             ),
             "adjust": (
-                "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow adjust <request-path> "
-                "--plan-file <plan.json>"
+                "retired for current generation; use Workbench admission "
+                "to create a new Generation Job"
             ),
             "policy": (
                 "Historical Plan-shaped input remains readable only; new "
-                "generation must use GenerationDesignV1 through design."
+                "generation must use GenerationDesignV1 through design-job."
             ),
         },
         "media_contract": {

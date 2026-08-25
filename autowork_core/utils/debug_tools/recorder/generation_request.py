@@ -260,8 +260,8 @@ def build_generation_request(
         identity_profile="business-v1",
     )
     target_readiness = _target_readiness(target_reviews)
-    target_generation_ready = target_readiness[
-        "target_generation_ready"
+    target_capture_generation_candidate = target_readiness[
+        "target_capture_generation_candidate"
     ]
     request = {
         "schema_version": SCHEMA_VERSION,
@@ -294,8 +294,11 @@ def build_generation_request(
         },
         "readiness": {
             "bundle_valid": readiness["bundle_valid"],
-            "target_generation_ready": target_generation_ready,
-            "session_generation_ready": readiness["generation_ready"],
+            "target_capture_generation_candidate": target_capture_generation_candidate,
+            "session_capture_generation_candidate": readiness.get(
+                "capture_generation_candidate",
+                readiness.get("generation_ready", False),
+            ),
             "target_reconciliation_required": bool(target_reviews),
             "target_hard_blocker_count": target_readiness[
                 "target_hard_blocker_count"
@@ -415,7 +418,7 @@ def _target_readiness(reviews):
         if (item.get("recovery") or {}).get("hard_blocker")
     ]
     return {
-        "target_generation_ready": not hard_blockers,
+        "target_capture_generation_candidate": not hard_blockers,
         "target_reconciliation_required": bool(reviews),
         "target_hard_blocker_count": len(hard_blockers),
     }

@@ -239,7 +239,7 @@ def validate_ai_bundle(session_dir):
     )
     recording_complete = stats["completed_steps"] > 0 and stats["pending_steps"] == 0
 
-    generation_ready = (
+    capture_generation_candidate = (
         not errors
         and recording_complete
         and semantic_ready
@@ -252,10 +252,11 @@ def validate_ai_bundle(session_dir):
         warnings.append(f"有 {len(review_required)} 项语义证据需要复核")
     return {
         "schema_version": SCHEMA_VERSION,
+        "readiness_version": "2.0",
         "bundle_valid": not errors,
         "recording_complete": recording_complete,
         "semantic_ready": semantic_ready,
-        "generation_ready": generation_ready,
+        "capture_generation_candidate": capture_generation_candidate,
         "errors": errors,
         "warnings": warnings,
         "review_required": review_required,

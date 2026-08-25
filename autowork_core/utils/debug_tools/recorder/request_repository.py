@@ -344,6 +344,8 @@ def request_identity_is_valid(request, step_ids=None):
     ):
         return False
     declared = request.get("request_fingerprint")
+    if not explicit_legacy and not declared:
+        return False
     return bool(
         _seal_less_request_identity_is_valid(request)
         and (

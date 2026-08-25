@@ -545,6 +545,7 @@ def record_transaction_feedback(report_path, status, note=""):
     capability_candidates = []
     capability_source_error = None
     capability_session_id = None
+    runtime_verification = "not_run"
     if status == "accepted" and not modified:
         try:
             from autowork_core.utils.debug_tools.recorder.capability import (
@@ -558,15 +559,23 @@ def record_transaction_feedback(report_path, status, note=""):
                     project_root=project_root,
                 )
             )
-            capability_candidates = _feedback_capability_candidates(
-                validated_request,
-                validated_plan,
-            )
+            runtime_verification = str(_runtime or "not_run")
+            if runtime_verification in {"passed", "oracle_verified"}:
+                capability_candidates = _feedback_capability_candidates(
+                    validated_request,
+                    validated_plan,
+                )
             capability_session_id = str(
                 (validated_request.get("session") or {}).get("id") or ""
             ) or None
         except Exception as error:
             capability_source_error = error
+    feedback_tier = _accepted_feedback_tier(
+        status,
+        modified=modified,
+        capability_source_error=capability_source_error,
+        runtime_verification=runtime_verification,
+    )
     default_claims = {
         "accepted": "User accepted the generated implementation.",
         "revised": "User revised the generated implementation.",
@@ -594,10 +603,13 @@ def record_transaction_feedback(report_path, status, note=""):
             "changed_files": report.get("changed_files") or [],
             "current_snapshot": current_snapshot,
             "modified_since_generation": modified,
+            "accepted_feedback_tier": feedback_tier,
+            "runtime_verification": runtime_verification,
             "capability_source_validated": (
                 status == "accepted"
                 and not modified
                 and capability_source_error is None
+                and runtime_verification in {"passed", "oracle_verified"}
             ),
             "capability_candidates": capability_candidates,
         },
@@ -620,6 +632,10 @@ def record_transaction_feedback(report_path, status, note=""):
                 "Capability 未发布: "
                 f"{type(capability_source_error).__name__}: "
                 f"{capability_source_error}"
+            )
+        elif feedback_tier == "accepted_static_only":
+            result["capability_warnings"].append(
+                "accepted_static_only 已记录为建议性反馈；缺少runtime/oracle验证，未发布 Capability 候选"
             )
         else:
             try:
@@ -762,6 +778,24 @@ def _eligible_capability_steps(
         for candidate in candidates
         if historical.get(str(candidate.get("fingerprint") or ""))
     }
+
+
+def _accepted_feedback_tier(
+        status,
+        *,
+        modified,
+        capability_source_error,
+        runtime_verification,
+):
+    if status != "accepted":
+        return None
+    if modified or capability_source_error is not None:
+        return "accepted_static_only"
+    if runtime_verification == "oracle_verified":
+        return "accepted_oracle_verified"
+    if runtime_verification == "passed":
+        return "accepted_runtime_verified"
+    return "accepted_static_only"
 
 
 def _validate_transaction_report_path(report_path, session_dir, report):
@@ -979,6 +1013,16 @@ def _token_text(value):
 def _memory_bucket(event):
     if event.get("kind") == "transaction_feedback":
         if event.get("status") == "accepted":
+            payload = event.get("payload") or {}
+            if (
+                payload.get("capability_source_validated") is not True
+                or payload.get("accepted_feedback_tier")
+                not in {
+                    "accepted_runtime_verified",
+                    "accepted_oracle_verified",
+                }
+            ):
+                return "past_corrections"
             return "accepted_outcomes"
         return "past_corrections"
     if event.get("authority") == "user_confirmed":

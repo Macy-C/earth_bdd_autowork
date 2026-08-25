@@ -21,6 +21,8 @@ FINAL_REPORT_JSON = FINAL_REPORT_DIR / "autowork-final-report.json"
 FINAL_REPORT_HTML = FINAL_REPORT_DIR / "autowork-final-report.html"
 FINAL_MERGE_LOG = FINAL_REPORT_DIR / "autowork-final-merge.json"
 DEFAULT_SOURCE_REPORT = Path("artifacts/reports/autowork-report.json")
+DEFAULT_SOURCE_REPORT_TEXT = DEFAULT_SOURCE_REPORT.as_posix()
+DEFAULT_TARGET_REPORT_TEXT = FINAL_REPORT_JSON.as_posix()
 
 
 class FinalReportMergeError(ValueError):
@@ -254,6 +256,274 @@ def render_final_report(report_or_path=None, *, html_path=None, project_root=Non
     return html_path
 
 
+def create(
+        report_json=DEFAULT_SOURCE_REPORT_TEXT,
+        *,
+        target_report=None,
+        html_report=None,
+        merge_log=None,
+        project_root=None,
+):
+    return create_final_report(
+        report_json,
+        target_path=target_report,
+        html_path=html_report,
+        log_path=merge_log,
+        project_root=project_root,
+    )
+
+
+def merge(
+        report_json=DEFAULT_SOURCE_REPORT_TEXT,
+        *,
+        feature_file=None,
+        feature_name=None,
+        scenario_name=None,
+        example_id=None,
+        allow_add=True,
+        target_report=None,
+        html_report=None,
+        merge_log=None,
+        project_root=None,
+):
+    project_root = Path(project_root or Paths.BASE_DIR).resolve()
+    source_path = _resolve_path(report_json or DEFAULT_SOURCE_REPORT, project_root=project_root)
+    target_path, html_path, log_path = _default_output_paths(
+        target_path=target_report,
+        html_path=html_report,
+        log_path=merge_log,
+        project_root=project_root,
+    )
+    source = snapshot_report_assets(
+        _load_report(source_path),
+        source_report_path=source_path,
+        final_report_path=html_path,
+        project_root=project_root,
+    )
+    target = _load_report(target_path)
+    scopes = _operation_scopes(
+        source,
+        feature_file=feature_file,
+        feature_name=feature_name,
+        scenario_name=scenario_name,
+        example_id=example_id,
+    )
+    for scope in scopes:
+        target = merge_report(source, target, allow_add=allow_add, **scope)
+    _write_json_atomic(target_path, target)
+    render_final_report(target, html_path=html_path)
+    _append_merge_log(
+        log_path,
+        "merge",
+        project_root=project_root,
+        source_path=source_path,
+        target_path=target_path,
+        html_path=html_path,
+        scopes=scopes,
+        allow_add=allow_add,
+    )
+    return target_path, html_path
+
+
+def delete(
+        report_json=DEFAULT_SOURCE_REPORT_TEXT,
+        *,
+        feature_file=None,
+        feature_name=None,
+        scenario_name=None,
+        example_id=None,
+        target_report=None,
+        html_report=None,
+        merge_log=None,
+        project_root=None,
+):
+    project_root = Path(project_root or Paths.BASE_DIR).resolve()
+    source_path = _resolve_path(report_json or DEFAULT_SOURCE_REPORT, project_root=project_root)
+    target_path, html_path, log_path = _default_output_paths(
+        target_path=target_report,
+        html_path=html_report,
+        log_path=merge_log,
+        project_root=project_root,
+    )
+    source = _load_report(source_path)
+    target = _load_report(target_path)
+    scopes = _operation_scopes(
+        source,
+        feature_file=feature_file,
+        feature_name=feature_name,
+        scenario_name=scenario_name,
+        example_id=example_id,
+    )
+    for scope in scopes:
+        target = delete_result(target, **scope)
+    _write_json_atomic(target_path, target)
+    render_final_report(target, html_path=html_path)
+    _append_merge_log(
+        log_path,
+        "delete",
+        project_root=project_root,
+        source_path=source_path,
+        target_path=target_path,
+        html_path=html_path,
+        scopes=scopes,
+    )
+    return target_path, html_path
+
+
+def render(*, target_report=None, html_report=None, project_root=None):
+    target = target_report or DEFAULT_TARGET_REPORT_TEXT
+    html = render_final_report(
+        target,
+        html_path=html_report,
+        project_root=project_root,
+    )
+    return target, html
+
+
+def run_configured(
+        action="create",
+        *,
+    report_json=DEFAULT_SOURCE_REPORT_TEXT,
+    source_report=None,
+        feature_file=None,
+        feature_name=None,
+        scenario_name=None,
+        example_id=None,
+        allow_add=True,
+        target_report=None,
+        html_report=None,
+        merge_log=None,
+        project_root=None,
+):
+    return run_action(action, {
+        "report_json": source_report or report_json,
+        "feature_file": feature_file,
+        "feature_name": feature_name,
+        "scenario_name": scenario_name,
+        "example_id": example_id,
+        "allow_add": allow_add,
+        "target_report": target_report,
+        "html_report": html_report,
+        "merge_log": merge_log,
+        "project_root": project_root,
+    })
+
+
+def run_action(action, config=None):
+    config = dict(config or {})
+    action = str(action or "create").strip().lower()
+    if action == "create":
+        return create(
+            config.get("report_json", DEFAULT_SOURCE_REPORT_TEXT),
+            target_report=config.get("target_report"),
+            html_report=config.get("html_report"),
+            merge_log=config.get("merge_log"),
+            project_root=config.get("project_root"),
+        )
+    if action == "merge":
+        return merge(
+            config.get("report_json", DEFAULT_SOURCE_REPORT_TEXT),
+            feature_file=config.get("feature_file"),
+            feature_name=config.get("feature_name"),
+            scenario_name=config.get("scenario_name"),
+            example_id=config.get("example_id"),
+            allow_add=config.get("allow_add", True),
+            target_report=config.get("target_report"),
+            html_report=config.get("html_report"),
+            merge_log=config.get("merge_log"),
+            project_root=config.get("project_root"),
+        )
+    if action == "delete":
+        return delete(
+            config.get("report_json", DEFAULT_SOURCE_REPORT_TEXT),
+            feature_file=config.get("feature_file"),
+            feature_name=config.get("feature_name"),
+            scenario_name=config.get("scenario_name"),
+            example_id=config.get("example_id"),
+            target_report=config.get("target_report"),
+            html_report=config.get("html_report"),
+            merge_log=config.get("merge_log"),
+            project_root=config.get("project_root"),
+        )
+    if action == "render":
+        return render(
+            target_report=config.get("target_report"),
+            html_report=config.get("html_report"),
+            project_root=config.get("project_root"),
+        )
+    raise FinalReportMergeError(f"未知最终报告操作: {action}")
+
+
+def run_default(
+        *,
+        action="create",
+    report_json=DEFAULT_SOURCE_REPORT_TEXT,
+        feature_file=None,
+        feature_name=None,
+        scenario_name=None,
+        example_id=None,
+        allow_add=True,
+        target_report=None,
+        html_report=None,
+        merge_log=None,
+        project_root=None,
+):
+    target, html = run_configured(
+        action,
+        report_json=report_json,
+        feature_file=feature_file,
+        feature_name=feature_name,
+        scenario_name=scenario_name,
+        example_id=example_id,
+        allow_add=allow_add,
+        target_report=target_report,
+        html_report=html_report,
+        merge_log=merge_log,
+        project_root=project_root,
+    )
+    print(f"Final report JSON: {target}")
+    print(f"Final report HTML: {html}")
+    return 0
+
+
+def run_entrypoint(config=None, argv=None):
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args:
+        return main(args)
+    config = config or {}
+    action = str(config.get("ACTION", "create") or "create").strip().lower()
+    action_config = _entrypoint_action_config(config, action)
+    target, html = run_action(action, action_config)
+    print(f"Final report JSON: {target}")
+    print(f"Final report HTML: {html}")
+    return 0
+
+
+def _entrypoint_action_config(config, action):
+    key = str(action or "create").upper()
+    value = config.get(key)
+    if isinstance(value, dict):
+        return dict(value)
+
+    actions = config.get("ACTIONS")
+    if isinstance(actions, dict) and isinstance(actions.get(key), dict):
+        return dict(actions[key])
+
+    scope = config.get("SCOPE") if isinstance(config.get("SCOPE"), dict) else {}
+    return {
+        "report_json": config.get("REPORT_JSON", config.get("SOURCE_REPORT", DEFAULT_SOURCE_REPORT_TEXT)),
+        "feature_file": config.get("FEATURE_FILE", scope.get("feature_file")),
+        "feature_name": config.get("FEATURE_NAME", scope.get("feature_name")),
+        "scenario_name": config.get("SCENARIO_NAME", scope.get("scenario_name")),
+        "example_id": config.get("EXAMPLE_ID", scope.get("example_id")),
+        "allow_add": config.get("ALLOW_ADD", scope.get("allow_add", True)),
+        "target_report": config.get("TARGET_REPORT", scope.get("target_report")),
+        "html_report": config.get("HTML_REPORT", scope.get("html_report")),
+        "merge_log": config.get("MERGE_LOG", scope.get("merge_log")),
+        "project_root": config.get("PROJECT_ROOT", scope.get("project_root")),
+    }
+
+
 def render_report_html(report_data):
     template_path = Path(__file__).with_name("templates") / "spark_report.html"
     template = template_path.read_text(encoding="utf-8")
@@ -432,6 +702,51 @@ def _select_scenario(feature, *, scenario_name=None, example_id=None):
     if len(matches) != 1:
         raise FinalReportMergeError("源报告中没有唯一匹配的 Scenario")
     return matches[0]
+
+
+def _operation_scopes(
+        report,
+        *,
+        feature_file=None,
+        feature_name=None,
+        scenario_name=None,
+        example_id=None,
+):
+    feature = _select_feature(
+        report,
+        feature_file=feature_file,
+        feature_name=feature_name,
+    )
+    scope = {
+        "feature_file": feature_file or feature.get("file"),
+        "feature_name": None if (feature_file or feature.get("file")) else (feature_name or feature.get("name")),
+    }
+    scope = {key: value for key, value in scope.items() if value}
+    if scenario_name is not None or example_id is not None:
+        scope["scenario_name"] = scenario_name
+        scope["example_id"] = example_id
+        return [scope]
+
+    scenario_scopes = _single_executable_scope(feature)
+    if scenario_scopes is not None:
+        return [{**scope, **scenario_scopes}]
+    return [scope]
+
+
+def _single_executable_scope(feature):
+    scenarios = list(feature.get("scenarios") or [])
+    if len(scenarios) != 1:
+        return None
+    item = scenarios[0]
+    if item.get("type") == "outline":
+        examples = list(item.get("examples") or [])
+        if len(examples) != 1:
+            return None
+        return {
+            "scenario_name": item.get("name"),
+            "example_id": examples[0].get("exampleId"),
+        }
+    return {"scenario_name": item.get("name")}
 
 
 def _find_feature_like(report, source_feature):
@@ -793,6 +1108,7 @@ def build_arg_parser():
     merge_latest.add_argument("--no-add", action="store_true")
 
     delete = subparsers.add_parser("delete")
+    delete.add_argument("source", nargs="?", default=None)
     _add_scope_args(delete)
 
     subparsers.add_parser("render")
@@ -820,11 +1136,11 @@ def main(argv=None):
                 project_root=project_root,
             )
         elif args.command in {"merge", "merge-latest"}:
-            target, html = merge_report_file(
+            target, html = merge(
                 None if args.command == "merge-latest" else args.source,
-                target_path=args.target,
-                html_path=args.html,
-                log_path=args.log,
+                target_report=args.target,
+                html_report=args.html,
+                merge_log=args.log,
                 feature_file=args.feature_file,
                 feature_name=args.feature_name,
                 scenario_name=args.scenario_name,
@@ -833,10 +1149,11 @@ def main(argv=None):
                 project_root=project_root,
             )
         elif args.command == "delete":
-            target, html = delete_result_file(
-                target_path=args.target,
-                html_path=args.html,
-                log_path=args.log,
+            target, html = delete(
+                args.source,
+                target_report=args.target,
+                html_report=args.html,
+                merge_log=args.log,
                 feature_file=args.feature_file,
                 feature_name=args.feature_name,
                 scenario_name=args.scenario_name,

@@ -25,8 +25,8 @@ _PROFILE_DEFINITIONS = (
     },
     {
         "profile_id": "precision",
-        "label": "专心精确",
-        "start_allowed": True,
+        "label": "专心精确（已退役）",
+        "start_allowed": False,
         "investigation_policy": "expanded_on_demand",
         "user_interaction_policy": "frontloaded_only",
         "repair_policy": {
@@ -44,6 +44,21 @@ _PROFILE_DEFINITIONS = (
         "repair_policy": {
             "design": "not_implemented",
             "implementation": "not_implemented",
+            "authority_change": "terminate_job",
+        },
+    },
+)
+
+_HISTORICAL_PROFILE_DEFINITIONS = (
+    {
+        "profile_id": "precision",
+        "label": "专心精确",
+        "start_allowed": True,
+        "investigation_policy": "expanded_on_demand",
+        "user_interaction_policy": "frontloaded_only",
+        "repair_policy": {
+            "design": "progress_bounded_technical",
+            "implementation": "manifest_scoped",
             "authority_change": "terminate_job",
         },
     },
@@ -70,6 +85,27 @@ def resolve_generation_profile(profile_id=None):
         if profile["profile_id"] == selected:
             return copy.deepcopy(profile)
     raise ValueError(f"未知 Generation Profile: {selected}")
+
+
+def profile_lease_is_recognized(profile):
+    if not isinstance(profile, dict):
+        return False
+    profile_id = profile.get("profile_id")
+    fingerprint = profile.get("profile_fingerprint")
+    if not profile_id or not fingerprint:
+        return False
+    try:
+        if resolve_generation_profile(profile_id).get(
+                "profile_fingerprint"
+        ) == fingerprint:
+            return True
+    except ValueError:
+        return False
+    return any(
+        _profile_value(definition).get("profile_fingerprint") == fingerprint
+        for definition in _HISTORICAL_PROFILE_DEFINITIONS
+        if definition.get("profile_id") == profile_id
+    )
 
 
 def project_generation_admission(
@@ -175,11 +211,6 @@ def project_generation_admission(
             ),
         ),
         _check(
-            "context_budget",
-            context_budget.get("status") == "within_target",
-            _fingerprint(context_budget),
-        ),
-        _check(
             "workflow_admissible",
             state.get("status") not in {"blocked", "stale"},
             _fingerprint({
@@ -204,6 +235,9 @@ def project_generation_admission(
         for item in checks
         if item["status"] != "passed"
     ]
+    performance_warnings = []
+    if context_budget.get("status") not in {None, "within_target"}:
+        performance_warnings.append(_context_budget_warning(context_budget))
     value = {
         "generation_admission_version": GENERATION_ADMISSION_VERSION,
         "enforcement": enforcement,
@@ -212,6 +246,13 @@ def project_generation_admission(
         "profile": profile,
         "decision_batch": decision_batch,
         "checks": checks,
+        "performance_checks": [{
+            "code": "context_budget",
+            "status": context_budget.get("status") or "unknown",
+            "source_fingerprint": _fingerprint(context_budget),
+            "diagnostic": _context_budget_warning(context_budget),
+        }],
+        "performance_warnings": performance_warnings,
         "blocking_codes": blocking_codes,
         "job_creation_allowed": bool(
             enforcement == "active" and not blocking_codes
@@ -219,6 +260,23 @@ def project_generation_admission(
     }
     value["admission_fingerprint"] = _fingerprint(value)
     return value
+
+
+def _context_budget_warning(context_budget):
+    context_budget = dict(context_budget or {})
+    return {
+        "budget_version": context_budget.get("budget_version"),
+        "status": context_budget.get("status") or "unknown",
+        "default_total_bytes": context_budget.get("default_total_bytes"),
+        "target_bytes": context_budget.get("target_bytes"),
+        "over_by_bytes": context_budget.get("over_by_bytes"),
+        "largest_components": list(context_budget.get("largest_components") or []),
+        "message": (
+            "默认AI上下文超过性能目标；系统将继续创建Job并依赖紧凑投影/按需查询。"
+            if context_budget.get("status") == "over_target"
+            else "默认AI上下文预算状态未通过性能检查。"
+        ),
+    }
 
 
 def _decision_batch_receipt(decision, pack, answers):

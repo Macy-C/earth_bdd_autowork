@@ -135,12 +135,14 @@ CaptureSession
   -> Semantic Pack 6.1（兼容读取 5.0-6.0；typed Observation Intent + semantic control state）
   -> compact Generation Brief 4.4（Canonical Action 1.0 + Scenario Intelligence 1.1 + agent_tasks）
   -> Decision Pack 5.8 / Answers 5.1（用户权威 outcome + 白话呈现）
+  -> Generation Profile 1.0 + admission -> immutable GenerationJobV1
   -> GenerationDesignV1（业务概念、operation、值权威、table/reuse/runtime关系）
   -> deterministic Design + Proof Compiler
-  -> GenerationPlanV4.2（系统派生证明 + runtime binding + Contract lease；兼容读取 V3.0-V4.1）
+  -> GenerationPlanV4.2（系统派生证明 + runtime binding + Contract/Job lease；兼容读取 V3.0-V4.1）
   -> AI Plan Context 1.1（含value provenance的内容寻址再生成投影；不落盘）
-  -> GenerationTransactionV3 + ImplementationManifestV1.7（AI/system文件所有权、预检ledger、恢复基线与lease）
+  -> GenerationTransactionV3 + ImplementationManifestV1.7（Job子租约、AI/system文件所有权、预检ledger、恢复基线）
   -> AI implementation + Plan-to-Code -> Code Manifest 1.0
+  -> GenerationJobResultV1（static/runtime/oracle owner结论的内容寻址终态投影）
   -> distilled Bdd/ai/knowledge
 ```
 
@@ -161,10 +163,11 @@ CaptureSession
   operation顺序、严格`$loc:`目标和动态输入绑定、Page method receiver与输入来源、locator ensure patch、package marker和受保护路径；
   Transaction在committed file lease内用可恢复journal原子物化locator/PIC patch与package marker；AI只写实现body。正式`design`在持久化前执行完整Design编译与Plan校验；
   `validate-design`保留为提交失败后的只读结构化诊断，不在成功路径重复执行。`validate-implementation`复用正式Plan-to-Code校验并把每次技术修复追加到哈希ledger；`finish`要求最新valid且源码快照未漂移，并由实际diff生成系统receipt。
-  `abort`用于技术修复耗尽或操作者明确放弃：Transaction归档AI草稿，按prepare时封存的
-  Manifest目标基线恢复AI文件，回滚系统物化、释放file lease，并只在完整清理后把同一
-  Request恢复为`ready`；`aborting`中断由下一次`prepare`幂等收敛，任何scope、baseline、
-  journal或lease异常都失败关闭。Manifest 1.7之前缺少基线的running事务不声明安全abort。
+  Job-bound `abort`用于技术修复耗尽或操作者明确放弃：Transaction归档AI草稿，按prepare时
+  封存的Manifest目标基线恢复AI文件、回滚系统物化并释放file lease，然后把当前Job终止为
+  `failed/aborted`；新尝试必须重新admission创建新Job。只有历史V3 running Transaction在完整
+  清理后恢复Request `ready`。`aborting`中断由对应prepare入口幂等收敛，任何scope、baseline、
+  journal或lease异常都失败关闭；Manifest 1.7之前缺少基线的running事务不声明安全abort。
   Transaction同时冻结generation roots外的项目guard快照（排除运行产物与打包模型），
   未申报的scope外新增、修改或删除均失败关闭。
 - Reconciler 不生成 operation 草案。Brief 4.4 的 `agent_tasks` 只列 Step、Action 类型、
@@ -207,17 +210,19 @@ CaptureSession
 - Execution Profile 1.0默认`not_configured/static_only`。只有显式`attach_existing`或带
   明确应用命令的`launch`允许框架运行；`external_manual`由外部执行者负责。生成Runner在任何
   应用Hook前验证Request和完整Transaction provenance，禁止继承全局启动配置或猜测attach。
-- 默认 AI 上下文只包含 Workflow State、compact Brief、revision-bound Intent/Plan、
-  必要的 Decision 指针和生成契约。`generation_workflow evidence`按Evidence、Step或
+- 默认 AI 上下文由`AIContextEnvelopeV1.1`统一承载 compact Workflow、Brief、AI capabilities、
+  可用时的revision-bound Plan Context、必要的Decision指针和GenerationDesign契约；完整Job、
+  Workflow和Plan只作为backend identity。`generation_workflow evidence`按Evidence、Step或
   Action展开冻结事实，`compare-takes`只读比较当前Request目标Step的多个Take，
   `decision-media`只按已有Decision问题展开验签媒体；完整Graph、Semantic Pack 和媒体
   仍按疑点展开，不要求每次全量读取。Decision媒体是解释而非业务真值、target/locator
   授权或Answers状态，`blocked`/`stale` Request和不可信帧不得产生可用媒体投影。AI Context
-  Budget 1.3超过50 KiB时`inspect`失败关闭为`context_budget_exceeded`，不能靠截断事实通过。
-- 新Design先读取`generation_workflow design-contract`，再通过正式`design`命令一次提交；正式命令在Plan持久化前执行全部编译和校验。只有提交被拒绝时才调用只读`validate-design`获取结构化问题分类。Generation Contract 6.17
+  Budget 1.3超过50 KiB只写入`warn_only`性能警告和评估效率项，不阻止admission或`inspect-job`；
+  不能靠截断事实满足预算，真正容量不足才以`framework_capacity_defect`终止。
+- 新Design先读取`generation_workflow design-contract`，再通过正式Job-bound `design-job`命令一次提交；正式命令在Plan持久化前执行全部编译和校验。只有提交被拒绝时才调用只读诊断获取结构化问题分类。Generation Contract 6.19
   显式公开Design 1.1的table use、Step/Page reuse和runtime producer/consumer形状；它不
   要求AI提交Plan AST、owner/path、locator、proof或用户Decision结果，并把Design contract
-  版本/指纹纳入Plan 4.2 Contract lease。`intent-contract` 1.2和`adjust`仅保留兼容读取；
+  版本/指纹纳入Plan 4.2 Contract lease。`intent-contract` 1.2和历史`adjust`仅保留兼容读取；
   Contract变化不改变业务Request或Answers，只要求重新编译Design/Plan。
 - Scenario Intelligence 1.1 使用覆盖保持型压缩：阻塞 gap引用的Action和每个有录制动作的
   目标Step至少保留一个episode，每个含gap的Step至少保留一个轻量gap索引；被省略的
@@ -237,8 +242,7 @@ CaptureSession
 - Decision Pack 5.8 的机器option和Plan patch保持结构化；`presentation`按“Step、观察、
   不确定性、建议依据、选择后果”白话展示。业务真值和PIC授权不预选。展示文案与option
   一起进入Pack fingerprint，保证用户所见即所签；自由文本仍不能直接修改Plan。
-- 后续生成体验的目标架构引入正式`Generation Profile`，而不是把行为差异散落到Prompt补丁
-  中；最终UI/Prompt切换完成前，当前Request入口和Workflow/Transaction语义仍是实现事实。首版
+- 当前生成体验已引入正式`Generation Profile`，而不是把行为差异散落到Prompt补丁中。首版
   registry包含`generation_first`（专心生成，默认）、`precision`（专心精确）和合法但
   `start_allowed=false`的`legacy_script_maintenance`占位。Profile是生成编排策略，不进入
   Request事实或fingerprint，也不得改变Decision、Evidence、Plan或Transaction的权威边界；
@@ -249,12 +253,12 @@ CaptureSession
   Job/Transaction；会话`readiness.json`仍只拥有采集健康，Workflow State仍拥有运行状态。
   Decision media只解释已有问题，不是业务真值；除被现有证据协议明确要求的内容寻址媒体外，
   其可用性不能自行放行或阻断Job。
-- 只有admission通过且所有已知blocking Decision已一次性回答，系统才在Design前创建不可变、
+- 只有admission通过且所有已知blocking Decision已由Workbench一次性回答，系统才在Design前创建不可变、
   内容寻址的`Generation Job`并把其路径作为AI入口。Job只保存Profile策略指纹及Request、Brief、
   Decision、Contract和允许查询/验证边界的验签引用；不复制Evidence/候选事实，不预猜AI尚未
   决定的精确文件，也不替代Plan或Manifest。AI不能切换Profile、回答Decision、修改Request，
   或在同一Job内重开admission；仍只提交GenerationDesign，系统继续确定性编译Plan/Manifest。
-- Workflow State继续是唯一运行状态源，只保存当前Job和终态结果指针，并以单调epoch对Job
+- Workflow State 4.0继续是唯一运行状态源，只保存当前Job和终态结果指针，并以单调epoch对Job
   mutation执行CAS。Plan必须绑定Job lease，Transaction再冻结并重验Job/Plan lease；Profile或
   Contract改变会退休未认领Job/Plan，running Job在下一安全门按冻结lease完成或失败关闭，但都
   不改变业务Request或仍然有效的Answers。`generation_first`限制为Job命名范围内的按需调查和局部技术
@@ -265,8 +269,21 @@ CaptureSession
   runtime或Oracle失败必须结束Job。漏检用户权威属于admission/Reconciler缺口，不能用AI自由
   文本临时生成新Decision。Job级终态结果只验签引用Plan、Transaction、Run Result和Oracle等
   owner结论并投影category/next action，不回写或覆盖这些事实；Job-bound Transaction只结束
-  静态stage，是否等待runtime/oracle由Job completion policy决定。实现按Profile/admission、Job
-  与Workflow指针、Plan/Transaction lease、终态结果、UI/Prompt五个可独立回退的垂直切片推进。
+  静态stage，是否等待runtime/oracle由Job completion policy决定。普通Workbench/Prompt只发
+  Job路径；旧Request mutation CLI已退役，只读查询和已有V3 running Transaction收口仍兼容。
+- 收紧方向：用户主旅途必须优先于内部审计便利。50 KiB默认上下文预算是效率/发布指标，
+  不是admission硬阻塞；有效录制只因证据缺失或冲突、业务权威未确认、PIC/scope/Contract等
+  安全门失败而被阻止。`inspect-job`默认返回实际发送的`AIContextEnvelopeV1`紧凑投影，内嵌
+  compact Brief、Decision摘要、Design Contract摘要、allowed query和claim/epoch；Job完整JSON、
+  Workflow和admission原始结构是backend identity，不重复进入默认上下文预算。当前只公开真实可用
+  的`generation_first`；`precision`在有执行消费者前不作为普通用户模式。Job终态后必须能显式
+  retire并对同一Request重新admit；历史Request命令、legacy Timeline技术编辑和legacy projection
+  fallback只保留在兼容/恢复路径，不污染默认主链。Job Result是用户终态投影，Query不重新解释
+  终态；Runtime单次通过、独立Oracle通过和最终Quality Gate通过必须分字段表达，不能互相
+  兜底。Capability runtime verification优先从Job Result/绑定Run Result/Oracle阶段派生，旧
+  Transaction focused_execution只能作为历史fallback。Run Result同秒匹配必须稳定排序，CLI帮助
+  只暴露当前Job入口，退役Request mutation命令仅保留为显式恢复兼容。未验证accepted反馈只能
+  作为advisory，不能升级为强正向Capability候选。
 - Review中的业务确认现场由Query层按问题的Action/Evidence锚点动态投影动作前后帧并在
   内存中标记目标；帧路径限制在Take/Session/Project内，内容摘要在投影与实际预览/打开时
   都要复核。图片不写入Decision Pack、不改变Answers/Plan，也不能替代业务真值；无可信

@@ -130,7 +130,12 @@ def _catalog_entry(relative_path, manifest, readiness):
         ),
         "readiness": {
             key: (readiness or {}).get(key)
-            for key in ("bundle_valid", "recording_complete", "semantic_ready", "generation_ready")
+            for key in (
+                "bundle_valid",
+                "recording_complete",
+                "semantic_ready",
+                "capture_generation_candidate",
+            )
         },
         "feature": feature,
         "scenario": {

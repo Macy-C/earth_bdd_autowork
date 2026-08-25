@@ -17,6 +17,10 @@ from autowork_core.utils.debug_tools.recorder.decision_pack import (
 )
 from autowork_core.utils.debug_tools.recorder.generation_job_service import (
     admit_generation_job,
+    inspect_generation_job,
+    retire_generation_job,
+    retry_generation_job,
+    start_generation_job,
 )
 from autowork_core.utils.debug_tools.recorder.project_memory import (
     inspect_request_memory_freshness,
@@ -81,7 +85,11 @@ class GenerationRequestService:
                     self.session_dir,
                     request.get("request_id"),
                 )
-                if state.get("current_job") or not repair:
+                if any((
+                    state.get("current_job"),
+                    state.get("last_job_result"),
+                    not repair,
+                )):
                     return request
             return build_generation_request(
                 self.session_dir,
@@ -108,7 +116,38 @@ class GenerationRequestService:
 
     def generation_command(self, step_ids, *, profile_id="generation_first"):
         job = self.generation_job(step_ids, profile_id=profile_id)
-        return f'/recorder-generate "{job["job_path"]}"'
+        path = _project_relative_job_path(
+            self.session_dir,
+            job["job_path"],
+        )
+        return f'/recorder-generate "{path}"'
+
+    def inspect_job(self, job_path):
+        with self._lock:
+            return inspect_generation_job(self._resolve_job_path(job_path))
+
+    def start_job(self, job_path, *, expected_epoch):
+        with self._lock:
+            return start_generation_job(
+                self._resolve_job_path(job_path),
+                expected_epoch=int(expected_epoch),
+            )
+
+    def retry_job(self, job_path, *, profile_id=None):
+        with self._lock:
+            return retry_generation_job(
+                self._resolve_job_path(job_path),
+                profile_id=profile_id,
+            )
+
+    def retire_job(self, job_path, *, reason, expected_epoch, claim_id=None):
+        with self._lock:
+            return retire_generation_job(
+                self._resolve_job_path(job_path),
+                reason=str(reason),
+                expected_epoch=int(expected_epoch),
+                claim_id=claim_id,
+            )
 
     def answer_decision_batch(self, step_ids, selections):
         with self._lock:
@@ -185,8 +224,36 @@ class GenerationRequestService:
         )
         return inspect_workflow(path, write=True)
 
+    def _resolve_job_path(self, value):
+        path = Path(value)
+        path = path.resolve() if path.is_absolute() else (
+            self.session_dir / path
+        ).resolve()
+        try:
+            path.relative_to(self.session_dir)
+        except ValueError as error:
+            raise ValueError("Generation Job路径越出录制Session") from error
+        return path
+
 
 def _session_lock(session_dir):
     key = str(Path(session_dir).resolve()).casefold()
     with _SESSION_LOCKS_GUARD:
         return _SESSION_LOCKS.setdefault(key, threading.RLock())
+
+
+def _project_relative_job_path(session_dir, job_path):
+    session_dir = Path(session_dir).resolve()
+    project_root = next((
+        candidate.parent.parent
+        for candidate in (session_dir, *session_dir.parents)
+        if candidate.name.casefold() == "recording_sessions"
+        and candidate.parent.name.casefold() == "artifacts"
+    ), None)
+    if project_root is None:
+        raise ValueError("无法确定Generation Job项目边界")
+    path = Path(job_path).resolve()
+    try:
+        return path.relative_to(project_root.resolve()).as_posix()
+    except ValueError as error:
+        raise ValueError("Generation Job路径越出项目") from error

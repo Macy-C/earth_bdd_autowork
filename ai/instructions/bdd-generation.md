@@ -22,7 +22,11 @@
 
 ## Workflow And Design
 
-- Read `inspect` and the compact Brief first. Expand only named evidence, Takes,
+- Normal generation starts only from a Workbench-created immutable Generation
+  Job. Decisions are answered before claim. After `start-job`, never answer a
+  Decision, switch Profile, replace the Request, or ask the user mid-generation;
+  terminate with a structured authority/evidence gap instead.
+- Read `inspect-job` and the compact Brief first. Expand only named evidence, Takes,
   code candidates, Action Knowledge, or Decision media that could change the
   Design. Do not load full Graph/media/Plan by default.
 - Submit one complete GenerationDesignV1. Do not submit Plan AST, file paths,
@@ -40,9 +44,10 @@
   reference is not one value, supply an exact non-empty literal present in that
   declaration. `semantic_literal` is only for contract-listed final-state
   operations, not assertions.
-- Answer all genuine user questions in one Decision batch. AI selects only
-  declared AI-authority outcomes; user outcomes come from Answers; evidence-
-  required outcomes stop for correction or rerecording.
+- All genuine user questions must already be complete in the Job admission
+  receipt. AI selects only declared AI-authority outcomes; user outcomes come
+  from frozen Answers; evidence-required outcomes terminate for correction or
+  rerecording and cannot create a new Decision inside the Job.
 
 ## Reuse, Naming, And Code
 
@@ -83,7 +88,7 @@
 
 ## Transaction, Execution, And Failure
 
-- Do not edit code before `prepare`. During a running GenerationTransaction edit
+- Do not edit code before `prepare-job`. During a running GenerationTransaction edit
   only Manifest `ai_editable_changes`; Request, Brief, Answers, Plan, evidence,
   `system_owned_changes`, and `read_only_reuse` are immutable.
 - `finish` owns actual diff, revision, Contract/Annotation/file leases, Python,

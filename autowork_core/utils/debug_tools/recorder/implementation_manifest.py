@@ -17,6 +17,7 @@ from autowork_core.utils.debug_tools.recorder.identity import (
 
 
 IMPLEMENTATION_MANIFEST_VERSION = "1.7"
+IMPLEMENTATION_PACKET_VERSION = "1.0"
 READABLE_IMPLEMENTATION_MANIFEST_VERSIONS = {
     "1.6",
     IMPLEMENTATION_MANIFEST_VERSION,
@@ -529,6 +530,130 @@ def build_implementation_manifest(
     )
     manifest["implementation_manifest_fingerprint"] = fingerprint
     return manifest
+
+
+def build_implementation_packet(manifest):
+    """Project deterministic implementation syntax without adding facts."""
+    if not implementation_manifest_identity_is_valid(manifest):
+        raise ValueError("Implementation Packet要求有效Manifest")
+    files = {
+        str(item.get("path") or ""): item
+        for item in manifest.get("files") or ()
+        if isinstance(item, dict) and item.get("path")
+    }
+    pages = {}
+    for step in manifest.get("steps") or ():
+        page_path = _packet_step_page_path(step)
+        if not page_path:
+            continue
+        locator_file = str(step.get("locator_file") or "")
+        root = next((
+            item.get("key")
+            for item in step.get("locator_patch") or ()
+            if item.get("kind") == "top_level"
+        ), None)
+        pages.setdefault(page_path, {
+            "path": page_path,
+            "module": _packet_module_name(page_path),
+            "class_name": _packet_page_class_name(page_path),
+            "receiver": _packet_receiver_name(page_path),
+            "base_class": "WindowPage",
+            "root_locator_file": locator_file or None,
+            "root_locator": root,
+            "strategy": (files.get(page_path) or {}).get("strategy"),
+        })
+    steps = []
+    for step in manifest.get("steps") or ():
+        page_path = _packet_step_page_path(step)
+        page = pages.get(page_path)
+        operations = []
+        for operation in step.get("operations") or ():
+            receiver = operation.get("receiver") or {}
+            operations.append({
+                "order": operation.get("order"),
+                "operation": operation.get("operation"),
+                "receiver": (
+                    page.get("receiver")
+                    if receiver.get("kind") == "step_bound_page" and page
+                    else receiver.get("receiver")
+                ),
+                "target": (operation.get("target_binding") or {}).get(
+                    "reference"
+                ),
+                "parameters": operation.get("parameters") or {},
+                "value": operation.get("value"),
+                "value_source": operation.get("value_source"),
+                "implementation_location": operation.get(
+                    "implementation_location"
+                ),
+                "implementation_method": operation.get(
+                    "implementation_method"
+                ),
+            })
+        definition = step.get("step_definition") or {}
+        steps.append({
+            "order": step.get("order"),
+            "step_id": step.get("step_id"),
+            "path": (step.get("behavior") or {}).get("path"),
+            "python_decorator": definition.get("python_decorator"),
+            "function_parameters": definition.get("function_parameters") or [],
+            "page": page,
+            "operations": operations,
+        })
+    return {
+        "implementation_packet_version": IMPLEMENTATION_PACKET_VERSION,
+        "derived_from": {
+            "implementation_manifest_id": manifest[
+                "implementation_manifest_id"
+            ],
+            "implementation_manifest_fingerprint": manifest[
+                "implementation_manifest_fingerprint"
+            ],
+        },
+        "ai_editable_changes": list(manifest.get("ai_editable_changes") or ()),
+        "system_owned_changes": list(
+            manifest.get("system_owned_changes") or ()
+        ),
+        "pages": sorted(pages.values(), key=lambda item: item["path"]),
+        "steps": steps,
+        "methods": list(manifest.get("methods") or ()),
+        "rule": (
+            "This packet is a deterministic Manifest projection. It does not "
+            "authorize files, operations, targets, values, or business choices "
+            "beyond the bound Manifest."
+        ),
+    }
+
+
+def _packet_module_name(path):
+    value = str(path or "").replace("\\", "/")
+    if value.endswith(".py"):
+        value = value[:-3]
+    return value.replace("/", ".")
+
+
+def _packet_page_class_name(path):
+    parts = str(path or "").replace("\\", "/").split("/")
+    package = parts[-2] if len(parts) >= 2 else "generated"
+    return "".join(part.capitalize() for part in package.split("_")) + "Page"
+
+
+def _packet_receiver_name(path):
+    parts = str(path or "").replace("\\", "/").split("/")
+    return _identifier(parts[-2] if len(parts) >= 2 else "page")
+
+
+def _packet_step_page_path(step):
+    direct = str((step or {}).get("page_object") or "")
+    if direct:
+        return direct
+    for operation in (step or {}).get("operations") or ():
+        receiver = (operation or {}).get("receiver") or {}
+        if receiver.get("kind") == "step_bound_page":
+            value = str(receiver.get("page_object") or "")
+            if value:
+                return value
+    return ""
 
 
 def _pic_operation_target(step, action_id):
@@ -1327,7 +1452,9 @@ def _fingerprint(value):
 
 __all__ = [
     "IMPLEMENTATION_MANIFEST_VERSION",
+    "IMPLEMENTATION_PACKET_VERSION",
     "READABLE_IMPLEMENTATION_MANIFEST_VERSIONS",
+    "build_implementation_packet",
     "build_implementation_manifest",
     "compact_implementation_manifest_contract",
     "implementation_manifest_fingerprint",

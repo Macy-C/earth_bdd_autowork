@@ -186,7 +186,9 @@ def publish_runtime_job_outcome(
     )
     stages = _static_stages(report, transaction_pointer)
     stages["runtime"] = {
-        "status": "passed" if status == "completed" else "failed",
+        "status": "passed"
+        if (runtime_owner or {}).get("status") == "passed"
+        else "failed",
         "owner": copy.deepcopy(runtime_owner),
     }
     if oracle_owner is None:
@@ -228,6 +230,79 @@ def publish_runtime_job_outcome(
         phase=status,
         next_action=next_action,
         result=pointer,
+        clear_active_transaction=True,
+    )
+
+
+def publish_pretransaction_job_failure(
+        session_dir,
+        request_id,
+        *,
+        claim_id,
+        expected_epoch,
+        expected_phase,
+        category,
+        next_action,
+        issue_owner=None,
+    ):
+    session_dir = Path(session_dir).resolve()
+    state = load_workflow_state(session_dir, request_id)
+    pointer = state.get("current_job") or {}
+    job = load_generation_job(session_dir, pointer)
+    execution = state.get("job_execution") or {}
+    if any((
+        job is None,
+        state.get("status") not in {"ready", "running"},
+        execution.get("phase") != expected_phase,
+        execution.get("claim_id") != claim_id,
+        execution.get("epoch") != expected_epoch,
+    )):
+        raise ValueError("Generation Job pretransaction CAS context无效")
+    stages = {
+        "semantic_selection": {
+            "status": "not_evaluated",
+            "owner": None,
+        },
+        "design": {
+            "status": "passed" if execution.get("plan") else "failed",
+            "owner": copy.deepcopy(execution.get("plan") or issue_owner),
+        },
+        "implementation": {
+            "status": "not_evaluated",
+            "owner": None,
+        },
+        "transaction": {
+            "status": "not_evaluated",
+            "owner": copy.deepcopy(issue_owner),
+        },
+        "runtime": {"status": "not_evaluated", "owner": None},
+        "oracle": {"status": "not_evaluated", "owner": None},
+    }
+    result = build_generation_job_result(
+        job,
+        status="failed",
+        category=category,
+        next_action=next_action,
+        attempts=copy.deepcopy(state.get("attempt_history") or []),
+        stages=stages,
+    )
+    path, result = persist_generation_job_result(session_dir, result)
+    result_pointer = generation_job_result_pointer(
+        session_dir,
+        result,
+        path,
+    )
+    return transition_generation_job(
+        session_dir,
+        request_id,
+        job_id=job["job_id"],
+        job_fingerprint=job["job_fingerprint"],
+        claim_id=claim_id,
+        expected_epoch=expected_epoch,
+        expected_phase=expected_phase,
+        phase="failed",
+        next_action=next_action,
+        result=result_pointer,
         clear_active_transaction=True,
     )
 

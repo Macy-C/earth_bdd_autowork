@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from autowork_core.runtime.reporting.run_result_bridge import (
+    generation_provenance_from_artifacts,
     latest_matching_run_result,
     load_generation_provenance,
     verified_file_path,
@@ -21,6 +22,9 @@ from autowork_core.utils.debug_tools.recorder.generation_job import (
 )
 from autowork_core.utils.debug_tools.recorder.generation_job_result import (
     load_generation_job_result,
+)
+from autowork_core.utils.debug_tools.recorder.transaction_integrity import (
+    transaction_result_fingerprint,
 )
 from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
     implementation_manifest_identity_is_readable,
@@ -48,6 +52,8 @@ from autowork_core.utils.debug_tools.recorder.dto import (
     DecisionQuestionDTO,
     DecisionSummaryDTO,
     EvidenceSummaryDTO,
+    FeedbackHistoryDTO,
+    GenerationJobHistoryDTO,
     GenerationResultDTO,
     GenerationSummaryDTO,
     GenerationStageSummaryDTO,
@@ -76,7 +82,9 @@ from autowork_core.utils.debug_tools.recorder.request_repository import (
     resolve_session_path,
 )
 from autowork_core.utils.debug_tools.recorder.project_memory import (
+    find_recording_root,
     latest_transaction,
+    load_memory_events,
     load_transaction_report,
 )
 from autowork_core.utils.debug_tools.recorder.reconciliation_repository import (
@@ -135,6 +143,11 @@ class RecorderQueryService:
         runtime_result = self._runtime_result(
             generation_provenance,
             request=generation_request,
+            project_root=(
+                generation_context[3].get("project_root")
+                if generation_context is not None
+                else None
+            ),
         )
         quality = self._generation_quality(
             generation_context,
@@ -148,10 +161,15 @@ class RecorderQueryService:
         )
         generation = replace(
             generation,
-            result=_with_runtime_stages(
-                generation.result,
-                runtime_result,
-                quality=quality,
+            result=(
+                generation.result
+                if generation.job_id
+                and generation.workflow_status in {"completed", "failed"}
+                else _with_runtime_stages(
+                    generation.result,
+                    runtime_result,
+                    quality=quality,
+                )
             ),
             verification=verification,
             recommended_detail=(
@@ -161,6 +179,7 @@ class RecorderQueryService:
             ),
         )
         workflow = self.requests.workflow_state(scope.selected_step_ids)
+        workflow = workflow if isinstance(workflow, dict) else {}
         effective_readiness = _effective_readiness(
             readiness,
             (workflow or {}).get("ambiguity"),
@@ -204,13 +223,49 @@ class RecorderQueryService:
         request = self.requests.latest(scope.selected_step_ids)
         if request is None:
             return None
-        latest = latest_transaction(
-            self.session_dir,
-            request_id=request.get("request_id"),
+        workflow = self.requests.workflow_state(scope.selected_step_ids)
+        workflow = workflow if isinstance(workflow, dict) else {}
+        job_result = (
+            load_generation_job_result(
+                self.session_dir,
+                workflow.get("last_job_result") or {},
+            )
+            if workflow.get("last_job_result")
+            else None
         )
-        if latest is None:
-            return None
-        report_path, _report = latest
+        terminal_job_result = bool(
+            workflow.get("last_job_result")
+            and (
+                not workflow.get("current_job")
+                or workflow.get("status") in {"completed", "failed"}
+            )
+        )
+        if terminal_job_result:
+            if job_result is None:
+                return None
+            bound = _job_result_transaction(
+                self.session_dir,
+                job_result,
+            )
+            if bound is None:
+                return None
+            report_path, _report = bound
+        elif workflow.get("current_job"):
+            bound = _job_execution_transaction(
+                self.session_dir,
+                workflow,
+            )
+            if bound is None:
+                return None
+            report_path, _report = bound
+        else:
+            latest = latest_transaction(
+                self.session_dir,
+                request_id=request.get("request_id"),
+            )
+            if latest is None:
+                return None
+            report_path, _report = latest
         if _report.get("status") not in {
             "completed",
             "completed_no_changes",
@@ -218,18 +273,23 @@ class RecorderQueryService:
             return None
         try:
             from autowork_core.utils.debug_tools.recorder.capability import (
+                validate_completed_transaction_artifact_source,
                 validate_accepted_transaction_capability_source,
             )
-            _session, loaded_request, plan, _runtime = (
-                validate_accepted_transaction_capability_source(
+            validator = (
+                validate_completed_transaction_artifact_source
+                if terminal_job_result
+                else validate_accepted_transaction_capability_source
+            )
+            _session, loaded_request, plan, _runtime = validator(
                     report_path,
                     _report,
-                    project_root=Paths.BASE_DIR,
-                )
+                    project_root=_report.get("project_root") or Paths.BASE_DIR,
             )
-            provenance = load_generation_provenance(
-                report_path,
-                project_root=Paths.BASE_DIR,
+            provenance = generation_provenance_from_artifacts(
+                loaded_request,
+                plan,
+                _report,
             )
             return provenance, loaded_request, plan, _report
         except (OSError, ValueError):
@@ -259,23 +319,34 @@ class RecorderQueryService:
             runtime_matrix=(matrix[1] if matrix is not None else None),
         )
 
-    def _runtime_result(self, generation_provenance, *, request=None):
+    def _runtime_result(
+            self,
+            generation_provenance,
+            *,
+            request=None,
+            project_root=None,
+        ):
         if generation_provenance is None:
             return None
         target = (request or {}).get("target") or {}
         feature = target.get("feature") or {}
         scenario_target = target.get("scenario") or {}
+        query_kwargs = {
+            "example_id": (
+                scenario_target.get("example_id")
+                if scenario_target
+                else self.session.scenario_plan.example_id
+            ),
+            "generation_provenance": generation_provenance,
+        }
+        if project_root is not None:
+            query_kwargs["project_root"] = project_root
         match = latest_matching_run_result(
             feature.get("source_relpath")
             or self.session.feature_plan.source_relpath,
             scenario_target.get("name")
             or self.session.scenario_plan.name,
-            example_id=(
-                scenario_target.get("example_id")
-                if scenario_target
-                else self.session.scenario_plan.example_id
-            ),
-            generation_provenance=generation_provenance,
+            **query_kwargs,
         )
         if match is None:
             return None
@@ -631,6 +702,7 @@ class RecorderQueryService:
             if step_id not in selected
         )
         complete = bool(all_step_ids) and not excluded
+        capture_generation_candidate = bool(step_ids) and not incomplete_step_ids
         return ScenarioScopeDTO(
             kind="scenario",
             complete=complete,
@@ -643,7 +715,7 @@ class RecorderQueryService:
                 if complete
                 else f"部分场景 {len(step_ids)}/{len(all_step_ids)} Step"
             ),
-            generation_ready=bool(step_ids) and not incomplete_step_ids,
+            capture_generation_candidate=capture_generation_candidate,
             incomplete_step_ids=incomplete_step_ids,
         )
 
@@ -655,7 +727,7 @@ class RecorderQueryService:
         ):
         scope = scope or self._scenario_scope()
         step_ids = scope.selected_step_ids
-        if not scope.generation_ready:
+        if not _scope_capture_generation_candidate(scope):
             return _generation_summary(
                 workflow_status="scenario_incomplete",
                 display_status="scenario_incomplete",
@@ -705,15 +777,6 @@ class RecorderQueryService:
             "completed": "completed",
             "failed": "failed",
         }.get(status, "updating")
-        result = None
-        if include_result:
-            latest = latest_transaction(
-                self.session_dir,
-                request_id=request.get("request_id"),
-            )
-            if latest is not None:
-                report_path, report = latest
-                result = _generation_result(report_path, report)
         job = load_generation_job(
             self.session_dir,
             workflow.get("current_job") or {},
@@ -722,8 +785,45 @@ class RecorderQueryService:
             self.session_dir,
             workflow.get("last_job_result") or {},
         ) if workflow.get("last_job_result") else None
-        if job_result is not None and result is not None:
-            result = _with_job_result(result, job_result)
+        terminal_job_result = bool(
+            workflow.get("last_job_result")
+            and (
+                not workflow.get("current_job")
+                or status in {"completed", "failed"}
+            )
+        )
+        result = None
+        if include_result:
+            if (
+                terminal_job_result
+                and job_result is not None
+            ):
+                bound = _job_result_transaction(
+                    self.session_dir,
+                    job_result,
+                )
+                result = (
+                    _with_job_result(
+                        _generation_result(*bound),
+                        job_result,
+                    )
+                    if bound is not None
+                    else _generation_result_from_job_result(
+                        self.session_dir,
+                        workflow.get("last_job_result") or {},
+                        job_result,
+                    )
+                )
+            elif workflow.get("current_job"):
+                result = None
+            else:
+                latest = latest_transaction(
+                    self.session_dir,
+                    request_id=request.get("request_id"),
+                )
+                if latest is not None:
+                    report_path, report = latest
+                    result = _generation_result(report_path, report)
         decision = _decision_summary(
             workflow.get("decision") or {},
             session_dir=getattr(self, "session_dir", None),
@@ -786,6 +886,15 @@ class RecorderQueryService:
                 (job.get("profile_lease") or {}).get("profile_id")
                 if job is not None
                 else None
+            ),
+            job_history=_generation_job_history(
+                getattr(self, "session_dir", None),
+                workflow,
+                job,
+            ),
+            feedback_history=_feedback_history(
+                getattr(self, "session_dir", None),
+                request.get("request_id"),
             ),
         )
 
@@ -1270,6 +1379,97 @@ def _generation_summary(
     )
 
 
+def _generation_job_history(session_dir, workflow, current_job):
+    if session_dir is None:
+        return ()
+    session_dir = Path(session_dir).resolve()
+    entries = []
+    if current_job is not None:
+        execution = workflow.get("job_execution") or {}
+        entries.append(GenerationJobHistoryDTO(
+            job_id=str(current_job.get("job_id") or ""),
+            job_path=str((workflow.get("current_job") or {}).get("path") or ""),
+            status=str(workflow.get("status") or "ready"),
+            phase=execution.get("phase"),
+            reason=None,
+            profile_id=(current_job.get("profile_lease") or {}).get(
+                "profile_id"
+            ),
+            retired_at=None,
+            result_status=None,
+            result_path=None,
+            is_current=True,
+        ))
+    for retired in reversed(list(workflow.get("retired_jobs") or ())):
+        pointer = (retired or {}).get("job") or {}
+        job = load_generation_job(session_dir, pointer)
+        if job is None:
+            continue
+        result_pointer = retired.get("last_job_result") or {}
+        result = load_generation_job_result(session_dir, result_pointer)
+        entries.append(GenerationJobHistoryDTO(
+            job_id=str(job.get("job_id") or ""),
+            job_path=str(pointer.get("path") or ""),
+            status=str(retired.get("status") or "failed"),
+            phase=retired.get("phase"),
+            reason=retired.get("reason"),
+            profile_id=(job.get("profile_lease") or {}).get("profile_id"),
+            retired_at=retired.get("retired_at"),
+            result_status=(result or {}).get("status"),
+            result_path=result_pointer.get("path"),
+        ))
+    return tuple(entries)
+
+
+def _feedback_history(session_dir, request_id):
+    if session_dir is None or not request_id:
+        return ()
+    try:
+        events, _warnings = load_memory_events(
+            find_recording_root(session_dir),
+            migrate=False,
+        )
+    except OSError:
+        return ()
+    matching = [
+        event
+        for event in events
+        if (
+            event.get("kind") == "transaction_feedback"
+            and (event.get("source") or {}).get("request_id") == request_id
+        )
+    ]
+    superseded = {
+        str(memory_id)
+        for event in matching
+        for memory_id in event.get("supersedes") or ()
+        if memory_id
+    }
+    return tuple(
+        FeedbackHistoryDTO(
+            memory_id=str(event.get("memory_id") or ""),
+            status=str(event.get("status") or ""),
+            tier=(event.get("payload") or {}).get(
+                "accepted_feedback_tier"
+            ),
+            claim=str(event.get("claim") or ""),
+            created_at=event.get("created_at"),
+            transaction_id=(event.get("source") or {}).get(
+                "transaction_id"
+            ),
+            supersedes=tuple(
+                str(item) for item in event.get("supersedes") or ()
+            ),
+            is_effective=str(event.get("memory_id") or "") not in superseded,
+        )
+        for event in reversed(matching)
+    )
+
+
+def _scope_capture_generation_candidate(scope):
+    return bool(getattr(scope, "capture_generation_candidate", False))
+
+
 def _verification_summary(
     result,
     runtime_result,
@@ -1301,19 +1501,19 @@ def _verification_summary(
         and str(getattr(runtime_result, "status", "") or "") == "passed"
         and (
             quality is None
-            or quality.get("runtime_passed") is True
+            or _single_run_passed(quality) is True
         )
     )
     if runtime_verified:
         oracle_verified = bool(
             quality is not None
-            and quality.get("independent_oracle_passed") is True
+            and _oracle_passed(quality) is True
         )
         return VerificationSummaryDTO(
             level=(
                 "oracle_verified"
                 if oracle_verified
-                else "runtime_passed"
+                else "single_run_passed"
             ),
             label=(
                 "独立业务状态已验证"
@@ -2212,6 +2412,85 @@ def _generation_result(report_path, report):
     )
 
 
+def _job_result_transaction(session_dir, job_result):
+    transaction_stage = (job_result.get("stages") or {}).get(
+        "transaction"
+    ) or {}
+    owner = transaction_stage.get("owner") or {}
+    if not isinstance(owner, dict) or owner.get(
+            "owner"
+    ) != "generation_transaction":
+        return None
+    return _load_job_transaction_owner(session_dir, owner)
+
+
+def _job_execution_transaction(session_dir, workflow):
+    owner = (workflow.get("job_execution") or {}).get(
+        "transaction"
+    ) or {}
+    if not isinstance(owner, dict):
+        return None
+    return _load_job_transaction_owner(session_dir, owner)
+
+
+def _load_job_transaction_owner(session_dir, owner):
+    path_value = owner.get("path")
+    transaction_id = str(owner.get("transaction_id") or "")
+    if not path_value or not transaction_id:
+        return None
+    session_dir = Path(session_dir).resolve()
+    path = Path(str(path_value))
+    path = path.resolve() if path.is_absolute() else (session_dir / path).resolve()
+    loaded = load_transaction_report(path, session_dir)
+    if loaded is None:
+        return None
+    report_path, report = loaded
+    result_fingerprint = owner.get("result_fingerprint")
+    if any((
+        report.get("transaction_id") != transaction_id,
+        owner.get("status")
+        and report.get("status") != owner.get("status"),
+        result_fingerprint
+        and report.get("result_fingerprint") != result_fingerprint,
+        result_fingerprint
+        and transaction_result_fingerprint(report) != result_fingerprint,
+        owner.get("completion_fingerprint")
+        and report.get("completion_fingerprint")
+        != owner.get("completion_fingerprint"),
+    )):
+        return None
+    return report_path, report
+
+
+def _generation_result_from_job_result(
+        session_dir,
+        pointer,
+        job_result,
+    ):
+    session_dir = Path(session_dir).resolve()
+    path = Path(str(pointer.get("path") or ""))
+    path = path.resolve() if path.is_absolute() else (session_dir / path).resolve()
+    status = str(job_result.get("status") or "failed")
+    category = str(job_result.get("category") or "job_failed")
+    return GenerationResultDTO(
+        status=status,
+        transaction_id=None,
+        report_path=str(path),
+        changed_files=(),
+        validation_count=0,
+        failed_checks=(),
+        errors=((category,) if status == "failed" else ()),
+        warnings=(),
+        failure_category=category,
+        recommended_action=str(
+            job_result.get("next_action") or "review_generation_failure"
+        ),
+        recommended_label=_job_result_label(status, category),
+        stages=_job_result_stages(job_result),
+        execution_status=None,
+    )
+
+
 def _generation_stages(report, *, report_path=None):
     status = str(report.get("status") or "unknown")
     manifest = report.get("implementation_manifest") or {}
@@ -2455,11 +2734,10 @@ def _with_runtime_stages(result, runtime_result, *, quality=None):
         return result
     runtime_status = (
         "passed"
-        if quality is not None and quality.get("runtime_passed") is True
+        if quality is not None and _single_run_passed(quality) is True
         else "failed"
         if quality is not None
-        and quality.get("runtime_matrix_required") is True
-        and quality.get("runtime_passed") is False
+        and _single_run_passed(quality) is False
         else "passed"
         if quality is None
         and runtime_result is not None
@@ -2488,11 +2766,11 @@ def _with_runtime_stages(result, runtime_result, *, quality=None):
                 status=(
                     "passed"
                     if quality is not None
-                    and quality.get("independent_oracle_passed") is True
+                    and _oracle_passed(quality) is True
                     else "failed"
                     if quality is not None
                     and quality.get("runtime_matrix_required") is True
-                    and quality.get("independent_oracle_passed") is False
+                    and _oracle_passed(quality) is False
                     else "not_required"
                     if quality is not None
                     and quality.get("runtime_matrix_required") is False
@@ -2506,6 +2784,22 @@ def _with_runtime_stages(result, runtime_result, *, quality=None):
             ),
         ),
     )
+
+
+def _single_run_passed(quality):
+    if not isinstance(quality, dict):
+        return None
+    if "single_run_passed" in quality:
+        return quality.get("single_run_passed")
+    return quality.get("runtime_passed")
+
+
+def _oracle_passed(quality):
+    if not isinstance(quality, dict):
+        return None
+    if "oracle_passed" in quality:
+        return quality.get("oracle_passed")
+    return quality.get("independent_oracle_passed")
 
 
 def _result_recovery(status, failed_checks):

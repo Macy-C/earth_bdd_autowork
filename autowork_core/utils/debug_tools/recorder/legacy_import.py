@@ -86,8 +86,11 @@ def import_legacy_request(request_path):
         "target": copy.deepcopy(source.get("target") or {}),
         "readiness": {
             "bundle_valid": bool(readiness.get("bundle_valid")),
-            "target_generation_ready": not reviews,
-            "session_generation_ready": bool(readiness.get("generation_ready")),
+            "target_capture_generation_candidate": not reviews,
+            "session_capture_generation_candidate": bool(readiness.get(
+                "capture_generation_candidate",
+                readiness.get("generation_ready"),
+            )),
             "session_warnings": list(readiness.get("warnings") or []),
             "target_review_required": copy.deepcopy(reviews),
         },

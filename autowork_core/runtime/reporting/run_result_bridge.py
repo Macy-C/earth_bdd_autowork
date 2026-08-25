@@ -97,7 +97,7 @@ def load_generation_provenance(report_path, *, project_root=None):
         transaction = execution.get("transaction") or {}
         if any((
             state.get("status") != "running",
-            execution.get("phase") != "runtime",
+            execution.get("phase") not in {"runtime", "oracle"},
             pointer.get("job_id") != job_lease.get("job_id"),
             pointer.get("job_fingerprint")
             != job_lease.get("job_fingerprint"),
@@ -331,11 +331,25 @@ def latest_matching_run_result(
                     continue
                 if str(scenario.get("example_id") or "") != str(example_id or ""):
                     continue
-                matches.append((str(value.get("published_at") or ""), path, value, scenario))
+                matches.append((
+                    _run_result_sort_key(value, path),
+                    path,
+                    value,
+                    scenario,
+                ))
     if not matches:
         return None
-    _published_at, path, value, scenario = max(matches, key=lambda item: item[0])
+    _sort_key, path, value, scenario = max(matches, key=lambda item: item[0])
     return path, value, scenario
+
+
+def _run_result_sort_key(value, path):
+    return (
+        str(value.get("published_at") or ""),
+        str(value.get("started_at") or ""),
+        str(value.get("run_result_id") or ""),
+        Path(path).name,
+    )
 
 
 def verified_file_path(record, *, project_root=None):

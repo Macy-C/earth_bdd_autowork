@@ -49,7 +49,6 @@ from autowork_core.utils.debug_tools.recorder.generation_file_lock import (
     GenerationFileConflict,
     acquire_generation_file_lease,
     commit_generation_file_lease,
-    finalize_generation_file_lease,
     generation_file_lease_release_is_complete,
     generation_path_has_reparse_point,
     generation_file_lease_write_guard,
@@ -68,6 +67,7 @@ from autowork_core.utils.debug_tools.recorder.generation_validation import (
 )
 from autowork_core.utils.debug_tools.recorder.identity import stable_digest
 from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
+    build_implementation_packet,
     build_implementation_manifest,
     implementation_manifest_identity_is_valid,
     implementation_manifest_matches_transaction,
@@ -515,6 +515,9 @@ def _prepare_generation_transaction_locked(
         ),
         "implementation_summary": _implementation_summary(plan),
         "implementation_manifest": implementation_manifest,
+        "implementation_packet": build_implementation_packet(
+            implementation_manifest
+        ),
         "system_materialization": {"status": "pending"},
         "risk": state.get("risk") or {},
         "allowed_write_roots": [path.as_posix() for path in ALLOWED_WRITE_ROOTS],
@@ -2083,20 +2086,29 @@ def _fail_running_transaction_after_exception(
         or report.get("project_root")
         or Paths.BASE_DIR
     ).resolve()
+    job_bound = bool(report.get("generation_job_lease"))
+    release_lease = not job_bound
     try:
         if report.get("status") != "running":
             try:
                 _validate_terminal_report_identity(report_path, report)
-                finalize_generation_file_lease(
+                with generation_file_lease_publish_guard(
                     root,
                     report.get("generation_file_lease"),
-                )
-                _transition_terminal_workflow(
-                    report.get("session_dir") or Path(report_path).parents[3],
-                    report.get("request_id"),
-                    Path(report_path),
-                    report,
-                )
+                ):
+                    report = _finalize_terminal_snapshot(
+                        Path(report_path),
+                        report,
+                        root,
+                    )
+                    _transition_terminal_workflow(
+                        report.get("session_dir")
+                        or Path(report_path).parents[3],
+                        report.get("request_id"),
+                        Path(report_path),
+                        report,
+                    )
+                release_lease = True
             except Exception:
                 pass
             return
@@ -2114,29 +2126,30 @@ def _fail_running_transaction_after_exception(
             report,
             completed_at.isoformat(timespec="milliseconds"),
         )
+        report.pop("completion_fingerprint", None)
+        report["result_fingerprint"] = transaction_result_fingerprint(
+            report
+        )
         try:
             write_json_atomic(report_path, report)
         except Exception:
             return
         try:
-            transition_workflow(
+            _transition_terminal_workflow(
                 report.get("session_dir") or Path(report_path).parents[3],
                 report.get("request_id"),
-                status="failed",
-                transaction=None,
-                result={
-                    "transaction_id": report.get("transaction_id"),
-                    "report_path": str(Path(report_path).resolve()),
-                    "status": "failed",
-                },
+                Path(report_path),
+                report,
             )
+            release_lease = True
         except Exception:
             pass
     finally:
-        release_generation_file_lease_for_transaction(
-            root,
-            Path(report_path).parent.name,
-        )
+        if release_lease:
+            release_generation_file_lease_for_transaction(
+                root,
+                Path(report_path).parent.name,
+            )
 
 
 def _load_frozen_artifacts(session_dir, request, state, report):
@@ -3312,6 +3325,13 @@ def _transaction_path(session_dir, value):
 
 
 def _block_missing_plan(session_dir, request, state):
+    if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
+        return _job_block_result(
+            request,
+            state,
+            "missing_generation_plan",
+            [f"Workflow implementation阶段缺少有效GenerationPlanV{PLAN_VERSION}"],
+        )
     state = transition_workflow(
         session_dir,
         request["request_id"],
@@ -3329,6 +3349,13 @@ def _block_missing_plan(session_dir, request, state):
 
 
 def _block_stale(session_dir, request, state, reason):
+    if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
+        return _job_block_result(
+            request,
+            state,
+            "stale_during_generation",
+            [reason],
+        )
     state = transition_workflow(
         session_dir,
         request["request_id"],
@@ -3346,6 +3373,13 @@ def _block_stale(session_dir, request, state, reason):
 
 
 def _block_contract_changed(session_dir, request, state):
+    if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
+        return _job_block_result(
+            request,
+            state,
+            "generation_contract_changed",
+            ["Generation Contract在Job期间已变化"],
+        )
     state = dict(state)
     state.update({
         "status": "draft",
@@ -3371,6 +3405,15 @@ def _block_contract_changed(session_dir, request, state):
 
 
 def _block_pic_policy(session_dir, request, state, audit):
+    if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
+        result = _job_block_result(
+            request,
+            state,
+            "invalid_pic_authorization",
+            audit.get("errors") or ["PIC authorization无效"],
+        )
+        result["pic_authorization_audit"] = audit
+        return result
     state = transition_workflow(
         session_dir,
         request["request_id"],
@@ -3387,6 +3430,18 @@ def _block_pic_policy(session_dir, request, state, audit):
         "workflow_state": state,
         "pic_authorization_audit": audit,
         "errors": audit.get("errors") or ["PIC authorization 无效"],
+        "warnings": [],
+    }
+
+
+def _job_block_result(request, state, category, errors):
+    return {
+        "transaction_version": TRANSACTION_VERSION,
+        "status": "job_blocked",
+        "job_failure_category": category,
+        "request_id": request.get("request_id"),
+        "workflow_state": state,
+        "errors": [str(item) for item in errors],
         "warnings": [],
     }
 
