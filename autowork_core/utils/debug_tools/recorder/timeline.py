@@ -141,10 +141,7 @@ class TimelineStore:
         )
 
     def keyboard_fragments(self, action_id):
-        action = next((
-            item for item in self.review_actions()
-            if item.get("id") == str(action_id)
-        ), None)
+        action = self._keyboard_fragment_review_action(action_id)
         if action is None or action.get("type") != "keyboard":
             raise ValueError("键盘片段只能属于当前键盘动作")
         excluded = {
@@ -199,10 +196,7 @@ class TimelineStore:
         ):
         if expected_revision is not None:
             self.require_revision(expected_revision)
-        action = next((
-            item for item in self.review_actions()
-            if item.get("id") == str(action_id)
-        ), None)
+        action = self._keyboard_fragment_review_action(action_id)
         if action is None or action.get("type") != "keyboard":
             raise ValueError("键盘片段只能属于当前键盘动作")
         if isinstance(key_event_ids, str):
@@ -231,6 +225,28 @@ class TimelineStore:
         )
         self._append_record(record)
         return self.materialize()
+
+    def _keyboard_fragment_review_action(self, action_id):
+        if not self.auto_path.exists():
+            return None
+        auto = self._load_auto()
+        actions = [
+            {**copy.deepcopy(action), "included": True}
+            for action in _normalize_actions(auto.get("actions", []))
+        ]
+        edits = self.load_edits()
+        active = _active_edit_map(edits)
+        for record in edits:
+            if record.get("kind") != "edit" or not active.get(record["edit_id"], True):
+                continue
+            if record.get("operation") == "insert_supplement":
+                actions = self._insert_supplement_actions(actions, record)
+            else:
+                actions = _apply_record(actions, record)
+        return next((
+            item for item in actions
+            if item.get("id") == str(action_id)
+        ), None)
 
     def apply_target_binding_repair(
             self,

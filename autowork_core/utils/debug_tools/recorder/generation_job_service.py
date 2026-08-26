@@ -657,6 +657,7 @@ def abort_generation_job(
         claim_id,
         expected_epoch,
         project_root=None,
+        allow_project_guard_drift=False,
     ):
     return abort_generation_transaction(
         report_path,
@@ -664,6 +665,7 @@ def abort_generation_job(
         project_root=project_root,
         generation_job_claim_id=claim_id,
         generation_job_expected_epoch=expected_epoch,
+        allow_project_guard_drift=allow_project_guard_drift,
     )
 
 

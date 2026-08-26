@@ -27,7 +27,7 @@ python -m pip check
 
 `paddleocr==3.6.0` pulls in `paddlex==3.6.1`. PaddleX installs OpenCV 4.10 by default, but this project also uses `airtest==1.4.3`, which requires `opencv-contrib-python<=4.6.0.66`. After installing PaddleOCR, restore OpenCV to `4.6.0.66`; PP-OCRv5 initialization and OCR inference have been verified with that version.
 
-Runtime tuning is controlled by `OCR_SETTING` in `config/config.yaml`:
+Runtime tuning is controlled by `OCR_SETTING` in `Bdd/config.yaml`:
 
 - `MODE`: preset baseline, one of `fast`, `balanced`, or `accurate`. Explicit fields override the preset.
 - `WARMUP`: preload PaddleOCR and run one small OCR sample during `before_all`.

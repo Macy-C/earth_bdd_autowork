@@ -2517,8 +2517,121 @@ def _window_ownership_candidates(
         "window_causality": list(
             (semantics or {}).get("window_causality") or []
         )[:12],
+        "ownership_candidates": _child_view_ownership_candidates(
+            actions,
+            list((semantics or {}).get("window_causality") or []),
+            windows,
+        ),
         "view_ownership": "ai_reasoning_required",
     }
+
+
+def _child_view_ownership_candidates(actions, causality, windows):
+    indexed_actions = []
+    actions_by_id = {}
+    for index, action in enumerate(actions or (), start=1):
+        action_id = str(action.get("action_id") or action.get("id") or "")
+        if not action_id:
+            continue
+        indexed = {**action, "_order": _action_order(action, index)}
+        indexed_actions.append(indexed)
+        actions_by_id.setdefault(action_id, []).append(indexed)
+    result = []
+    seen = set()
+    for item in causality or ():
+        opener_id = str(item.get("opened_by_action_id") or "").strip()
+        if not opener_id:
+            continue
+        for opener in actions_by_id.get(opener_id, []):
+            parent_root = str(((opener or {}).get("target") or {}).get("root_name") or "")
+            step_id = str((opener or {}).get("step_id") or "")
+            if not parent_root or not step_id:
+                continue
+            for child_root in _causality_child_roots(
+                    item,
+                    indexed_actions,
+                    opener,
+                    windows,
+                ):
+                if not child_root or child_root == parent_root:
+                    continue
+                child_actions = [
+                    str(action.get("action_id") or action.get("id") or "")
+                    for action in indexed_actions
+                    if str(action.get("step_id") or "") == step_id
+                    and str((action.get("target") or {}).get("root_name") or "") == child_root
+                    and _action_order(action, 0) > _action_order(opener, 0)
+                ]
+                child_actions = [value for value in child_actions if value]
+                if not child_actions:
+                    continue
+                identity = {
+                    "kind": "child_view",
+                    "parent_root": parent_root,
+                    "child_root": child_root,
+                    "opener_action_id": opener_id,
+                    "child_action_ids": child_actions,
+                    "step_id": step_id,
+                }
+                key = json.dumps(identity, ensure_ascii=False, sort_keys=True)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append({
+                    "candidate_id": "window-view-candidate-" + _stable_hash(identity)[:16],
+                    **identity,
+                    "evidence": {
+                        "opened_by_parent_action": True,
+                        "parent_action_root": parent_root,
+                        "child_action_roots": [child_root],
+                        "order": "opener_before_child",
+                    },
+                    "confidence": "evidence_supported",
+                })
+    return result
+
+
+def _causality_child_roots(causality, actions, opener, windows):
+    step_id = str((opener or {}).get("step_id") or "")
+    parent_root = str(((opener or {}).get("target") or {}).get("root_name") or "")
+    roots = []
+    for action in actions:
+        if str(action.get("step_id") or "") != step_id:
+            continue
+        if _action_order(action, 0) <= _action_order(opener, 0):
+            continue
+        root_name = str((action.get("target") or {}).get("root_name") or "")
+        if root_name and root_name != parent_root and root_name not in roots:
+            roots.append(root_name)
+    matched = [
+        root_name for root_name in roots
+        if _causality_window_matches_root(causality, windows.get(root_name) or {})
+    ]
+    if matched:
+        return matched
+    return roots if len(roots) == 1 else []
+
+def _causality_window_matches_root(causality, window):
+    observed = (causality or {}).get("window") or {}
+    criteria = (window or {}).get("root_criteria") or {}
+    observed_title = str(observed.get("title") or "")
+    observed_class = str(observed.get("class_name") or "")
+    expected_title = str(criteria.get("title") or criteria.get("name") or "")
+    expected_class = str(criteria.get("class_name") or "")
+    return bool(
+        (not observed_title or not expected_title or observed_title == expected_title)
+        and (not observed_class or not expected_class or observed_class == expected_class)
+        and (observed_title or observed_class)
+        and (expected_title or expected_class)
+    )
+
+
+def _action_order(action, fallback):
+    value = (action or {}).get("ordinal")
+    if isinstance(value, int) and value > 0:
+        return value
+    value = (action or {}).get("_order")
+    return value if isinstance(value, int) and value > 0 else fallback
 
 
 def _window_identities_by_event(request_evidence):
@@ -2951,6 +3064,8 @@ def _compact_window_ownership(value):
         "cross_window_steps": value.get("cross_window_steps") or [],
         "roots_by_step": value.get("roots_by_step") or {},
         "unowned_action_ids": value.get("unowned_action_ids") or [],
+        "window_causality": value.get("window_causality") or [],
+        "ownership_candidates": value.get("ownership_candidates") or [],
     })
 
 

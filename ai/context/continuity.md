@@ -294,13 +294,35 @@ append-only Timeline edit，且有效投影必须可追溯回原 Action/事件�
    聚合；`prepare-job` 输出 AI 可编辑文件、系统文件和机械实现包。`--full` 保留原完整 JSON，
    `--step-id`/`--action-id` 保留完整精确 evidence。真实 Notepad Job smoke 中，默认 inspect
    从约 54.7 KB 降到约 1.9 KB，完整 Envelope 仍可无损取得。
+- `AIContextEnvelopeV1.2` 已实施事实等价 Brief 去重：完整内容寻址 Brief 不变；Envelope 仅省略
+   `scenario_intelligence.specification` 与 `demonstration` 两个可由同一 Envelope 的
+   `brief.target`、`brief.actions`、`brief.semantics` 重建的重复字段，并附全 Brief 路径、指纹、
+   `inspect-job --full` 展开命令和受限 omission 声明。identity 校验拒绝未知遗漏、遗漏字段仍存在、
+   指纹/指针不匹配或不正确展开入口。真实 Notepad Job 的默认 Context 从 52,987 bytes 降至
+   50,993 / 51,200 bytes，状态变为 `within_target`，未删除任何 Design 决策事实。
 - `implementation_packet` 已实现为 Transaction report 中从有效 Implementation Manifest 纯派生
    的只读投影：包含 AI 编辑边界、Page root skeleton、Step decorator/参数、具名 receiver、严格
    `$loc:` 目标、调用顺序与冻结参数/值。它不进入 Manifest identity、不授权新文件或业务选择，
    Plan-to-Code 继续为独立验证门。
 - Timeline 已为 keyboard Action 增加默认收起的“键盘片段”详情框：将连续文字和导航/编辑键按
-   顺序展示，例如“输入 12 / 左方向键 / 退格键”。展示不写 edit、不改 raw/effective Action、
-   不改变默认动作列表密度。**片段级排除/恢复、跨 Step 编辑语义冲突诊断和任何文本模型仍未实施；
-   它们必须作为独立 mutation/语义切片，并先定义投影、回放与 fail-closed 负例。**
-- 验证：CLI/Manifest/Job/Timeline 联合 263 项通过，文档 27 项通过，完整 Recorder 1047 项通过
-   / 12 项条件跳过。
+   顺序展示，例如“输入 12 / 左方向键 / 退格键”，不改变默认动作列表密度。片段级“忽略/恢复”
+   已实施为 append-only `keyboard_fragment` edit：只记录原 keyboard Action 中被排除的 key-down
+   event ID；物化从原始事件重建同一 Action ID 的有效 keys/event_ids/media_event_ids，并由现有
+   undo/redo、projection、Graph、Semantic Pack、Request stale 路径重算。原始 Action/raw events
+   不变，不能排除全部片段（应忽略整个动作）。**跨 Step 编辑语义冲突诊断和任何通用文本模型仍未
+   实施；它们必须作为独立语义切片，并先定义受限模型、投影、回放与 fail-closed 负例。**
+- 验证：CLI/Manifest/Job/Timeline 联合 263 项通过，键盘片段跨 Timeline/Application 136 项通过
+   / 1 项条件跳过，Envelope V1.2 后完整 Recorder 1048 项通过 / 12 项条件跳过，完整
+   framework_validation 1588 项通过 / 13 项条件跳过，framework smoke 通过，文档 27 项通过。
+
+## 当前修复计划：Recorder 生成架构防漂移（2026-08-25）
+
+真实 Notepad 生成和后续静态复盘暴露：内部 Plan/Manifest/Job Result 自洽不等于用户旅程
+正确。后续在重新录制或真实软件验收前，先按
+`ai/context/recorder-generation-architecture-repair-plan.md` 恢复上下文并执行修复。核心原则是：
+AI 仍决定业务结构，系统冻结候选并验证证据，用户旅程一致性优先于内部 JSON 自洽。
+
+优先级：当前工作区物化一致性门；证据支持的 ownership candidates；WindowView locator
+active-root 收紧；Plan 语义质量门；CLI/Context 输出分层；端到端静态旅程回归。不要根据
+`PopupWindowSiteBridge` 等技术类名硬编码业务 Page/View，也不要让 `parent_root` 成为无证据的
+自由字段。

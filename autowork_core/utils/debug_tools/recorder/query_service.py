@@ -69,6 +69,7 @@ from autowork_core.utils.debug_tools.recorder.dto import (
     TakeDTO,
     UserTaskProjection,
     VerificationSummaryDTO,
+    WorkspaceMaterializationDTO,
     WindowOwnershipSummaryDTO,
     WorkbenchDTO,
 )
@@ -1485,6 +1486,28 @@ def _verification_summary(
         changed_files
         or result_status in {"completed", "completed_no_changes"}
     ))
+    workspace = getattr(result, "workspace_materialization", None)
+    workspace_status = str(getattr(workspace, "status", "") or "")
+    workspace_matches = workspace_status in {
+        "",
+        "matches_report",
+        "not_recorded",
+        "not_applicable",
+    }
+    if result is not None and not workspace_matches:
+        missing_count = len(getattr(workspace, "missing_files", ()) or ())
+        modified_count = len(getattr(workspace, "modified_files", ()) or ())
+        return VerificationSummaryDTO(
+            level="workspace_materialization_stale",
+            label="生成文件已过期",
+            detail=(
+                "历史生成报告仍然存在，但当前工作区文件已与报告快照不一致；"
+                f"缺失 {missing_count}，已修改 {modified_count}。"
+            ),
+            code_generated=False,
+            implementation_validated=False,
+            runtime_verified=False,
+        )
     implementation_validated = bool(
         transaction_valid
         and result is not None
@@ -2409,6 +2432,76 @@ def _generation_result(report_path, report):
         execution_status=(
             (report.get("execution_outcome") or {}).get("status")
         ),
+        workspace_materialization=_workspace_materialization(report_path, report),
+    )
+
+
+def _workspace_materialization(report_path, report):
+    snapshot = report.get("implementation_snapshot")
+    if snapshot is None:
+        return WorkspaceMaterializationDTO(status="not_recorded")
+    if not isinstance(snapshot, list):
+        return WorkspaceMaterializationDTO(status="report_unavailable")
+    project_root = Path(report.get("project_root") or Paths.BASE_DIR).resolve()
+    missing = []
+    modified = []
+    extra = []
+    checked = 0
+    for item in snapshot:
+        if not isinstance(item, dict):
+            return WorkspaceMaterializationDTO(status="report_unavailable")
+        relative = str(item.get("path") or "")
+        if not relative:
+            return WorkspaceMaterializationDTO(status="report_unavailable")
+        path = (project_root / relative).resolve()
+        try:
+            path.relative_to(project_root)
+        except ValueError:
+            return WorkspaceMaterializationDTO(status="report_unavailable")
+        expected_exists = item.get("exists") is True
+        actual_exists = path.is_file()
+        if not expected_exists:
+            if actual_exists:
+                extra.append(relative)
+            checked += 1
+            continue
+        if not actual_exists:
+            missing.append(relative)
+            checked += 1
+            continue
+        try:
+            content = path.read_bytes()
+        except OSError:
+            missing.append(relative)
+            checked += 1
+            continue
+        expected_size = item.get("size")
+        expected_sha256 = str(item.get("sha256") or "")
+        if (
+            expected_size is None
+            or not expected_sha256
+            or len(content) != int(expected_size)
+            or hashlib.sha256(content).hexdigest() != expected_sha256
+        ):
+            modified.append(relative)
+        checked += 1
+    if missing and modified:
+        status = "mixed_mismatch"
+    elif missing:
+        status = "missing_files"
+    elif modified:
+        status = "modified_files"
+    elif extra:
+        status = "extra_generation_files"
+    else:
+        status = "matches_report"
+    return WorkspaceMaterializationDTO(
+        status=status,
+        expected_count=len(snapshot),
+        checked_count=checked,
+        missing_files=tuple(missing),
+        modified_files=tuple(modified),
+        extra_generation_files=tuple(extra),
     )
 
 

@@ -144,8 +144,11 @@ def _apply_mode_defaults(config, presets, default_mode="balanced"):
 
 class Settings:
     def __init__(self, yaml_path=None):
-        # self.yaml_path = Path(yaml_path) if yaml_path else Path(__file__).with_name("config.yaml")
-        self.yaml_path = Path(yaml_path) if yaml_path else Paths.CONFIG_DIR / "config.yaml"
+        self.yaml_path = (
+            Path(yaml_path)
+            if yaml_path
+            else Paths.PROJECT_CONFIG_FILE
+        )
 
         # ===================== 默认值 =====================
         # log

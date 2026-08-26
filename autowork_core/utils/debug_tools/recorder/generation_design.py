@@ -64,7 +64,10 @@ def compact_generation_design_contract():
             ],
             "field_types": {
                 "steps": "array of Step objects in exact target order",
-                "window_ownership": "array of window ownership objects",
+                "window_ownership": (
+                    "array of window ownership objects; child roots may "
+                    "declare parent_root to compile as an existing WindowView"
+                ),
                 "ambiguity_choices": "array of ambiguity choice objects",
                 "memory_trace": "object",
             },
@@ -254,14 +257,28 @@ def compact_generation_design_contract():
         "window_ownership": {
             "container": "array of objects",
             "required": ["root_name", "strategy"],
-            "optional": ["candidate_id", "business_name", "reason"],
+            "optional": [
+                "candidate_id",
+                "business_name",
+                "parent_root",
+                "ownership_candidate_id",
+                "dismissed_ownership_candidate_ids",
+                "reason",
+            ],
             "strategies": ["reuse_existing", "create_new"],
             "rule": (
-                "Declare exactly one owner for every distinct operation "
+                "AI chooses the business owner shape. Declare exactly one "
+                "owner for every distinct operation "
                 "window_root and no others. reuse_existing requires a frozen "
                 "candidate_id and forbids business_name. create_new forbids "
                 "candidate_id and requires an ASCII snake_case business_name "
-                "when the recorded Root contains a machine identity suffix."
+                "when the recorded Root contains a machine identity suffix. "
+                "To create a WindowView, declare parent_root and the exact "
+                "frozen ownership_candidate_id. To keep a candidate child "
+                "root as an independent WindowPage, list every rejected "
+                "candidate in dismissed_ownership_candidate_ids and provide "
+                "a non-empty business reason. The system verifies candidate "
+                "roots, scoped Actions, and order."
             ),
         },
         "ambiguity_choice": {
@@ -833,6 +850,9 @@ def _validate_window_ownership_shape(owners, steps):
             owner,
             {
                 "root_name",
+                "parent_root",
+                "ownership_candidate_id",
+                "dismissed_ownership_candidate_ids",
                 "strategy",
                 "candidate_id",
                 "business_name",
@@ -843,13 +863,38 @@ def _validate_window_ownership_shape(owners, steps):
         root_name = str(owner.get("root_name") or "").strip()
         strategy = str(owner.get("strategy") or "")
         candidate_id = str(owner.get("candidate_id") or "").strip()
+        ownership_candidate_id = str(
+            owner.get("ownership_candidate_id") or ""
+        ).strip()
+        dismissed_candidate_ids = [
+            str(item).strip()
+            for item in owner.get("dismissed_ownership_candidate_ids") or ()
+            if str(item).strip()
+        ]
         business_name = str(owner.get("business_name") or "").strip()
+        parent_root = str(owner.get("parent_root") or "").strip()
         if not root_name:
             raise ValueError("window_ownership缺少root_name")
+        if parent_root == root_name:
+            raise ValueError("window view parent_root不能引用自身")
         if strategy not in {"reuse_existing", "create_new"}:
             raise ValueError(f"window ownership strategy无效: {strategy}")
         if strategy == "reuse_existing" and not candidate_id:
             raise ValueError("reuse_existing window ownership缺少candidate_id")
+        if parent_root and strategy == "reuse_existing":
+            raise ValueError("window view ownership不能声明reuse_existing")
+        if parent_root and candidate_id:
+            raise ValueError("window view ownership不能声明candidate_id")
+        if parent_root and not ownership_candidate_id:
+            raise ValueError("window view ownership缺少ownership_candidate_id")
+        if not parent_root and ownership_candidate_id:
+            raise ValueError("WindowPage ownership不能声明ownership_candidate_id")
+        if parent_root and dismissed_candidate_ids:
+            raise ValueError(
+                "window view ownership不能同时拒绝ownership candidate"
+            )
+        if len(dismissed_candidate_ids) != len(set(dismissed_candidate_ids)):
+            raise ValueError("window ownership包含重复dismissed candidate")
         if strategy == "reuse_existing" and business_name:
             raise ValueError(
                 "reuse_existing window ownership不能声明business_name"
@@ -865,6 +910,13 @@ def _validate_window_ownership_shape(owners, steps):
                 "带内部身份后缀的Root必须声明稳定business_name: "
                 f"{root_name}"
             )
+        if parent_root and not business_name:
+            raise ValueError("window view ownership必须声明business_name")
+        _validate_dismissed_ownership_candidates(
+            owner,
+            dismissed_candidate_ids,
+            root_name,
+        )
         public_name = _public_owner_name(root_name, business_name)
         previous_root = public_names.setdefault(public_name, root_name)
         if previous_root != root_name:
@@ -873,6 +925,17 @@ def _validate_window_ownership_shape(owners, steps):
                 f"{previous_root}/{root_name} -> {public_name}"
             )
         selected_roots.add(root_name)
+    parent_roots = {
+        str(owner.get("parent_root") or "").strip()
+        for owner in owners
+        if str(owner.get("parent_root") or "").strip()
+    }
+    missing_parents = sorted(parent_roots - selected_roots)
+    if missing_parents:
+        raise ValueError(
+            "window view parent_root必须引用已选择Root: "
+            f"{missing_parents}"
+        )
     if selected_roots != referenced_roots:
         raise ValueError(
             "GenerationDesign window ownership范围不一致: "
@@ -999,7 +1062,12 @@ def _compile_window_owners(design, brief):
         if operation.get("window_root")
     }
     owners = {}
-    for root_name in sorted(referenced_roots):
+    view_roots = {
+        root_name
+        for root_name in referenced_roots
+        if str((selections.get(root_name) or {}).get("parent_root") or "").strip()
+    }
+    for root_name in sorted(referenced_roots - view_roots):
         window = windows.get(root_name)
         if window is None:
             raise ValueError(f"Design引用未知window root: {root_name}")
@@ -1007,6 +1075,10 @@ def _compile_window_owners(design, brief):
             "root_name": root_name,
             "strategy": "create_new",
         }
+        ownership_decision = _compiled_window_page_ownership_decision(
+            selection,
+            brief,
+        )
         owner_id = _owner_id(root_name)
         if selection.get("strategy") == "reuse_existing":
             candidate_id = str(selection.get("candidate_id") or "")
@@ -1033,6 +1105,7 @@ def _compile_window_owners(design, brief):
                     "candidate_id": candidate_id,
                     "reason": str(selection.get("reason") or "Reuse selected owner."),
                 },
+                "ownership_decision": ownership_decision,
                 "views": {},
             }
         elif selection.get("strategy") == "create_new":
@@ -1060,11 +1133,158 @@ def _compile_window_owners(design, brief):
                     "candidate_id": None,
                     "reason": str(selection.get("reason") or "Create a new owner for the recorded Root."),
                 },
+                "ownership_decision": ownership_decision,
                 "views": {},
             }
         else:
             raise ValueError(f"window ownership strategy无效: {selection.get('strategy')}")
+    for root_name in sorted(view_roots):
+        if root_name not in windows:
+            raise ValueError(f"Design引用未知window root: {root_name}")
+        selection = selections[root_name]
+        parent_root = str(selection.get("parent_root") or "").strip()
+        ownership_candidate = _validated_view_ownership_candidate(
+            selection,
+            brief,
+        )
+        owner_id = _owner_id(parent_root)
+        owner = owners.get(owner_id)
+        if owner is None:
+            raise ValueError(f"window view引用未知parent_root: {parent_root}")
+        view_id = _public_owner_name(root_name, selection.get("business_name"))
+        if view_id in owner.get("views", {}):
+            raise ValueError(f"window owner重复view: {owner_id}.{view_id}")
+        package = _page_package_name(owner.get("page_object"))
+        owner.setdefault("views", {})[view_id] = {
+            "evidence_root": root_name,
+            "ownership_candidate_id": ownership_candidate["candidate_id"],
+            "locator_file": f"Bdd/locators/{package}/{view_id}.yaml",
+            "view_object": f"Bdd/page_obj/{package}/{view_id}.py",
+            "active_locator": f"{view_id}_window",
+            "root_locator": f"{view_id}_window",
+        }
     return owners
+
+
+def _validate_dismissed_ownership_candidates(
+        selection,
+        candidate_ids,
+        root_name,
+    ):
+    if not candidate_ids:
+        return
+    if not str(selection.get("reason") or "").strip():
+        raise ValueError(
+            "拒绝ownership candidate并选择独立WindowPage时必须说明reason"
+        )
+
+
+def _compiled_window_page_ownership_decision(selection, brief):
+    candidate_ids = [
+        str(item).strip()
+        for item in selection.get("dismissed_ownership_candidate_ids") or ()
+        if str(item).strip()
+    ]
+    if not candidate_ids:
+        return None
+    candidates = {
+        str(item.get("candidate_id") or ""): item
+        for item in (brief.get("window_ownership") or {}).get(
+            "ownership_candidates"
+        ) or ()
+        if item.get("candidate_id")
+    }
+    root_name = str(selection.get("root_name") or "")
+    for candidate_id in candidate_ids:
+        candidate = candidates.get(candidate_id)
+        if candidate is None:
+            raise ValueError(
+                f"dismissed ownership candidate不存在: {candidate_id}"
+            )
+        if any((
+            candidate.get("kind") != "child_view",
+            str(candidate.get("child_root") or "") != root_name,
+        )):
+            raise ValueError(
+                "dismissed ownership candidate与独立WindowPage root不一致: "
+                f"{candidate_id}"
+            )
+    return {
+        "selected_kind": "window_page",
+        "dismissed_candidate_ids": candidate_ids,
+        "reason": str(selection.get("reason") or "").strip(),
+    }
+
+
+def _validated_view_ownership_candidate(selection, brief):
+    candidate_id = str(selection.get("ownership_candidate_id") or "").strip()
+    parent_root = str(selection.get("parent_root") or "").strip()
+    child_root = str(selection.get("root_name") or "").strip()
+    candidates = [
+        item
+        for item in (brief.get("window_ownership") or {}).get(
+            "ownership_candidates"
+        ) or ()
+        if str(item.get("candidate_id") or "") == candidate_id
+    ]
+    if len(candidates) != 1:
+        raise ValueError(
+            f"window view ownership_candidate_id无效: {candidate_id}"
+        )
+    candidate = candidates[0]
+    if any((
+        candidate.get("kind") != "child_view",
+        str(candidate.get("parent_root") or "") != parent_root,
+        str(candidate.get("child_root") or "") != child_root,
+    )):
+        raise ValueError(
+            "window view ownership_candidate与parent/child root不一致"
+        )
+    _validate_view_candidate_actions(candidate, brief)
+    return candidate
+
+
+def _validate_view_candidate_actions(candidate, brief):
+    step_id = str(candidate.get("step_id") or "")
+    actions = {}
+    action_order = {}
+    for index, action in enumerate(brief.get("actions") or (), start=1):
+        action_id = str(action.get("id") or action.get("action_id") or "")
+        action_step_id = str(action.get("step_id") or "")
+        if not action_id or not action_step_id:
+            continue
+        key = (action_step_id, action_id)
+        if key in actions:
+            raise ValueError(
+                "window view ownership_candidate引用的scoped Action冲突: "
+                f"{action_step_id}/{action_id}"
+            )
+        actions[key] = action
+        action_order[key] = index
+    opener_id = str(candidate.get("opener_action_id") or "")
+    opener_key = (step_id, opener_id)
+    opener = actions.get(opener_key)
+    parent_root = str(candidate.get("parent_root") or "")
+    child_root = str(candidate.get("child_root") or "")
+    if opener is None:
+        raise ValueError("window view ownership_candidate缺少opener Action")
+    if str((opener.get("target") or {}).get("root_name") or "") != parent_root:
+        raise ValueError("window view ownership_candidate opener root不一致")
+    opener_order = action_order[opener_key]
+    child_action_ids = [
+        str(item) for item in candidate.get("child_action_ids") or () if item
+    ]
+    if not child_action_ids:
+        raise ValueError("window view ownership_candidate缺少child Action")
+    for action_id in child_action_ids:
+        action_key = (step_id, action_id)
+        action = actions.get(action_key)
+        if action is None:
+            raise ValueError("window view ownership_candidate引用未知child Action")
+        if str((action.get("target") or {}).get("root_name") or "") != child_root:
+            raise ValueError("window view ownership_candidate child root不一致")
+        if action_order[action_key] <= opener_order:
+            raise ValueError("window view ownership_candidate child顺序无效")
 
 
 def _compile_operation(
@@ -1089,6 +1309,9 @@ def _compile_operation(
         )
     root_name = str(selection.get("window_root") or "")
     owner_id = _owner_id(root_name)
+    view_owner = None
+    if owner_id not in owners:
+        owner_id, view_owner = _view_owner_for_root(root_name, owners)
     if owner_id not in owners:
         raise ValueError(f"Design operation引用未编译owner: {root_name}")
     capability_parameters = _compile_capability_parameters(
@@ -1164,6 +1387,8 @@ def _compile_operation(
         ),
         "uncertainty": selection.get("uncertainty"),
     }
+    if view_owner:
+        operation["view_owner"] = view_owner
     runtime_value = selection.get("runtime_value")
     if op in {"save_text", "save_attr"}:
         runtime_value = dict(runtime_value or {})
@@ -1192,7 +1417,10 @@ def _compile_operation(
                 raise ValueError(
                     f"Design引用未知Page method candidate: {candidate_id}"
                 )
-            if candidate.get("path") != owners[owner_id]["page_object"]:
+            if candidate.get("path") != _implementation_owner_path(
+                    owners[owner_id],
+                    view_owner,
+                ):
                 raise ValueError("Design Page method candidate与window owner不一致")
             method = str(candidate.get("symbol") or "")
         elif strategy == "create":
@@ -1200,7 +1428,10 @@ def _compile_operation(
                 selection.get("method_name")
                 or _method_name(op, operation.get("target"))
             )
-            class_name = _page_class_name(owners[owner_id]["page_object"])
+            class_name = _implementation_class_name(
+                owners[owner_id],
+                view_owner,
+            )
             method = f"{class_name}.{method_name}"
             candidate_id = None
         else:
@@ -1215,6 +1446,33 @@ def _compile_operation(
             ),
         }
     return operation
+
+
+def _view_owner_for_root(root_name, owners):
+    matches = []
+    for owner_id, owner in owners.items():
+        for view_id, view in (owner.get("views") or {}).items():
+            if str(view.get("evidence_root") or "") == str(root_name):
+                matches.append((owner_id, view_id))
+    if len(matches) > 1:
+        raise ValueError(f"window root绑定多个view_owner: {root_name}")
+    return matches[0] if matches else ("", None)
+
+
+def _implementation_owner_path(owner, view_owner):
+    if view_owner:
+        return ((owner.get("views") or {}).get(view_owner) or {}).get(
+            "view_object"
+        )
+    return owner.get("page_object")
+
+
+def _implementation_class_name(owner, view_owner):
+    path = _implementation_owner_path(owner, view_owner)
+    if view_owner:
+        name = Path(str(path or "")).stem
+        return "".join(part.capitalize() for part in name.split("_")) + "View"
+    return _page_class_name(path)
 
 
 def _compile_action_relationships(
@@ -2075,11 +2333,21 @@ def _compile_step_locators(operations, actions, owners):
     seen = {}
     for operation in operations:
         owner = owners[operation["window_owner"]]
-        root_name = str(owner["root_locator"])
-        if root_name not in seen:
-            result.append({"name": root_name, "kind": "top_level"})
-            seen[root_name] = None
         action = actions[operation["target_action_id"]]
+        action_root = str((action.get("target") or {}).get("root_name") or "")
+        view_owner = operation.get("view_owner")
+        view = (owner.get("views") or {}).get(view_owner) or {}
+        root_name = str(
+            view.get("active_locator")
+            if view_owner and action_root != owner.get("evidence_root")
+            else owner["root_locator"]
+        )
+        if root_name not in seen:
+            item = {"name": root_name, "kind": "top_level"}
+            if action_root and action_root != root_name:
+                item["evidence_name"] = action_root
+            result.append(item)
+            seen[root_name] = None
         evidence_name = str((action.get("target") or {}).get("locator_name") or "")
         target_name = str(operation.get("target") or evidence_name)
         candidate_id = str(operation.get("locator_candidate_id") or "")

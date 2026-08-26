@@ -22,6 +22,7 @@ class WindowPage(BasePage):
     def __init__(self, context):
         self.ctx = context
         self._view_locator_files = []
+        self._owned_view_locator_files = {}
         self._window_locators = {}
         self._views: dict[str, WindowView] = {}
         if not self.root_locator_file or not self.root_locator:
@@ -48,6 +49,26 @@ class WindowPage(BasePage):
             if file_name not in self._view_locator_files:
                 self._view_locator_files.append(file_name)
 
+        self._rebuild_window_locators()
+        return self
+
+    def load_owned_window_view(self, locator_file, root_locator):
+        locator_file = str(locator_file)
+        root_locator = normalize(str(root_locator))
+        if not root_locator:
+            raise TypeError("独立Root的WindowView必须声明root_locator")
+        previous = self._owned_view_locator_files.get(locator_file)
+        if previous is not None and previous != root_locator:
+            raise ValueError(
+                "同一WindowView locator文件不能绑定不同root_locator: "
+                f"{locator_file}"
+            )
+        self._owned_view_locator_files[locator_file] = root_locator
+        self._rebuild_window_locators()
+        return self
+
+    def _rebuild_window_locators(self):
+
         root_data = self._load_locator_file(self.root_locator_file)
         view_data = [
             self._load_locator_file(file_name)
@@ -64,8 +85,26 @@ class WindowPage(BasePage):
                 f"declared={self.window_root_name}, "
                 f"actual={package.root_name}"
             )
-        self._window_locators = package.locators
-        return self
+        locators = dict(package.locators)
+        for file_name, expected_root in (
+                self._owned_view_locator_files.items()
+            ):
+            owned = compile_window_locator_package(
+                self._load_locator_file(file_name),
+                package_name=file_name,
+            )
+            if owned.root_name != expected_root:
+                raise ValueError(
+                    "WindowView root_locator 不匹配: "
+                    f"declared={expected_root}, actual={owned.root_name}"
+                )
+            duplicates = sorted(set(locators) & set(owned.locators))
+            if duplicates:
+                raise ValueError(
+                    f"WindowPage/View locator名称冲突: {duplicates}"
+                )
+            locators.update(owned.locators)
+        self._window_locators = locators
 
     def get_view(self, view_cls: type[TView]) -> TView:
         key = f"{view_cls.__module__}.{view_cls.__qualname__}"
@@ -131,6 +170,7 @@ class WindowPage(BasePage):
 class WindowView(BasePage):
     locator_file = None
     active_locator = None
+    root_locator = None
 
     def __init__(self, page):
         if not isinstance(page, WindowPage):
@@ -138,10 +178,18 @@ class WindowView(BasePage):
         self.page = page
         self.ctx = page.ctx
         if self.locator_file:
-            page.load_window_views(self.locator_file)
+            if self.root_locator:
+                page.load_owned_window_view(
+                    self.locator_file,
+                    self.root_locator,
+                )
+            else:
+                page.load_window_views(self.locator_file)
 
     @property
     def window_root_name(self):
+        if self.root_locator:
+            return normalize(str(self.root_locator))
         return self.page.window_root_name
 
     def wait_until_active(self, timeout=10):

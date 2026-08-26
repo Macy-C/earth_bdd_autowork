@@ -69,7 +69,8 @@ unresolved protocol/ownership question requires it.
 - A host-project sync of an already validated framework release is not
   Recorder maintenance: do not copy `framework_validation/` or rerun its full
   suite by default. Run `framework_smoke` after the sync; run host tests only
-  when host-owned `Bdd/` or `config/` also changed.
+  when host-owned `Bdd/` also changed. Top-level `config/` is framework code;
+  project runtime configuration lives at `Bdd/config.yaml`.
 - Treat collaboration-review reports as proposals only. Do not update user
   memory, instructions, prompts, or AI context unless the user explicitly
   approves exact candidate IDs in the current request.

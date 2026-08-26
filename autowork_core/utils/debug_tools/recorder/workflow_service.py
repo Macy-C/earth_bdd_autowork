@@ -160,6 +160,7 @@ def inspect_workflow(
                     request,
                     include_current_results=not bool(
                         existing.get("last_result")
+                        or existing.get("last_job_result")
                     ),
                 )
             )["status"] not in {"compatible", "matched"}:

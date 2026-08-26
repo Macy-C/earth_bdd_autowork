@@ -1011,6 +1011,15 @@ def main(argv=None):
     abort_job.add_argument("--expected-epoch", type=int, required=True)
     abort_job.add_argument("--reason", required=True)
     abort_job.add_argument("--project-root")
+    abort_job.add_argument(
+        "--allow-project-guard-drift",
+        action="store_true",
+        help=(
+            "Allow aborting a failed development transaction when files "
+            "outside generation roots changed after prepare. The transaction "
+            "still terminates as aborted and cannot become successful."
+        ),
+    )
     reconcile_runtime = commands.add_parser("reconcile-job-runtime")
     reconcile_runtime.add_argument("job_path")
     reconcile_runtime.add_argument("--claim-id", required=True)
@@ -1207,6 +1216,7 @@ def main(argv=None):
             claim_id=args.claim_id,
             expected_epoch=args.expected_epoch,
             project_root=args.project_root,
+            allow_project_guard_drift=args.allow_project_guard_drift,
         )
     elif args.command == "reconcile-job-runtime":
         result = reconcile_generation_job_runtime(
@@ -1362,8 +1372,12 @@ def _project_cli_result(result, *, full=False):
         return _compact_job_inspect_result(result)
     if _is_job_evidence_result(result):
         return _compact_job_evidence_result(result)
+    if _is_validate_job_result(result):
+        return _compact_validate_job_result(result)
     if _is_prepare_job_result(result):
         return _compact_prepare_job_result(result)
+    if _is_finish_job_result(result):
+        return _compact_finish_job_result(result)
     projected = {
         key: result.get(key)
         for key in (
@@ -1481,8 +1495,31 @@ def _is_job_evidence_result(result):
 def _is_prepare_job_result(result):
     return bool(
         isinstance(result, dict)
+        and result.get("status") == "running"
         and result.get("system_materialization")
         and result.get("transaction_id")
+        and result.get("implementation_packet")
+    )
+
+
+def _is_validate_job_result(result):
+    return bool(
+        isinstance(result, dict)
+        and result.get("implementation_validation_version")
+        and result.get("transaction_id")
+    )
+
+
+def _is_finish_job_result(result):
+    return bool(
+        isinstance(result, dict)
+        and result.get("transaction_id")
+        and (
+            "changed_files" in result
+            or "execution_outcome" in result
+            or "terminal_snapshot_audit" in result
+        )
+        and not result.get("implementation_validation_version")
     )
 
 
@@ -1577,6 +1614,19 @@ def _compact_job_evidence_result(result):
 
 def _compact_prepare_job_result(result):
     materialization = result.get("system_materialization") or {}
+    packet = result.get("implementation_packet") or {}
+    ai_editable_changes = (
+        result.get("ai_editable_changes")
+        or packet.get("ai_editable_changes")
+        or []
+    )
+    packet_ref = {
+        "path": result.get("report_path"),
+        "json_pointer": "/implementation_packet",
+        "derived_from": (packet.get("derived_from") or {}).get(
+            "implementation_manifest_fingerprint"
+        ),
+    }
     return _public_cli_paths({
         "transport_version": "1.0",
         "transport": "compact_prepare_job",
@@ -1585,13 +1635,73 @@ def _compact_prepare_job_result(result):
         "transaction_id": result.get("transaction_id"),
         "report_path": result.get("report_path"),
         "plan_path": result.get("plan_path"),
-        "ai_editable_changes": result.get("ai_editable_changes") or [],
-        "implementation_packet": result.get("implementation_packet") or {},
+        "ai_editable_changes": ai_editable_changes,
+        "implementation_packet_ref": packet_ref,
+        "implementation_packet_summary": {
+            "version": packet.get("implementation_packet_version"),
+            "page_count": len(packet.get("pages") or []),
+            "step_count": len(packet.get("steps") or []),
+            "method_count": len(packet.get("methods") or []),
+            "ai_editable_count": len(ai_editable_changes),
+        },
         "system_owned_files": materialization.get("system_owned_files") or [],
         "system_materialization_status": materialization.get("status"),
         "errors": result.get("errors") or [],
         "warnings": result.get("warnings") or [],
-        "full_output": "Pass --full to retrieve the unchanged complete Manifest projection.",
+        "full_output": (
+            "Pass --full for the complete Manifest projection, or read "
+            "implementation_packet_ref from report_path for the AI code packet."
+        ),
+    })
+
+
+def _compact_validate_job_result(result):
+    materialization = result.get("system_materialization") or {}
+    attempt = result.get("attempt") or {}
+    return _public_cli_paths({
+        "transport_version": "1.0",
+        "transport": "compact_validate_job_implementation",
+        "status": result.get("status"),
+        "request_id": result.get("request_id"),
+        "transaction_id": result.get("transaction_id"),
+        "projected_transaction_status": result.get(
+            "projected_transaction_status"
+        ),
+        "attempt": {
+            "status": attempt.get("status"),
+            "error_count": len(attempt.get("errors") or []),
+            "warning_count": len(attempt.get("warnings") or []),
+        },
+        "ai_editable_changes": result.get("ai_editable_changes") or [],
+        "system_owned_files": materialization.get("system_owned_files") or [],
+        "system_materialization_status": materialization.get("status"),
+        "errors": result.get("errors") or attempt.get("errors") or [],
+        "warnings": result.get("warnings") or attempt.get("warnings") or [],
+        "full_output": (
+            "Pass --full to inspect the complete implementation validation "
+            "ledger entry and transaction projection."
+        ),
+    })
+
+
+def _compact_finish_job_result(result):
+    execution = result.get("execution_outcome") or {}
+    terminal = result.get("terminal_snapshot_audit") or {}
+    return _public_cli_paths({
+        "transport_version": "1.0",
+        "transport": "compact_finish_job",
+        "status": result.get("status"),
+        "request_id": result.get("request_id"),
+        "transaction_id": result.get("transaction_id"),
+        "report_path": result.get("report_path"),
+        "changed_files": result.get("changed_files") or [],
+        "execution_status": execution.get("status"),
+        "static_status": execution.get("static_status"),
+        "runtime_status": execution.get("runtime_status"),
+        "terminal_snapshot_status": terminal.get("status"),
+        "errors": result.get("errors") or [],
+        "warnings": result.get("warnings") or [],
+        "full_output": "Pass --full to retrieve the complete terminal transaction report.",
     })
 
 

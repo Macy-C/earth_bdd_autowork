@@ -19,7 +19,7 @@ from autowork_core.utils.debug_tools.recorder.semantic_reconciler import (
 )
 
 
-AI_CONTEXT_ENVELOPE_VERSION = "1.1"
+AI_CONTEXT_ENVELOPE_VERSION = "1.2"
 
 
 def build_ai_context_envelope(
@@ -101,7 +101,11 @@ def build_ai_context_envelope(
                 ),
             }),
         }),
-        "brief": brief,
+        "brief": build_envelope_brief_projection(
+            brief,
+            session_dir=session_dir,
+            brief_path=brief_path,
+        ),
         "plan_context": plan_context,
         "ai_capabilities": ai_capabilities or {},
         "design_contract": compact_generation_design_contract(),
@@ -144,6 +148,15 @@ def compact_ai_context_envelope_contract():
             "revision_seal",
         ],
         "required_profile_fields": ["profile_id", "profile_fingerprint"],
+        "brief_transport": {
+            "version": "1.0",
+            "rule": (
+                "The Envelope may omit only scenario_intelligence fields "
+                "that are deterministically reconstructable from the same "
+                "full Brief. The full content-addressed Brief remains "
+                "available through its stable artifact pointer."
+            ),
+        },
         "backend_identity": [
             "GenerationJobV1",
             "WorkflowState",
@@ -157,6 +170,34 @@ def compact_ai_context_envelope_contract():
     }
     value["contract_fingerprint"] = _fingerprint(value)
     return value
+
+
+def build_envelope_brief_projection(brief, *, session_dir, brief_path):
+    """Remove only Brief fields deterministically duplicated in the Envelope."""
+    brief = copy.deepcopy(dict(brief or {}))
+    intelligence = dict(brief.get("scenario_intelligence") or {})
+    omitted = [
+        field
+        for field in ("specification", "demonstration")
+        if field in intelligence
+    ]
+    for field in omitted:
+        intelligence.pop(field, None)
+    intelligence["envelope_transport"] = {
+        "version": "1.0",
+        "omitted_fields": omitted,
+        "full_brief": {
+            "path": _relative_path(session_dir, brief_path),
+            "brief_fingerprint": brief.get("brief_fingerprint"),
+            "expand": "inspect-job --full",
+        },
+        "reconstruction": {
+            "specification": "brief.target",
+            "demonstration": "brief.actions and brief.semantics",
+        },
+    }
+    brief["scenario_intelligence"] = intelligence
+    return brief
 
 
 def ai_context_envelope_identity_is_valid(value):
@@ -190,6 +231,24 @@ def ai_context_envelope_identity_is_valid(value):
         ):
             return False
     if not isinstance(value.get("brief"), dict):
+        return False
+    intelligence = (value.get("brief") or {}).get(
+        "scenario_intelligence"
+    ) or {}
+    transport = intelligence.get("envelope_transport") or {}
+    omitted = transport.get("omitted_fields") or []
+    full_brief = transport.get("full_brief") or {}
+    if any((
+            not isinstance(transport, dict),
+            transport.get("version") != "1.0",
+            not isinstance(omitted, list),
+            not set(omitted) <= {"specification", "demonstration"},
+            any(field in intelligence for field in omitted),
+            full_brief.get("brief_fingerprint")
+            != (value.get("brief") or {}).get("brief_fingerprint"),
+            not full_brief.get("path"),
+            full_brief.get("expand") != "inspect-job --full",
+    )):
         return False
     if not isinstance(value.get("workflow"), dict):
         return False

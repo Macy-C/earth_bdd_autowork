@@ -191,10 +191,14 @@ class _ResourceAnalyzer:
             None,
         ))
         view_files.extend(usage.view_files)
+        owned_views = []
         for view_class in usage.views:
             view_file = getattr(view_class, "locator_file", None)
             if view_file:
-                view_files.append(str(view_file))
+                if getattr(view_class, "root_locator", None):
+                    owned_views.append((view_class, str(view_file)))
+                else:
+                    view_files.append(str(view_file))
         view_files = list(dict.fromkeys(view_files))
         view_data = [
             _load_mapping(
@@ -218,6 +222,33 @@ class _ResourceAnalyzer:
                 f"{page_class.__name__} root_locator 不匹配: "
                 f"declared={root_name}, actual={package.root_name}"
             )
+        locator_scope = dict(package.locators)
+        for view_class, file_name in owned_views:
+            owned_data = _load_mapping(
+                _resource_path(
+                    self.locators_dir,
+                    file_name,
+                    "view locator",
+                ),
+                "view locator",
+                normalized_keys=True,
+            )
+            owned = compile_window_locator_package(
+                owned_data,
+                package_name=file_name,
+            )
+            expected_root = normalize(str(view_class.root_locator))
+            if owned.root_name != expected_root:
+                raise ValueError(
+                    f"{view_class.__name__} root_locator 不匹配: "
+                    f"declared={expected_root}, actual={owned.root_name}"
+                )
+            duplicates = sorted(set(locator_scope) & set(owned.locators))
+            if duplicates:
+                raise ValueError(
+                    f"{view_class.__name__} locator名称冲突: {duplicates}"
+                )
+            locator_scope.update(owned.locators)
 
         data_scope = dict(public_data)
         for data_file in _resource_values(
@@ -231,7 +262,7 @@ class _ResourceAnalyzer:
             ))
         self._validate_references(
             usage.references,
-            set(package.locators),
+            set(locator_scope),
             {normalize(str(key)) for key in data_scope},
         )
 

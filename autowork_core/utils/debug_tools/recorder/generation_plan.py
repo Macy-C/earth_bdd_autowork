@@ -198,6 +198,7 @@ def compact_generation_intent_contract():
                 "page_object",
                 "root_locator_file",
                 "resolution",
+                "ownership_decision",
                 "views",
             ],
             "resolution_strategies": [
@@ -217,8 +218,24 @@ def compact_generation_intent_contract():
                 "root_locator_file": (
                     "workspace-relative Bdd/locators path string"
                 ),
-                "views": "object keyed by view id",
+                "views": (
+                    "object keyed by view id; each view may preserve a "
+                    "recorded evidence_root owned by the WindowPage"
+                ),
             },
+            "view_fields": [
+                "evidence_root",
+                "ownership_candidate_id",
+                "locator_file",
+                "view_object",
+                "active_locator",
+                "root_locator",
+            ],
+            "view_root_rule": (
+                "root_locator is null for a same-window WindowView. It is "
+                "the active locator for an isolated child-window View and "
+                "requires the exact frozen child_view ownership candidate."
+            ),
             "candidate_rule": (
                 "candidate_id is null for create_new unless the Brief names "
                 "an eligible legacy_root candidate"
@@ -1405,6 +1422,7 @@ def validate_generation_plan(
     )
     if require_window_ownership and has_operations:
         errors.extend(_validate_window_owners(window_owners, brief))
+        errors.extend(_validate_child_view_candidates(window_owners, brief))
     method_resolutions = {}
     action_handling = {}
     for step_id, step in (plan.get("steps") or {}).items():
@@ -2910,6 +2928,12 @@ def _normalize_window_owners(value):
         for view_id, raw_view in dict(owner.get("views") or {}).items():
             view = dict(raw_view or {})
             views[str(view_id)] = {
+                "evidence_root": str(
+                    view.get("evidence_root") or ""
+                ).strip() or None,
+                "ownership_candidate_id": str(
+                    view.get("ownership_candidate_id") or ""
+                ).strip() or None,
                 "locator_file": str(
                     view.get("locator_file") or ""
                 ).strip() or None,
@@ -2919,6 +2943,10 @@ def _normalize_window_owners(value):
                 "active_locator": str(
                     view.get("active_locator") or ""
                 ).strip() or None,
+                "root_locator": (
+                    normalize(str(view.get("root_locator") or ""))
+                    or None
+                ),
             }
         owners[str(owner_id)] = {
             "evidence_root": (
@@ -2945,6 +2973,9 @@ def _normalize_window_owners(value):
             "resolution": _normalize_owner_resolution(
                 owner.get("resolution")
             ),
+            "ownership_decision": _normalize_ownership_decision(
+                owner.get("ownership_decision")
+            ),
             "views": views,
         }
     return owners
@@ -2957,6 +2988,20 @@ def _normalize_owner_resolution(value):
         "candidate_id": (
             str(value.get("candidate_id") or "").strip() or None
         ),
+        "reason": str(value.get("reason") or "").strip(),
+    }
+
+
+def _normalize_ownership_decision(value):
+    if not isinstance(value, dict) or not value:
+        return None
+    return {
+        "selected_kind": str(value.get("selected_kind") or "").strip(),
+        "dismissed_candidate_ids": [
+            str(item)
+            for item in value.get("dismissed_candidate_ids") or ()
+            if item
+        ],
         "reason": str(value.get("reason") or "").strip(),
     }
 
@@ -3179,6 +3224,15 @@ def _validate_window_owners(owners, brief):
                 errors.append(
                     f"view_owner {owner_id}.{view_id} 缺少 active_locator"
                 )
+            view_root = normalize(str(view.get("root_locator") or ""))
+            active_locator = normalize(str(
+                view.get("active_locator") or ""
+            ).lstrip("$").removeprefix("loc:"))
+            if view_root and view_root != active_locator:
+                errors.append(
+                    f"view_owner {owner_id}.{view_id} root_locator "
+                    "必须等于active_locator"
+                )
             if (
                 root_package is None
                 or (
@@ -3200,6 +3254,116 @@ def _validate_window_owners(owners, brief):
                     f"view_owner {owner_id}.{view_id} view_object "
                     "不在 WindowPage 包内"
                 )
+    return errors
+
+
+def _validate_child_view_candidates(owners, brief):
+    errors = []
+    candidates = [
+        item
+        for item in (brief.get("window_ownership") or {}).get(
+            "ownership_candidates"
+        ) or ()
+        if (item or {}).get("kind") == "child_view"
+    ]
+    candidates_by_id = {
+        str(item.get("candidate_id") or ""): item
+        for item in candidates
+        if item.get("candidate_id")
+    }
+    for owner_id, owner in (owners or {}).items():
+        for view_id, view in (owner.get("views") or {}).items():
+            if not (view or {}).get("root_locator"):
+                continue
+            candidate_id = str(
+                (view or {}).get("ownership_candidate_id") or ""
+            )
+            candidate = candidates_by_id.get(candidate_id)
+            if (
+                candidate is None
+                or normalize(str(candidate.get("child_root") or ""))
+                != normalize(str((view or {}).get("evidence_root") or ""))
+            ):
+                errors.append(
+                    "semantic_shape_error: 独立 root WindowView 必须引用"
+                    "匹配的 child_view ownership candidate: "
+                    f"view={owner_id}.{view_id} candidate={candidate_id}"
+                )
+    owner_roots = {
+        normalize(str(owner.get("evidence_root") or "")): owner_id
+        for owner_id, owner in (owners or {}).items()
+        if owner.get("evidence_root")
+    }
+    view_roots = {
+        normalize(str((view or {}).get("evidence_root") or "")): (
+            owner_id,
+            view_id,
+            view,
+        )
+        for owner_id, owner in (owners or {}).items()
+        for view_id, view in (owner.get("views") or {}).items()
+        if (view or {}).get("evidence_root")
+    }
+    candidates_by_child = {}
+    for candidate in candidates:
+        child_root = normalize(str(candidate.get("child_root") or ""))
+        if child_root:
+            candidates_by_child.setdefault(child_root, []).append(candidate)
+    for child_root, child_candidates in candidates_by_child.items():
+        if child_root in view_roots:
+            owner_id, _view_id, view = view_roots[child_root]
+            if not view.get("root_locator"):
+                errors.append(
+                    "semantic_shape_error: child_view WindowView 缺少 "
+                    f"root_locator: child={child_root}"
+                )
+            selected_id = str(view.get("ownership_candidate_id") or "")
+            selected = [
+                candidate
+                for candidate in child_candidates
+                if str(candidate.get("candidate_id") or "") == selected_id
+            ]
+            if len(selected) != 1:
+                errors.append(
+                    "semantic_shape_error: WindowView 缺少或引用未知 "
+                    "ownership candidate: "
+                    f"child={child_root} candidate={selected_id}"
+                )
+                continue
+            expected_parent = normalize(str(
+                selected[0].get("parent_root") or ""
+            ))
+            actual_parent = normalize(str(
+                (owners.get(owner_id) or {}).get("evidence_root") or ""
+            ))
+            if expected_parent != actual_parent:
+                errors.append(
+                    "semantic_shape_error: WindowView ownership candidate "
+                    "与父 owner 不一致: "
+                    f"candidate={selected_id} expected={expected_parent} "
+                    f"actual={actual_parent}"
+                )
+            continue
+        if child_root in owner_roots:
+            owner = owners[owner_roots[child_root]]
+            decision = owner.get("ownership_decision") or {}
+            dismissed = set(decision.get("dismissed_candidate_ids") or ())
+            required = {
+                str(candidate.get("candidate_id") or "")
+                for candidate in child_candidates
+                if candidate.get("candidate_id")
+            }
+            if (
+                required <= dismissed
+                and decision.get("selected_kind") == "window_page"
+                and str(decision.get("reason") or "").strip()
+            ):
+                continue
+            errors.append(
+                "semantic_shape_error: child_view ownership candidate "
+                "未采用为 WindowView: "
+                f"candidates={sorted(required)} child={child_root}"
+            )
     return errors
 
 
@@ -3246,21 +3410,29 @@ def _owner_evidence_roots(
         locator_evidence_aliases=None,
     ):
     resolution = owner.get("resolution") or {}
+    roots = set()
     if resolution.get("candidate_id"):
-        roots = {
+        roots.update({
             normalize(str(window.get("root_name") or ""))
             for window, _candidate in _brief_candidate_matches(
                 brief,
                 resolution.get("candidate_id"),
             )
-        } - {""}
-        if roots:
-            return roots
-    root_name = normalize(str(
-        owner.get("evidence_root") or owner.get("root_locator") or ""
-    ))
+        } - {""})
     aliases = locator_evidence_aliases or {}
-    return {aliases.get(root_name, root_name)} - {""}
+    if not roots:
+        root_name = normalize(str(
+            owner.get("evidence_root") or owner.get("root_locator") or ""
+        ))
+        roots.add(aliases.get(root_name, root_name))
+    for view in (owner.get("views") or {}).values():
+        evidence_root = normalize(str(view.get("evidence_root") or ""))
+        active_locator = normalize(str(view.get("active_locator") or ""))
+        if evidence_root:
+            roots.add(evidence_root)
+        if active_locator:
+            roots.add(aliases.get(active_locator, active_locator))
+    return roots - {""}
 
 
 def _locator_evidence_aliases(

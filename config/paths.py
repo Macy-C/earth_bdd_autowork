@@ -5,6 +5,7 @@ class Paths:
     BASE_DIR = Path(__file__).resolve().parent.parent
 
     BDD_DIR = BASE_DIR / "Bdd"
+    PROJECT_CONFIG_FILE = BDD_DIR / "config.yaml"
     LOCATORS_DIR = BDD_DIR / "locators"
     DATA_DIR = BDD_DIR / "data"
     PAGE_OBJ_DIR = BDD_DIR / "page_obj"
@@ -15,7 +16,6 @@ class Paths:
     RECORDINGS_DIR = ARTIFACTS_DIR / "recordings"
     REPORTS_DIR = ARTIFACTS_DIR / "reports"
 
-    CONFIG_DIR = BASE_DIR / "config"
     CORE_DIR = BASE_DIR / "autowork_core"
     UTILS_DIR = CORE_DIR / "utils"
     RESOURCES_DIR = BASE_DIR / "resources"

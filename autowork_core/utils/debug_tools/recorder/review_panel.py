@@ -1610,7 +1610,11 @@ class RecorderReviewWindow:
             f"生成状态：{_result_status_label(result.status)}；"
             f"修改文件 {len(result.changed_files)}；"
             f"未通过检查 {len(result.failed_checks)}；"
+            f"当前文件：{_workspace_materialization_label(getattr(result, 'workspace_materialization', None))}；"
             f"下一步：{result.recommended_label}"
+        )
+        stale_files = _workspace_materialization_file_statuses(
+            getattr(result, "workspace_materialization", None)
         )
         for index, path in enumerate(result.changed_files):
             self.result_tree.insert(
@@ -1619,7 +1623,7 @@ class RecorderReviewWindow:
                 iid=f"generated-file-{index}",
                 values=(
                     path,
-                    (
+                    stale_files.get(path) or (
                         "静态检查通过"
                         if self.model.generation.verification
                         and self.model.generation.verification.implementation_validated
@@ -2160,16 +2164,48 @@ def _generation_summary_text(generation):
     if generation.result is not None:
         result = generation.result
         verification = generation.verification
+        materialization = _workspace_materialization_label(
+            getattr(result, "workspace_materialization", None)
+        )
         return (
             f"生成：{(verification.label if verification else _generation_status_label(generation.display_status))}；"
             f"修改文件 {len(result.changed_files)}，"
             f"失败检查 {len(result.failed_checks)}"
+            f"；当前文件 {materialization}"
             f"{history_text}{feedback_text}"
         )
     return (
         f"生成：{_generation_status_label(generation.display_status)}"
         f"{history_text}{feedback_text}"
     )
+
+
+def _workspace_materialization_label(materialization):
+    status = str(getattr(materialization, "status", "") or "")
+    labels = {
+        "matches_report": "匹配报告",
+        "missing_files": "缺少生成文件",
+        "modified_files": "生成文件已修改",
+        "mixed_mismatch": "生成文件不一致",
+        "extra_generation_files": "存在额外生成文件",
+        "report_unavailable": "无法核对",
+        "not_recorded": "未记录快照",
+        "not_applicable": "不适用",
+    }
+    return labels.get(status, "未知")
+
+
+def _workspace_materialization_file_statuses(materialization):
+    if materialization is None:
+        return {}
+    result = {}
+    for path in getattr(materialization, "missing_files", ()) or ():
+        result[str(path)] = "当前文件缺失"
+    for path in getattr(materialization, "modified_files", ()) or ():
+        result[str(path)] = "当前文件已修改"
+    for path in getattr(materialization, "extra_generation_files", ()) or ():
+        result[str(path)] = "报告期望不存在"
+    return result
 
 
 def _request_status_label(workflow):

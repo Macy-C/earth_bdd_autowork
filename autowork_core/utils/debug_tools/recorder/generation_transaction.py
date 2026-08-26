@@ -1082,6 +1082,7 @@ def abort_generation_transaction(
         project_root=None,
     generation_job_claim_id=None,
     generation_job_expected_epoch=None,
+    allow_project_guard_drift=False,
     ):
     report_path = Path(report_path).resolve()
     session_dir = _session_dir_for_transaction_report_path(report_path)
@@ -1093,6 +1094,7 @@ def abort_generation_transaction(
             project_root=project_root,
             generation_job_claim_id=generation_job_claim_id,
             generation_job_expected_epoch=generation_job_expected_epoch,
+            allow_project_guard_drift=allow_project_guard_drift,
         )
     finally:
         lock.release()
@@ -1105,6 +1107,7 @@ def _abort_generation_transaction_locked(
         project_root=None,
     generation_job_claim_id=None,
     generation_job_expected_epoch=None,
+    allow_project_guard_drift=False,
     ):
     report_path = Path(report_path).resolve()
     session_dir = _session_dir_for_transaction_report_path(report_path)
@@ -1201,7 +1204,10 @@ def _abort_generation_transaction_locked(
         raise ValueError(
             f"Abort found generation changes outside transaction: {unexpected}"
         )
-    if _snapshot_project_guard(root) != report.get("project_guard_snapshot"):
+    project_guard_drifted = _snapshot_project_guard(root) != report.get(
+        "project_guard_snapshot"
+    )
+    if project_guard_drifted and not allow_project_guard_drift:
         raise ValueError("Abort found project changes outside generation roots")
     requested_at = datetime.now().isoformat(timespec="seconds")
     report.update({
@@ -1217,6 +1223,10 @@ def _abort_generation_transaction_locked(
             "restored_files": [],
             "system_materialization_rolled_back": False,
             "lease_released": False,
+            "project_guard_drift_allowed": bool(
+                allow_project_guard_drift
+            ),
+            "project_guard_drift_detected": bool(project_guard_drifted),
         },
         "summary": reason,
     })
@@ -1284,8 +1294,13 @@ def _complete_aborted_generation_transaction(
         raise ValueError(
             f"Abort recovery found changes outside transaction: {unexpected}"
         )
-    if _snapshot_project_guard(project_root) != report.get(
-            "project_guard_snapshot"):
+    allow_project_guard_drift = bool(
+        (report.get("abort") or {}).get("project_guard_drift_allowed")
+    )
+    project_guard_drifted = _snapshot_project_guard(project_root) != report.get(
+        "project_guard_snapshot"
+    )
+    if project_guard_drifted and not allow_project_guard_drift:
         raise ValueError("Abort recovery project guard mismatch")
     if report.get("status") == "aborting":
         archive = _archive_ai_implementation(
@@ -1330,8 +1345,10 @@ def _complete_aborted_generation_transaction(
     if _snapshot_generation_roots(project_root) != report.get(
             "generation_input_snapshot"):
         raise ValueError("Abort recovery generation baseline mismatch")
-    if _snapshot_project_guard(project_root) != report.get(
-            "project_guard_snapshot"):
+    project_guard_drifted = _snapshot_project_guard(project_root) != report.get(
+        "project_guard_snapshot"
+    )
+    if project_guard_drifted and not allow_project_guard_drift:
         raise ValueError("Abort recovery project guard mismatch")
     lease = report.get("generation_file_lease")
     if not generation_file_lease_release_is_complete(project_root, lease):
@@ -1356,6 +1373,7 @@ def _complete_aborted_generation_transaction(
             "phase": "completed",
             "aborted_at": completed_at.isoformat(timespec="seconds"),
             "lease_released": True,
+            "project_guard_drift_detected": bool(project_guard_drifted),
         }
         report["stage_timing_ledger"] = _complete_transaction_timing(
             report,
@@ -1859,7 +1877,10 @@ def _finish_generation_transaction_locked(
         "code_manifest": code_manifest,
         "evidence_audit": evidence_audit,
         "implementation_snapshot": snapshot_files(
-            changed,
+            _implementation_snapshot_paths(
+                implementation_manifest,
+                changed,
+            ),
             project_root=project_root,
         ),
         "runtime_code_snapshot": runtime_code_snapshot,
@@ -1913,7 +1934,10 @@ def _finalize_terminal_snapshot(report_path, report, project_root):
     expected_implementation = report.get("implementation_snapshot") or []
     current_runtime = snapshot_runtime_code(project_root)
     current_implementation = snapshot_files(
-        report.get("changed_files") or (),
+        _implementation_snapshot_paths(
+            report.get("implementation_manifest") or {},
+            report.get("changed_files") or (),
+        ),
         project_root=project_root,
     )
     matches = bool(
@@ -2928,6 +2952,27 @@ def _atomic_write_bytes(path, content):
 
 def snapshot_runtime_code(project_root):
     return _snapshot_generation_roots(project_root)
+
+
+def _implementation_snapshot_paths(manifest, changed_files):
+    manifest = manifest if isinstance(manifest, dict) else {}
+    return sorted({
+        *(
+            str(path)
+            for path in changed_files or ()
+            if str(path)
+        ),
+        *(
+            str(path)
+            for path in manifest.get("allowed_changes") or ()
+            if str(path)
+        ),
+        *(
+            str(path)
+            for path in manifest.get("read_only_reuse") or ()
+            if str(path)
+        ),
+    })
 
 
 def transaction_code_snapshot_matches(report, project_root):

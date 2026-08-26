@@ -22,9 +22,9 @@ REQUIRED_PATHS = (
     "README.md",
     ".gitattributes",
     ".gitignore",
+    "Bdd/config.yaml",
     "Bdd/environment.py",
     "Bdd/runner.py",
-    "config/config.yaml",
     "config/paths.py",
     "config/settings.py",
 )

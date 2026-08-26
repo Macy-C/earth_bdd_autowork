@@ -6,6 +6,7 @@ Page Object、locator、data、应用生命周期、外部集成和项目AI资�
 
 ## 目录职责
 
+- `config.yaml`：项目运行默认配置；框架更新时保留。
 - `test_features/`：本地调试Feature；正式项目可另建`features/`。
 - `steps/`：Behave Step definitions。
 - `page_obj/`：项目Page Object与WindowView。
@@ -36,7 +37,7 @@ python -m Bdd.local_runner [feature路径]
 
 ## 应用生命周期
 
-应用行为由`config/config.yaml`中的`APP_LAUNCH_MODE`和`APP_SETTING.APP_PATH`决定：
+应用行为由`Bdd/config.yaml`中的`APP_LAUNCH_MODE`和`APP_SETTING.APP_PATH`决定：
 
 - `attach`连接并保留已有应用，不调用应用启停Hook。
 - `auto`配合应用路径时，由框架启动并清理应用进程。
@@ -55,8 +56,9 @@ python -m Bdd.local_runner [feature路径]
 
 ## 更新框架
 
-从框架仓库拉取目标版本后，完整替换本项目中的框架资产目录和根文件；保留整个`Bdd/`、
-`config/`和`artifacts/`。项目开发不直接修改`autowork_core/`、顶层`ai/`、`docs/`、
+从框架仓库拉取目标版本后，完整替换本项目中的框架资产目录和根文件；保留整个`Bdd/`
+和`artifacts/`。顶层`config/`是框架Python包，也随框架更新。项目开发不直接修改
+`autowork_core/`、`config/`、顶层`ai/`、`docs/`、
 `.github/`或`resources/`。`framework_validation/`不复制到项目仓库。替换后检查Git diff并
 运行轻量验证，再在当前项目仓库提交：
 

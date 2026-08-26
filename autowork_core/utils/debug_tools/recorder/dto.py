@@ -299,6 +299,16 @@ class GenerationStageSummaryDTO:
 
 
 @dataclass(frozen=True)
+class WorkspaceMaterializationDTO:
+    status: str
+    expected_count: int = 0
+    checked_count: int = 0
+    missing_files: tuple[str, ...] = ()
+    modified_files: tuple[str, ...] = ()
+    extra_generation_files: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class GenerationResultDTO:
     status: str
     transaction_id: str | None
@@ -316,6 +326,7 @@ class GenerationResultDTO:
     implementation: ImplementationSummaryDTO | None = None
     stages: GenerationStageSummaryDTO | None = None
     execution_status: str | None = None
+    workspace_materialization: WorkspaceMaterializationDTO | None = None
 
 
 @dataclass(frozen=True)

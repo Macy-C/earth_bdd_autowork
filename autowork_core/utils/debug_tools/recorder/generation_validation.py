@@ -248,20 +248,36 @@ def _changed_window_locator_packages(
             project_root,
             Path(owner["root_locator_file"]),
         )
-        views = [
-            _absolute(project_root, Path(view["locator_file"]))
-            for view in (owner.get("views") or {}).values()
-            if isinstance(view, dict) and view.get("locator_file")
-        ]
+        views = []
+        owned_views = []
+        for view_id, view in (owner.get("views") or {}).items():
+            if not isinstance(view, dict) or not view.get("locator_file"):
+                continue
+            view_path = _absolute(
+                project_root,
+                Path(view["locator_file"]),
+            )
+            if view.get("root_locator"):
+                owned_views.append((str(view_id), view_path))
+            else:
+                views.append(view_path)
         files = {root, *views}
-        if not (files & changed):
-            continue
-        packages.append({
-            "name": str(owner_id),
-            "root": root,
-            "views": views,
-            "files": files,
-        })
+        if files & changed:
+            packages.append({
+                "name": str(owner_id),
+                "root": root,
+                "views": views,
+                "files": files,
+            })
+        for view_id, view_path in owned_views:
+            if view_path not in changed:
+                continue
+            packages.append({
+                "name": f"{owner_id}.{view_id}",
+                "root": view_path,
+                "views": [],
+                "files": {view_path},
+            })
     return packages
 
 
@@ -2363,6 +2379,17 @@ def _declared_method_route(
             f"view_owner {window_owner}.{view_owner} active_locator "
             "与 Plan 不一致"
         )
+    declared_root = normalize(_class_string_attribute(
+        view_tree,
+        method_owner,
+        "root_locator",
+    ))
+    planned_root = normalize(str(view.get("root_locator") or ""))
+    if declared_root != planned_root:
+        errors.append(
+            f"view_owner {window_owner}.{view_owner} root_locator "
+            "与 Plan 不一致"
+        )
     page_classes = _classes_with_declared_view(
         page_tree,
         view_owner,
@@ -2837,17 +2864,36 @@ def _window_owner_scopes(project_root, owners):
                 raw_view = yaml.safe_load(
                     view_path.read_text(encoding="utf-8")
                 ) or {}
-                compiled_view = compile_locators(
-                    raw_view,
-                    external_locators=root_compiled,
-                )
+                planned_view_root = normalize(str(
+                    (view or {}).get("root_locator") or ""
+                ))
+                if planned_view_root:
+                    owned_package = compile_window_locator_package(
+                        raw_view,
+                        package_name=str(
+                            (view or {}).get("locator_file") or ""
+                        ),
+                    )
+                    if owned_package.root_name != planned_view_root:
+                        raise ValueError(
+                            "WindowView root_locator 不匹配: "
+                            f"declared={planned_view_root}, "
+                            f"actual={owned_package.root_name}"
+                        )
+                    compiled_view = owned_package.locators
+                else:
+                    compiled_view = compile_locators(
+                        raw_view,
+                        external_locators=root_compiled,
+                    )
             except Exception as error:
                 errors.append(
                     f"view_owner {owner_id}.{view_id} locator 无效: "
                     f"{type(error).__name__}: {error}"
                 )
                 continue
-            view_data.append(raw_view)
+            if not (view or {}).get("root_locator"):
+                view_data.append(raw_view)
             view_scopes[str(view_id)] = {
                 "python": [view_object] if view_object is not None else [],
                 "locator_keys": set(compiled_view),
@@ -3072,7 +3118,8 @@ def _validate_inline_view_route(
     view_tree = trees_by_path.get(str(view_path)) if view_path else None
     view_module = _module_name(project_root, view_path)
     planned_active = str(view.get("active_locator") or "").lstrip("$")
-    view_classes = [
+    planned_root = normalize(str(view.get("root_locator") or ""))
+    active_classes = [
         node.name
         for node in (getattr(view_tree, "body", None) or [])
         if isinstance(node, ast.ClassDef)
@@ -3082,6 +3129,19 @@ def _validate_inline_view_route(
             "active_locator",
         ).lstrip("$") == planned_active
     ]
+    view_classes = [
+        class_name
+        for class_name in active_classes
+        if normalize(_class_string_attribute(
+            view_tree,
+            class_name,
+            "root_locator",
+        )) == planned_root
+    ]
+    if view_module and len(active_classes) == 1 and not view_classes:
+        return [
+            f"view_owner {view_owner} root_locator 与 Plan 不一致"
+        ]
     if not view_module or len(view_classes) != 1:
         return [
             f"Step {step_id} step_inline_base_api 无法唯一解析 "

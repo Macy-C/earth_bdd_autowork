@@ -46,9 +46,9 @@ python -m Bdd.local_runner Bdd/test_features/test_debug.feature
 ## 目录概览
 
 ```text
-Bdd/                 # 用户侧资产：features、steps、page_obj、locators、data
+Bdd/                 # 用户侧资产：config、features、steps、page_obj、locators、data
 autowork_core/       # 框架内核：actions、common、page、runtime、utils
-config/              # 配置加载和路径常量
+config/              # 框架配置加载代码和路径常量
 resources/           # OCR 模型、Allure 等资源
 artifacts/           # logs、reports、screenshots 输出产物
 docs/                # 框架详细文档

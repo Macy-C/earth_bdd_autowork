@@ -33,8 +33,8 @@ from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-GENERATION_CONTRACT_VERSION = "6.19"
-FRAMEWORK_CONTRACT_VERSION = "3.1"
+GENERATION_CONTRACT_VERSION = "6.23"
+FRAMEWORK_CONTRACT_VERSION = "3.2"
 GENERATION_CONTRACT_LEASE_VERSION = "1.0"
 
 ALLOWED_BASE_PAGE_APIS = contract_api_groups()
@@ -460,8 +460,9 @@ def build_generation_contract(manifest):
                 "Never call direct PIC APIs in generated Python; normal planned actions consume the authorized named PIC locator.",
                 "An authorized PIC Region locator must reference the same sole top-level Root declared by its Plan window_owner.",
                 "Root may reference only a top-level window; Region references Child/XPath.",
-                "A desktop window package has exactly one top-level Root; View YAML files declare no top-level Root and reference only their package Root.",
-                "Use WindowPage for one stable top-level Window and WindowView for subpages inside that Window.",
+                "A WindowPage locator package has exactly one top-level Root; same-window View YAML files declare no top-level Root and reference only that package Root.",
+                "Only a frozen child_view ownership candidate may authorize a WindowView root_locator. Its YAML is an isolated window package with exactly one matching top-level Root; child locators reference only that Root.",
+                "Use WindowPage for one stable business top-level Window. Use WindowView for owned subpages; a transient child HWND does not by itself create another business Page.",
                 "Declare every long-lived top-level Root in locator YAML; generated code must not call set_root.",
                 "Generated Step Definitions and Page Objects must not contain inline locator dictionaries.",
             ],
@@ -488,6 +489,7 @@ def build_generation_contract(manifest):
                 "rules": [
                     "Keep top-level Root locators separate from element locators.",
                     "Reuse or add top-level Root definitions in YAML instead of registering runtime Roots in generated Python.",
+                    "A planned WindowView root_locator requires its own single-root locator YAML and must equal the View active_locator; ordinary WindowViews remain in the parent WindowPage package.",
                     "Compile every generated locator with compile_locators before acceptance.",
                 ],
             },
@@ -496,6 +498,7 @@ def build_generation_contract(manifest):
                 "rules": [
                     "Use existing BasePage APIs before introducing a custom action.",
                     "A WindowPage exposes each planned WindowView through one direct property annotated with -> ViewClass and returning self.get_view(ViewClass), with ViewClass directly imported from the Plan view_object module.",
+                    "A WindowView declares root_locator only when the Plan supplies one from a frozen child_view candidate, and the class value must match the Plan exactly.",
                     "Do not create a Feature/Scenario-named Page merely to wrap recorded action order.",
                     "Form operation candidates from business intent and frozen facts before querying Action Knowledge; query only named candidates in deliberation order.",
                     "Action Knowledge separates capability facts, possibly incomplete maintainer guidance, and static assessment. Guidance never authorizes or blocks a Plan; static compatible is not runtime proof. Explain the choice and preserve frozen Slider bounds when set_slider_value is used.",
@@ -911,11 +914,13 @@ def _framework_contract():
         "window_view": {
             "class": f"{WindowView.__module__}.{WindowView.__qualname__}",
             "required_attributes": ["locator_file"],
+            "optional_attributes": ["active_locator", "root_locator"],
         },
         "rules": [
             "one WindowPage per stable desktop top-level Window",
             "one top-level Root per window locator package",
-            "WindowView shares its WindowPage Root",
+            "WindowView shares its WindowPage Root by default",
+            "an evidence-backed child-window WindowView may own one isolated Root",
             "new WindowPage instances are Scenario-scoped",
         ],
     }

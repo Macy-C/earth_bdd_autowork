@@ -121,6 +121,7 @@ class TimelineEditorWindow:
         self.pending_supplement_before_action_id = None
         self.timeline_revision = None
         self.review_action_map = {}
+        self.keyboard_fragment_rows = {}
         self.busy = False
         self.closed = False
         self.mutation_controls = []
@@ -150,10 +151,6 @@ class TimelineEditorWindow:
             f"timeline:{id(self)}:observation:"
         )
         self.observation_poll_after_id = None
-        self.keyboard_fragments_frame = None
-        self.keyboard_fragments_body = None
-        self.keyboard_fragments_toggle = None
-        self.keyboard_fragments_expanded = False
 
         self._build_ui()
         self.refresh(notify=False)
@@ -217,9 +214,11 @@ class TimelineEditorWindow:
         self.tree = ttk.Treeview(
             left,
             columns=columns,
-            show="headings",
+            show="tree headings",
             selectmode="browse",
         )
+        self.tree.heading("#0", text="")
+        self.tree.column("#0", width=24, minwidth=24, stretch=False)
         headings = (
             ("included", "保留", 45),
             ("ordinal", "序号", 50),
@@ -312,14 +311,6 @@ class TimelineEditorWindow:
         )
         self._build_observation_editor(self.observations_frame)
         self.detail_notebook.hide(self.observations_frame)
-
-        self.keyboard_fragments_frame = ttk.Frame(self.detail_notebook)
-        self.detail_notebook.add(
-            self.keyboard_fragments_frame,
-            text="键盘片段",
-        )
-        self._build_keyboard_fragments(self.keyboard_fragments_frame)
-        self.detail_notebook.hide(self.keyboard_fragments_frame)
 
         self.busy_frame = ttk.Frame(self.window)
         ttk.Label(
@@ -470,104 +461,6 @@ class TimelineEditorWindow:
             text="定位到对应动作",
             command=self.ignore_selected_observation,
         ).pack(side="left", padx=6)
-
-    def _build_keyboard_fragments(self, parent):
-        parent.columnconfigure(0, weight=1)
-        self.keyboard_fragments_toggle = ttk.Button(
-            parent,
-            text="展开键盘片段",
-            command=self._toggle_keyboard_fragments,
-        )
-        self.keyboard_fragments_toggle.grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=8,
-            pady=8,
-        )
-        self.keyboard_fragments_body = ttk.Frame(parent)
-        self.keyboard_fragments_body.columnconfigure(0, weight=1)
-
-    def _set_keyboard_fragments_visible(self, visible):
-        if self.keyboard_fragments_frame is None:
-            return
-        frame_id = str(self.keyboard_fragments_frame)
-        tabs = set(self.detail_notebook.tabs())
-        if visible:
-            if frame_id not in tabs:
-                self.detail_notebook.add(
-                    self.keyboard_fragments_frame,
-                    text="键盘片段",
-                )
-            self.keyboard_fragments_expanded = False
-            self._render_keyboard_fragments()
-            return
-        if frame_id in tabs:
-            self.detail_notebook.hide(self.keyboard_fragments_frame)
-
-    def _toggle_keyboard_fragments(self):
-        self.keyboard_fragments_expanded = not self.keyboard_fragments_expanded
-        self._render_keyboard_fragments()
-
-    def _render_keyboard_fragments(self):
-        body = self.keyboard_fragments_body
-        toggle = self.keyboard_fragments_toggle
-        if body is None or toggle is None:
-            return
-        body.grid_forget()
-        body.destroy()
-        body = ttk.Frame(self.keyboard_fragments_frame)
-        body.columnconfigure(0, weight=1)
-        self.keyboard_fragments_body = body
-        toggle.configure(
-            text=(
-                "收起键盘片段"
-                if self.keyboard_fragments_expanded
-                else "展开键盘片段"
-            )
-        )
-        if not self.keyboard_fragments_expanded:
-            return
-        action = self.current_action or {}
-        try:
-            fragments = self.store.keyboard_fragments(action.get("id"))
-        except (KeyError, ValueError):
-            fragments = []
-        for index, fragment in enumerate(fragments, start=1):
-            row = ttk.Frame(body)
-            row.grid(
-                row=index - 1,
-                column=0,
-                sticky="ew",
-                padx=10,
-                pady=3,
-            )
-            row.columnconfigure(0, weight=1)
-            ttk.Label(
-                row,
-                text=f"{index}. {_keyboard_fragment_label(fragment)}",
-                anchor="w",
-            ).grid(
-                row=0,
-                column=0,
-                sticky="ew",
-            )
-            button = ttk.Button(
-                row,
-                text="恢复" if not fragment.get("included") else "忽略",
-                command=lambda value=fragment: self._toggle_keyboard_fragment(
-                    value
-                ),
-            )
-            button.grid(row=0, column=1, padx=(8, 0))
-            self.mutation_controls.append(button)
-        body.grid(
-            row=1,
-            column=0,
-            sticky="ew",
-            padx=2,
-            pady=(0, 8),
-        )
 
     def _toggle_keyboard_fragment(self, fragment):
         action = self.current_action or {}
@@ -940,6 +833,7 @@ class TimelineEditorWindow:
             for action in state.get("actions", [])
             if action.get("id")
         }
+        self.keyboard_fragment_rows = {}
         current_selection = set(select_ids or self.tree.selection())
         self.tree.delete(*self.tree.get_children())
         for action in state.get("actions", []):
@@ -956,12 +850,33 @@ class TimelineEditorWindow:
                 "end",
                 iid=action_id,
                 tags=tags,
+                open=False,
                 values=(
                     "✓" if action.get("included", True) else "×",
                     action.get("ordinal"),
                     _action_summary_label(action),
                 ),
             )
+            if action.get("type") == "keyboard":
+                for index, fragment in enumerate(
+                        self.store.keyboard_fragments(action_id),
+                        start=1,
+                ):
+                    fragment_id = f"{action_id}:key:{index}"
+                    self.keyboard_fragment_rows[fragment_id] = {
+                        "action_id": action_id,
+                        "fragment": fragment,
+                    }
+                    self.tree.insert(
+                        action_id,
+                        "end",
+                        iid=fragment_id,
+                        values=(
+                            "✓" if fragment.get("included") else "×",
+                            "",
+                            _keyboard_fragment_label(fragment),
+                        ),
+                    )
         existing = [action_id for action_id in current_selection if self.tree.exists(action_id)]
         if existing:
             self.tree.selection_set(existing)
@@ -998,6 +913,10 @@ class TimelineEditorWindow:
         if len(action_ids) != 1:
             self.status_var.set("忽略或恢复时请只选择一个动作。")
             return
+        fragment = self.keyboard_fragment_rows.get(action_ids[0])
+        if fragment is not None:
+            self._toggle_keyboard_fragment(fragment["fragment"])
+            return
         action = self.review_action_map.get(action_ids[0]) or {}
         ignored = (
             not action.get("included", True)
@@ -1029,7 +948,10 @@ class TimelineEditorWindow:
         if self.busy:
             self.status_var.set("录制修改正在保存，请等待当前操作完成。")
             return "break"
-        action = self.review_action_map.get(action_id)
+        fragment = self.keyboard_fragment_rows.get(action_id)
+        action = self.review_action_map.get(
+            fragment["action_id"] if fragment is not None else action_id
+        )
         if action is None:
             return "break"
         selected_ids = list(self.tree.selection())
@@ -1461,8 +1383,18 @@ class TimelineEditorWindow:
         selected = list(self.tree.selection())
         if not selected:
             return
-        action = self.review_action_map.get(selected[0])
+        fragment = self.keyboard_fragment_rows.get(selected[0])
+        action = self.review_action_map.get(
+            fragment["action_id"] if fragment is not None else selected[0]
+        )
         if action is None:
+            return
+        if fragment is not None:
+            self.simple_ignore_button.configure(
+                text="恢复片段" if not fragment["fragment"].get("included") else "忽略片段",
+                state="normal",
+            )
+            self._show_action(action)
             return
         role = action.get("role") or "business"
         ignored = (
@@ -1482,9 +1414,6 @@ class TimelineEditorWindow:
         )
         self.current_action = action
         self.current_action_media = self.action_media_map.get(action.get("id"))
-        self._set_keyboard_fragments_visible(
-            action.get("type") == "keyboard"
-        )
         self._render_action_view()
 
     def _show_image(self, path):
@@ -1759,7 +1688,10 @@ def _keyboard_fragment_label(fragment):
     name = str(key.get("name") or "")
     return (
         "输入 " + name
-        if len(name) == 1 and name.isprintable()
+        if (
+            len((fragment or {}).get("key_event_ids") or ()) > 1
+            or (len(name) == 1 and name.isprintable())
+        )
         else _keyboard_key_label(name)
     )
 
