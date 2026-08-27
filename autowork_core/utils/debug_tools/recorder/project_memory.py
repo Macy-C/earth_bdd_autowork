@@ -14,7 +14,6 @@ from config.paths import Paths
 from autowork_core.utils.debug_tools.recorder.knowledge_store import (
     ensure_knowledge_store,
     knowledge_root_for_recording_root,
-    migrate_legacy_knowledge_file,
 )
 from autowork_core.utils.debug_tools.recorder.memory_digest import (
     build_relevant_memory_revision,
@@ -95,18 +94,10 @@ def append_memory_event(
     return event
 
 
-def load_memory_events(output_root, *, migrate=True):
+def load_memory_events(output_root):
     output_root = Path(output_root).resolve()
     knowledge_root = knowledge_root_for_recording_root(output_root)
-    path = (
-        migrate_legacy_knowledge_file(
-            output_root,
-            legacy_relative="project-memory/events.jsonl",
-            knowledge_relative="project-memory/events.jsonl",
-        )
-        if migrate
-        else knowledge_root / "project-memory" / "events.jsonl"
-    )
+    path = knowledge_root / "project-memory" / "events.jsonl"
     if not path.exists():
         return [], []
     events = []
@@ -137,14 +128,10 @@ def build_request_memory_context(
         limit=16,
     exclude_request_id=None,
     exclude_kinds=(),
-    migrate=True,
 ):
     session_dir = Path(session_dir).resolve()
     output_root = find_recording_root(session_dir)
-    events, warnings = load_memory_events(
-        output_root,
-        migrate=migrate,
-    )
+    events, warnings = load_memory_events(output_root)
     if exclude_request_id:
         excluded_kinds = set(exclude_kinds)
         events = [
@@ -191,11 +178,7 @@ def build_request_memory_context(
             item[3].get("memory_id") for item in selected
         }
     ][:3]
-    knowledge_root = (
-        ensure_knowledge_store(output_root)
-        if migrate
-        else knowledge_root_for_recording_root(output_root)
-    )
+    knowledge_root = knowledge_root_for_recording_root(output_root)
     journal_path = knowledge_root / "project-memory" / "events.jsonl"
     context = {
         "schema_version": SCHEMA_VERSION,
@@ -292,7 +275,6 @@ def inspect_request_memory_freshness(
                 if include_current_results
                 else ("plan_confirmed", "transaction_completed")
             ),
-            migrate=False,
         )
     except Exception as error:
         return {
@@ -375,68 +357,6 @@ def search_memory_events(output_root, query, *, limit=20):
     }
 
 
-def record_plan_confirmed(session_dir, request, plan_artifact):
-    from autowork_core.utils.debug_tools.recorder.generation_plan import (
-        SUPPORTED_PLAN_VERSIONS,
-    )
-
-    session_dir = Path(session_dir).resolve()
-    output_root = find_recording_root(session_dir)
-    if (
-        plan_artifact.get("plan_version") not in SUPPORTED_PLAN_VERSIONS
-        or plan_artifact.get("status") != "confirmed"
-        or (plan_artifact.get("source") or {}).get("confirmation_source")
-        != "user_adjustment"
-    ):
-        raise ValueError("项目确认记忆只能由用户确认的 GenerationPlanV3 发布")
-    target = request.get("target") or {}
-    steps = {
-        step.get("id"): step
-        for step in target.get("steps") or []
-    }
-    events = []
-    step_plans = ((plan_artifact.get("plan") or {}).get("steps") or {})
-    for step_id, step_plan in step_plans.items():
-        step = steps.get(step_id) or {"id": step_id}
-        plan_payload = json.dumps(step_plan, ensure_ascii=False, sort_keys=True)
-        existing, _warnings = load_memory_events(output_root)
-        previous = [
-            event
-            for event in existing
-            if event.get("kind") == "plan_confirmed"
-            and (event.get("source") or {}).get("request_id") == request.get("request_id")
-            and step_id in (event.get("scope") or {}).get("step_ids", [])
-        ]
-        events.append(append_memory_event(
-            output_root,
-            kind="plan_confirmed",
-            authority="user_confirmed",
-            status="active",
-            claim=_plan_claim(step, step_plan),
-            scope=_target_scope(target, step_ids=[step_id]),
-            source={
-                "session_id": (request.get("session") or {}).get("id"),
-                "request_id": request.get("request_id"),
-                "request_path": request.get("request_path"),
-                "plan_id": plan_artifact.get("plan_id"),
-                "plan_fingerprint": plan_artifact.get("plan_fingerprint"),
-            },
-            payload={"plan": step_plan},
-            supersedes=(
-                [previous[-1]["memory_id"]]
-                if previous
-                and (previous[-1].get("payload") or {}).get("plan") != step_plan
-                else []
-            ),
-            dedupe_key=(
-                f"plan:{request.get('request_id')}:{step_id}:"
-                f"{request.get('evidence_fingerprint')}:"
-                f"{hashlib.sha256(plan_payload.encode('utf-8')).hexdigest()}"
-            ),
-        ))
-    return events
-
-
 def record_transaction_completed(report_path, report):
     report_path = Path(report_path).resolve()
     session_dir = Path(report["session_dir"]).resolve()
@@ -446,9 +366,14 @@ def record_transaction_completed(report_path, report):
         session_dir,
         report_path,
     )
+    unresolved_issues = list(report.get("unresolved_issues") or ())
     event = append_memory_event(
         output_root,
-        kind="transaction_completed",
+        kind=(
+            "transaction_generated_with_issues"
+            if unresolved_issues
+            else "transaction_completed"
+        ),
         authority="generation_result",
         status=report.get("status") or "unknown",
         claim=report.get("summary") or (
@@ -467,6 +392,7 @@ def record_transaction_completed(report_path, report):
             "required_validations": report.get("required_validations") or [],
             "implementation_snapshot": report.get("implementation_snapshot") or [],
             "decision_trace": report.get("decision_trace") or {},
+            "unresolved_issues": unresolved_issues,
         },
         dedupe_key=f"transaction:{report.get('transaction_id')}",
     )

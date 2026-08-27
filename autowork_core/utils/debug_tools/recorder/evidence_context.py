@@ -13,7 +13,7 @@ from autowork_core.utils.debug_tools.recorder.evidence_graph import (
 )
 from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION
 from autowork_core.utils.debug_tools.recorder.projection_store import (
-    resolve_take_artifact,
+    ProjectionStore,
 )
 from autowork_core.utils.debug_tools.recorder.request_repository import (
     request_identity_is_valid,
@@ -25,12 +25,7 @@ from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
 EVIDENCE_CONTEXT_VERSION = "2.3"
-SUPPORTED_EVIDENCE_CONTEXT_VERSIONS = {
-    "2.0",
-    "2.1",
-    "2.2",
-    EVIDENCE_CONTEXT_VERSION,
-}
+SUPPORTED_EVIDENCE_CONTEXT_VERSIONS = {EVIDENCE_CONTEXT_VERSION}
 
 
 def build_evidence_context(session_dir, request, *, write=True):
@@ -49,14 +44,9 @@ def build_evidence_context(session_dir, request, *, write=True):
         artifacts = evidence.get("artifacts") or {}
         take_dir = resolve_session_path(session_dir, artifacts.get("take"))
         graph = load_evidence_graph(take_dir)
-        graph_path = (
-            resolve_session_path(session_dir, artifacts.get("evidence_graph"))
-            if artifacts.get("evidence_graph")
-            else resolve_take_artifact(
-                take_dir,
-                "evidence_graph",
-                "evidence/graph.json",
-            )
+        graph_path = resolve_session_path(
+            session_dir,
+            artifacts.get("evidence_graph"),
         )
         source_graphs.append({
             "step_id": step.get("id"),
@@ -131,10 +121,7 @@ def load_evidence_context(path):
     ):
         raise ValueError(f"不支持的 evidence context: {path}")
     declared_fingerprint = value.get("context_fingerprint")
-    if (
-        value.get("evidence_context_version") == EVIDENCE_CONTEXT_VERSION
-        and not declared_fingerprint
-    ):
+    if not declared_fingerprint:
         raise ValueError(f"evidence context fingerprint 缺失: {path}")
     if declared_fingerprint and declared_fingerprint != (
         _evidence_context_fingerprint(value)
@@ -347,11 +334,15 @@ def compare_request_takes(request_path, *, step_id, take_ids=()):
 
 def _take_comparison_summary(session_dir, take):
     take_dir = resolve_session_path(session_dir, take.get("path"))
-    graph_path = resolve_take_artifact(
-        take_dir,
-        "evidence_graph",
-        "evidence/graph.json",
-    )
+    projection = ProjectionStore(take_dir).current()
+    if projection is None:
+        raise ValueError(
+            f"Take 缺少有效 Projection 5.7: {take.get('id')}；"
+            "旧 Run 需要使用旧版本或独立离线迁移工具"
+        )
+    graph_path = projection.path("evidence_graph")
+    if graph_path is None:
+        raise ValueError(f"Take Projection 缺少 Evidence Graph: {take.get('id')}")
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     if graph.get("evidence_graph_version") != EVIDENCE_GRAPH_VERSION:
         raise ValueError(

@@ -33,7 +33,7 @@ from autowork_core.utils.debug_tools.recorder.runtime_risk_policy import (
 
 
 QUALITY_GATE_VERSION = "1.3"
-SUPPORTED_QUALITY_GATE_VERSIONS = {"1.1", "1.2", QUALITY_GATE_VERSION}
+SUPPORTED_QUALITY_GATE_VERSIONS = {QUALITY_GATE_VERSION}
 def evaluate_generation_quality(
         request,
         plan_artifact,
@@ -230,6 +230,8 @@ def _transaction_passed(report, request, plan_artifact):
     reasons = []
     if report.get("status") not in {"completed", "completed_no_changes"}:
         reasons.append("GenerationTransaction 未完成")
+    if report.get("unresolved_issues"):
+        reasons.append("GenerationTransaction 包含未解决生成问题")
     expected_fingerprint = completed_report_fingerprint(report)
     if report.get("completion_fingerprint") != expected_fingerprint:
         reasons.append("GenerationTransaction completion fingerprint 无效")
@@ -271,7 +273,7 @@ def _transaction_passed(report, request, plan_artifact):
     if (
         (report.get("implementation_manifest") or {}).get(
             "implementation_manifest_version"
-        ) in {"1.6", "1.7"}
+        ) in {"1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12"}
         and (report.get("terminal_snapshot_audit") or {}).get("status")
         != "passed"
     ):

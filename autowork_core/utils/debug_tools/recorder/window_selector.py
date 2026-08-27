@@ -50,8 +50,6 @@ class RecorderWindowSelector:
         self.on_apply = on_apply
         self.on_refresh = on_refresh
         self.allow_empty = bool(allow_empty)
-        if not self.allow_empty and not self.selected_handles and self.windows:
-            self.selected_handles.add(int(self.windows[0]["handle"]))
         if self.primary_handle not in self.selected_handles:
             self.primary_handle = next(iter(self.selected_handles), None)
 
@@ -203,10 +201,6 @@ class RecorderWindowSelector:
         self.selected_handles &= set(self.window_map)
         if self.primary_handle not in self.selected_handles:
             self.primary_handle = next(iter(self.selected_handles), None)
-        if not self.allow_empty and not self.selected_handles and windows:
-            handle = int(windows[0]["handle"])
-            self.selected_handles.add(handle)
-            self.primary_handle = handle
         self._render()
 
     def apply(self):

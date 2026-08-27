@@ -11,11 +11,7 @@ from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION
 
 
 ANNOTATION_VERSION = "2.0"
-LEGACY_ANNOTATION_VERSION = "1.0"
-SUPPORTED_ANNOTATION_VERSIONS = {
-    LEGACY_ANNOTATION_VERSION,
-    ANNOTATION_VERSION,
-}
+SUPPORTED_ANNOTATION_VERSIONS = {ANNOTATION_VERSION}
 ANNOTATION_MODEL_VERSION = "3.0"
 ANNOTATION_SNAPSHOT_VERSION = "1.0"
 STEP_USER_CONTEXT = "step_user_context"
@@ -678,24 +674,6 @@ def _annotation_id(created_at, step_id, revision, business_context):
     )
 
 
-def _legacy_annotation_id(
-        created_at,
-        step_id,
-        revision,
-        purpose,
-        constraints,
-    ):
-    return "annotation-" + stable_digest(
-        created_at,
-        STEP_USER_CONTEXT,
-        step_id,
-        str(revision),
-        purpose,
-        constraints,
-        length=16,
-    )
-
-
 def _normalize_business_context_input(
         business_context,
         *,
@@ -721,13 +699,7 @@ def _normalize_business_context_input(
 def step_business_context_text(context):
     if not isinstance(context, dict):
         return ""
-    if context.get("annotation_version") == ANNOTATION_VERSION:
-        return str(context.get("business_context") or "").strip()
-    purpose = str(context.get("purpose") or "").strip()
-    constraints = str(context.get("constraints") or "").strip()
-    if purpose and constraints:
-        return f"{purpose}；{constraints}"
-    return purpose or constraints
+    return str(context.get("business_context") or "").strip()
 
 
 def _observation_intent_id(
@@ -765,10 +737,7 @@ def _public_context(record):
         "supersedes",
         "active",
     ]
-    if record.get("annotation_version") == LEGACY_ANNOTATION_VERSION:
-        keys.extend(("purpose", "constraints"))
-    else:
-        keys.append("business_context")
+    keys.append("business_context")
     return {
         key: record.get(key)
         for key in keys
@@ -879,53 +848,26 @@ def _validate_step_context_record(record, index, step_id, previous_by_step):
             )
         if record.get("supersedes") != (previous or {}).get("annotation_id"):
             raise ValueError(f"annotation supersedes无效: step={step_id}")
-        annotation_version = record.get("annotation_version")
-        if annotation_version == LEGACY_ANNOTATION_VERSION:
-            purpose = record.get("purpose")
-            constraints = record.get("constraints")
-            if not isinstance(purpose, str) or not isinstance(
-                    constraints,
-                    str,
-            ):
-                raise ValueError(
-                    f"annotation内容必须是字符串: index={index}"
-                )
-            if (
-                    len(purpose) > MAX_STEP_CONTEXT_TEXT_LENGTH
-                    or len(constraints) > MAX_STEP_CONTEXT_TEXT_LENGTH
-            ):
-                raise ValueError(
-                    f"annotation内容超过2000字符: index={index}"
-                )
-            active = bool(purpose or constraints)
-            expected_id = _legacy_annotation_id(
-                record.get("created_at"),
-                step_id,
-                expected_revision,
-                purpose,
-                constraints,
+        business_context = record.get("business_context")
+        if not isinstance(business_context, str):
+            raise ValueError(
+                f"annotation内容必须是字符串: index={index}"
             )
-        else:
-            business_context = record.get("business_context")
-            if not isinstance(business_context, str):
-                raise ValueError(
-                    f"annotation内容必须是字符串: index={index}"
-                )
-            if len(business_context) > MAX_STEP_CONTEXT_TEXT_LENGTH:
-                raise ValueError(
-                    f"annotation内容超过2000字符: index={index}"
-                )
-            if "purpose" in record or "constraints" in record:
-                raise ValueError(
-                    f"新annotation不能包含旧业务字段: index={index}"
-                )
-            active = bool(business_context)
-            expected_id = _annotation_id(
-                record.get("created_at"),
-                step_id,
-                expected_revision,
-                business_context,
+        if len(business_context) > MAX_STEP_CONTEXT_TEXT_LENGTH:
+            raise ValueError(
+                f"annotation内容超过2000字符: index={index}"
             )
+        if "purpose" in record or "constraints" in record:
+            raise ValueError(
+                f"新annotation不能包含旧业务字段: index={index}"
+            )
+        active = bool(business_context)
+        expected_id = _annotation_id(
+            record.get("created_at"),
+            step_id,
+            expected_revision,
+            business_context,
+        )
         if record.get("active") is not active:
             raise ValueError(f"annotation active无效: index={index}")
         annotation_id = str(record.get("annotation_id") or "")
@@ -939,12 +881,7 @@ def _validate_observation_intent_record(
         index,
         previous_by_observation,
     ):
-    annotation_version = record.get("annotation_version")
-    valid_authorities = (
-        {USER_DECLARED_INTENT}
-        if annotation_version == LEGACY_ANNOTATION_VERSION
-        else {USER_DECLARED_INTENT, SYSTEM_INFERRED_INTENT}
-    )
+    valid_authorities = {USER_DECLARED_INTENT, SYSTEM_INFERRED_INTENT}
     if record.get("authority") not in valid_authorities:
         raise ValueError(f"ObservationIntent authority无效: index={index}")
     scope = _record_observation_scope(record)
@@ -992,11 +929,7 @@ def _validate_observation_intent_record(
         record.get("created_at"),
         revision,
         payload,
-        authority=(
-            record.get("authority")
-            if annotation_version == ANNOTATION_VERSION
-            else None
-        ),
+        authority=record.get("authority"),
     )
     if record.get("annotation_id") != expected_id:
         raise ValueError(f"ObservationIntent annotation_id无效: index={index}")

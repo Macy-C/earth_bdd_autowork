@@ -304,7 +304,6 @@ def import_recording_package(
                             steps=completed_step_ids,
                             write=True,
                             repair=True,
-                            memory_migrate=False,
                             initialize_workflow=False,
                         )
                         request_path = str(

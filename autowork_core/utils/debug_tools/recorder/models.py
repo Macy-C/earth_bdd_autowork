@@ -6,7 +6,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "2.1"
-SUPPORTED_SCHEMA_VERSIONS = ("2.0", "2.1")
+SUPPORTED_SCHEMA_VERSIONS = (SCHEMA_VERSION,)
 
 
 @dataclass(frozen=True)

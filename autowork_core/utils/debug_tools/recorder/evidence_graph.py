@@ -10,14 +10,10 @@ import yaml
 from autowork_core.utils.debug_tools.recorder.canonical_action import (
     build_canonical_action,
 )
-from autowork_core.utils.debug_tools.recorder.legacy_artifacts import (
-    legacy_actions_path,
-    legacy_locators_path,
-)
 from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION
 from autowork_core.utils.debug_tools.recorder.projection_store import (
-    LEGACY_PROJECTION_ROOT_NAME,
     PROJECTION_ROOT_NAME,
+    resolve_take_artifact,
 )
 from autowork_core.utils.debug_tools.recorder.raw_event_journal import (
     requires_capture_integrity,
@@ -38,8 +34,8 @@ _EXCLUDED_SOURCE_PARTS = {
     "extracted_frames",
 }
 _EXCLUDED_SOURCE_ROOTS = {
-    LEGACY_PROJECTION_ROOT_NAME,
     PROJECTION_ROOT_NAME,
+    "projections",
 }
 _EXCLUDED_SOURCE_NAMES = {
     "current-projection.json",
@@ -117,7 +113,6 @@ def build_evidence_graph(
     tree_diff = _read_json(take_dir / "ui" / "tree-diff.json")
     locator_bundle = _read_yaml(
         effective_root / "locator-candidates.effective.yaml",
-        fallback=legacy_locators_path(take_dir),
     )
 
     projected_artifacts = []
@@ -223,53 +218,42 @@ def build_evidence_graph(
 def load_evidence_graph(take_dir, *, rebuild_if_stale=True):
     take_dir = Path(take_dir).resolve()
     from autowork_core.utils.debug_tools.recorder.projection_store import (
+        PROJECTION_VERSION,
         ProjectionStore,
     )
 
     projection_store = ProjectionStore(take_dir)
-    projection_pointer_exists = projection_store.pointer_path.exists()
     projection = projection_store.current()
-    if projection is not None and not projection.is_current_version:
+    if projection is None:
+        pointer = _read_json(projection_store.pointer_path)
+        if pointer.get("projection_version") != PROJECTION_VERSION:
+            raise ValueError(
+                "当前 Recorder 只接受 Projection 5.7；旧 Run 需要使用"
+                "旧版本或独立离线迁移工具"
+            )
         from autowork_core.utils.debug_tools.recorder.timeline import (
             TimelineStore,
         )
 
         TimelineStore(take_dir).materialize()
         projection = projection_store.current()
-        if projection is None or not projection.is_current_version:
-            raise RuntimeError("Evidence Graph 投影版本升级失败")
-    path = (
-        projection.path("evidence_graph")
-        if projection is not None
-        else take_dir / _GRAPH_PATH
-    )
+        if projection is None:
+            raise RuntimeError("Evidence Graph current projection 修复失败")
+    path = projection.path("evidence_graph")
     graph = _read_json(path)
     if not graph or graph.get("evidence_graph_version") != EVIDENCE_GRAPH_VERSION:
-        if projection is not None or projection_pointer_exists:
-            from autowork_core.utils.debug_tools.recorder.timeline import (
-                TimelineStore,
-            )
-
-            TimelineStore(take_dir).materialize()
-            repaired = projection_store.current()
-            if repaired is None:
-                raise RuntimeError("Evidence Graph 投影修复后 pointer 不存在")
-            graph = _read_json(repaired.path("evidence_graph"))
-            if graph.get("evidence_graph_version") == EVIDENCE_GRAPH_VERSION:
-                return graph
-            raise RuntimeError("Evidence Graph 投影修复失败")
-        return build_evidence_graph(take_dir, write=True)
-    if rebuild_if_stale and projection is None:
-        actions = _read_actions(take_dir)
-        artifacts = _artifact_manifest(
-            take_dir,
-            active_supplement_ids=_active_supplement_ids(actions),
+        from autowork_core.utils.debug_tools.recorder.timeline import (
+            TimelineStore,
         )
-        if (
-            graph.get("source", {}).get("artifact_fingerprint")
-            != _artifact_fingerprint(artifacts)
-        ):
-            return build_evidence_graph(take_dir, write=True)
+
+        TimelineStore(take_dir).materialize()
+        repaired = projection_store.current()
+        if repaired is None:
+            raise RuntimeError("Evidence Graph 投影修复后 pointer 不存在")
+        graph = _read_json(repaired.path("evidence_graph"))
+        if graph.get("evidence_graph_version") == EVIDENCE_GRAPH_VERSION:
+            return graph
+        raise RuntimeError("Evidence Graph 投影修复失败")
     return graph
 
 
@@ -890,22 +874,16 @@ def _artifact_kind(path):
 
 
 def _read_actions(take_dir):
-    from autowork_core.utils.debug_tools.recorder.projection_store import (
-        resolve_take_artifact,
+    path = resolve_take_artifact(
+        take_dir,
+        "actions_effective",
     )
-
-    for path in (
-        resolve_take_artifact(
-            take_dir,
-            "actions_effective",
-            "actions.effective.json",
-        ),
-        legacy_actions_path(take_dir),
-    ):
-        value = _read_json(path)
-        if value:
-            return list(value.get("actions") or [])
-    return []
+    if path is None:
+        raise ValueError(
+            "Take 缺少有效 Projection 5.7 actions_effective；"
+            "旧 Run 需要使用旧版本或独立离线迁移工具"
+        )
+    return list((_read_json(path).get("actions") or []))
 
 
 def _read_json(path):
@@ -933,10 +911,8 @@ def _read_jsonl(path):
     return values
 
 
-def _read_yaml(path, *, fallback=None):
+def _read_yaml(path):
     path = Path(path)
-    if not path.exists() and fallback is not None:
-        path = Path(fallback)
     if not path.exists():
         return {}
     try:

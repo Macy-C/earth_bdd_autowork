@@ -80,13 +80,8 @@ def load_feature_delivery_index(recording_root):
     ):
         raise FeatureDeliveryError("Feature交付索引格式无效")
     version = value.get("feature_delivery_index_version")
-    if version not in {None, DELIVERY_INDEX_VERSION}:
+    if version != DELIVERY_INDEX_VERSION:
         raise FeatureDeliveryError("Feature交付索引格式无效")
-    if version is None:
-        value = {
-            **value,
-            "feature_delivery_index_version": DELIVERY_INDEX_VERSION,
-        }
     return value
 
 
@@ -162,25 +157,40 @@ def _normalized_delivery_record(value, feature_id):
             else None
         ),
     }
-    legacy_kind = value.get("kind")
-    if legacy_kind in {"export", "import"}:
-        key = f"last_{legacy_kind}"
-        if result[key] is None:
-            result[key] = {
-                name: item
-                for name, item in value.items()
-                if name not in {"feature_id", "kind"}
-            }
     return result
 
 
-def export_feature_delivery(feature_path, recording_root, output):
+def export_feature_delivery(
+    feature_path,
+    recording_root,
+    output,
+    *,
+    scenario_ids=None,
+):
     recording_root = Path(recording_root).resolve()
     output = _safe_delivery_output_path(output)
     plan = _load_delivery_feature_plan(feature_path)
     feature_path = plan.source_path
     source_bytes = feature_path.read_bytes()
-    runs = _selected_feature_runs(plan, recording_root)
+    selected_scenario_ids = (
+        frozenset(str(value) for value in scenario_ids)
+        if scenario_ids is not None
+        else None
+    )
+    if selected_scenario_ids is not None:
+        known_ids = {scenario.id for scenario in plan.scenarios}
+        if not selected_scenario_ids:
+            raise FeatureDeliveryError("场景录制资料导出范围不能为空")
+        unknown = sorted(selected_scenario_ids - known_ids)
+        if unknown:
+            raise FeatureDeliveryError(
+                f"场景录制资料导出包含未知Scenario: {unknown}"
+            )
+    runs = _selected_feature_runs(
+        plan,
+        recording_root,
+        scenario_ids=selected_scenario_ids,
+    )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output = _safe_delivery_output_path(output)
@@ -233,6 +243,11 @@ def export_feature_delivery(feature_path, recording_root, output):
                 "generation_state_included": False,
                 "partial_recording_allowed": True,
                 "all_scenarios_recorded": len(runs) == len(plan.scenarios),
+                "export_scope": (
+                    "feature"
+                    if selected_scenario_ids is None
+                    else "scenarios"
+                ),
             },
         }
         temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
@@ -507,7 +522,7 @@ def import_feature_delivery(package_path, project_root, recording_root=None):
     }
 
 
-def _selected_feature_runs(plan, recording_root):
+def _selected_feature_runs(plan, recording_root, *, scenario_ids=None):
     catalog = load_recording_catalog(recording_root)
     entries = [
         item
@@ -517,6 +532,8 @@ def _selected_feature_runs(plan, recording_root):
     ]
     selected = []
     for scenario in plan.scenarios:
+        if scenario_ids is not None and scenario.id not in scenario_ids:
+            continue
         expected_steps = {step.id for step in scenario.steps}
         expected_fingerprint = recording_business_fingerprint(
             public_dict(plan),

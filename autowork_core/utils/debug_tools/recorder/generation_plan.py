@@ -26,6 +26,10 @@ from autowork_core.utils.debug_tools.recorder.ai_capability_registry import (
 from autowork_core.utils.debug_tools.recorder.action_knowledge import (
     operation_compatibility,
 )
+from autowork_core.utils.debug_tools.recorder.code_reuse_index import (
+    candidate_step_pattern_contracts,
+    step_pattern_contract_matches,
+)
 from autowork_core.utils.debug_tools.recorder.identity import (
     locator_candidate_id as expected_locator_candidate_id,
 )
@@ -41,43 +45,11 @@ from autowork_core.utils.bus import normalize
 
 
 PLAN_VERSION = "4.2"
-SUPPORTED_PLAN_VERSIONS = {
-    "3.0",
-    "3.1",
-    "3.2",
-    "3.3",
-    "3.4",
-    "3.5",
-    "3.6",
-    "3.7",
-    "3.8",
-    "3.9",
-    "4.0",
-    "4.1",
-    PLAN_VERSION,
-}
-BRIEF_BOUND_PLAN_VERSIONS = {
-    "3.3",
-    "3.4",
-    "3.5",
-    "3.6",
-    "3.7",
-    "3.8",
-    "3.9",
-    "4.0",
-    "4.1",
-    PLAN_VERSION,
-}
-STRUCTURED_PLAN_VERSIONS = {"3.8", "3.9", "4.0", "4.1", PLAN_VERSION}
-VALIDATED_PLAN_VERSIONS = {
-    "3.7",
-    "3.8",
-    "3.9",
-    "4.0",
-    "4.1",
-    PLAN_VERSION,
-}
-ORIGIN_BOUND_PLAN_VERSIONS = {"3.9", "4.0", "4.1", PLAN_VERSION}
+SUPPORTED_PLAN_VERSIONS = {PLAN_VERSION}
+BRIEF_BOUND_PLAN_VERSIONS = {PLAN_VERSION}
+STRUCTURED_PLAN_VERSIONS = {PLAN_VERSION}
+VALIDATED_PLAN_VERSIONS = {PLAN_VERSION}
+ORIGIN_BOUND_PLAN_VERSIONS = {PLAN_VERSION}
 CONTRACT_LEASE_PLAN_VERSIONS = {PLAN_VERSION}
 PLAN_ORIGINS = {
     "external_ai",
@@ -1017,6 +989,11 @@ def normalize_generation_plan(request, plan):
             "table_usage": normalize_table_usage(
                 value.get("table_usage"),
             ),
+            "unresolved_issues": [
+                dict(item)
+                for item in value.get("unresolved_issues") or ()
+                if isinstance(item, dict)
+            ],
         }
     return {
         "summary": str(plan.get("summary") or "").strip(),
@@ -1432,6 +1409,12 @@ def validate_generation_plan(
         referenced_actions = set()
         ignored_actions = set(step.get("ignored_action_ids") or [])
         covered_actions = set(step.get("covered_action_ids") or [])
+        issue_actions = {
+            str(action_id)
+            for issue in step.get("unresolved_issues") or ()
+            for action_id in (issue or {}).get("action_ids") or ()
+            if action_id
+        }
         behavior_resolution = step.get("behavior_resolution") or {}
         behavior_reuse = behavior_resolution.get("strategy") == "reuse"
         operations = step.get("operations") or []
@@ -1465,10 +1448,21 @@ def validate_generation_plan(
             required=bool(target_step.get("table")),
         ))
         table_usage = step.get("table_usage") or {}
+        issue_errors, valid_issue_actions, has_valid_issues = (
+            _validate_unresolved_issues(
+            step_id,
+            step,
+            plan,
+            brief,
+            action_ids,
+            )
+        )
+        errors.extend(issue_errors)
         if (
             not operations
             and table_usage.get("consumption") != "scenario_state"
             and not behavior_reuse
+            and not has_valid_issues
         ):
             errors.append(f"Step {step_id} 缺少 operations")
         step_semantic_type = str(
@@ -1705,6 +1699,7 @@ def validate_generation_plan(
             step,
             brief,
             target_step,
+            actions=action_details_by_step.get(step_id, {}),
         ))
         unknown_covered = covered_actions - action_ids
         if unknown_covered:
@@ -1718,6 +1713,7 @@ def validate_generation_plan(
             - ignored_actions
             - covered_actions
             - absorbed_actions
+            - issue_actions
         )
         if uncovered:
             errors.append(
@@ -1743,6 +1739,7 @@ def validate_generation_plan(
             "ignored": ignored_actions,
             "behavior": covered_actions,
             "absorbed": absorbed_actions,
+            "issues": issue_actions,
             "operation_values": operations,
             "locator_evidence_aliases": locator_evidence_aliases,
         }
@@ -1775,6 +1772,72 @@ def validate_generation_plan(
     return errors
 
 
+def _validate_unresolved_issues(step_id, step, plan, brief, action_ids):
+    issues = list(step.get("unresolved_issues") or ())
+    if not issues:
+        return [], set(), False
+    ambiguities = {
+        str(item.get("ambiguity_id") or ""): item
+        for item in brief.get("ambiguities") or ()
+        if isinstance(item, dict)
+        and str(item.get("step_id") or "") == str(step_id)
+    }
+    resolutions = {
+        str(item.get("ambiguity_id") or ""): item
+        for item in plan.get("ambiguity_resolutions") or ()
+        if isinstance(item, dict)
+        and item.get("outcome") == "generate_issue_placeholder"
+    }
+    errors = []
+    covered = set()
+    valid_issue_count = 0
+    for issue in issues:
+        if not isinstance(issue, dict):
+            errors.append(f"Step {step_id} unresolved_issue必须是object")
+            continue
+        ambiguity_id = str(issue.get("ambiguity_id") or "")
+        ambiguity = ambiguities.get(ambiguity_id)
+        resolution = resolutions.get(ambiguity_id)
+        if ambiguity is None or resolution is None:
+            errors.append(
+                f"Step {step_id} unresolved_issue缺少冻结placeholder ambiguity"
+            )
+            continue
+        allowed = next((
+            item
+            for item in ambiguity.get("allowed_outcomes") or ()
+            if item.get("outcome") == "generate_issue_placeholder"
+            and item.get("authority") == "ai"
+            and item.get("effect") == "issue_placeholder"
+        ), None)
+        if allowed is None:
+            errors.append(
+                f"Step {step_id} ambiguity不允许issue placeholder: "
+                f"{ambiguity_id}"
+            )
+            continue
+        expected_id = "generation-issue-" + hashlib.sha256(
+            f"{brief.get('request_id')}:{step_id}:{ambiguity_id}".encode(
+                "utf-8"
+            )
+        ).hexdigest()[:16]
+        issue_actions = set(issue.get("action_ids") or ())
+        if any((
+            issue.get("issue_id") != expected_id,
+            str(issue.get("step_id") or "") != str(step_id),
+            issue.get("issue_type") != ambiguity.get("code"),
+            issue_actions != set(action_ids),
+        )):
+            errors.append(
+                f"Step {step_id} unresolved_issue与冻结ambiguity不一致: "
+                f"{ambiguity_id}"
+            )
+            continue
+        covered.update(issue_actions)
+        valid_issue_count += 1
+    return errors, covered, bool(valid_issue_count)
+
+
 def _validate_action_relationships(
         step_id,
         relationships,
@@ -1787,8 +1850,11 @@ def _validate_action_relationships(
         brief,
 ):
     actions_by_id = {
-        str(action.get("id") or ""): action
-        for action in actions
+        str(action.get("id") or ""): {
+            **action,
+            "_order": index,
+        }
+        for index, action in enumerate(actions, start=1)
         if action.get("id")
     }
     operation_positions = {
@@ -1928,9 +1994,12 @@ def _validate_action_relationships(
 
 def _action_relationship_ordinal(action):
     value = action.get("ordinal")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        return None
-    return value
+    if not isinstance(value, bool) and isinstance(value, int) and value > 0:
+        return value
+    value = action.get("_order")
+    if not isinstance(value, bool) and isinstance(value, int) and value > 0:
+        return value
+    return None
 
 
 def _is_auxiliary_relationship_action(action):
@@ -2730,6 +2799,10 @@ def _validate_ambiguity_resolutions(plan, brief, action_handling):
                 errors.append(
                     f"{ambiguity_id} 未绑定同一冻结 behavior candidate"
                 )
+        elif effect == "issue_placeholder" and not expected_actions <= (
+            handling.get("issues") or set()
+        ):
+            errors.append(f"{ambiguity_id} 动作未由typed issue占位覆盖")
         elif effect == "ignored_action" and not expected_actions <= (
             handling["ignored"]
         ):
@@ -2877,6 +2950,8 @@ def _validate_behavior_resolution(
         step,
         brief,
         target_step,
+    *,
+    actions,
 ):
     resolution = step.get("behavior_resolution") or {}
     strategy = resolution.get("strategy")
@@ -2897,6 +2972,33 @@ def _validate_behavior_resolution(
             errors.append(
                 f"Step {step_id} 只有 behavior reuse 可以声明 covered_action_ids"
             )
+        if strategy == "modify":
+            candidate_id = str(resolution.get("candidate_id") or "")
+            candidate = _brief_implementation_candidates(brief).get(
+                candidate_id
+            ) or {}
+            step_pattern = str(resolution.get("step_pattern") or "")
+            step_decorator = str(
+                resolution.get("step_decorator") or ""
+            ).casefold()
+            matched_contract = _matched_step_pattern_contract(
+                candidate,
+                target_step,
+            )
+            if any((
+                    candidate.get("kind") != "step_definition",
+                    resolution.get("symbol") != candidate.get("symbol"),
+                    matched_contract is None,
+                    step_pattern != str(
+                        (matched_contract or {}).get("pattern") or ""
+                    ),
+                    step_decorator != str(
+                        (matched_contract or {}).get("decorator") or ""
+                    ).casefold(),
+            )):
+                errors.append(
+                    f"Step {step_id} modify必须冻结当前匹配的Step candidate"
+                )
         return errors
     candidate_id = str(resolution.get("candidate_id") or "")
     candidates = _brief_implementation_candidates(brief)
@@ -2912,12 +3014,106 @@ def _validate_behavior_resolution(
         )
     if str(step.get("behavior_file") or "") != str(candidate.get("path") or ""):
         errors.append(f"Step {step_id} behavior_file 与 reuse candidate 不一致")
-    if str(target_step.get("text") or "") not in {
-        str(pattern)
-        for pattern in candidate.get("matched_step_texts") or ()
-    }:
+    matched_contract = _matched_step_pattern_contract(candidate, target_step)
+    if matched_contract is None:
         errors.append(f"Step {step_id} behavior reuse 未绑定目标 Gherkin Step")
+    elif any((
+            str(resolution.get("step_pattern") or "")
+            != str(matched_contract.get("pattern") or ""),
+            str(resolution.get("step_decorator") or "").casefold()
+            != str(matched_contract.get("decorator") or "").casefold(),
+    )):
+        errors.append(
+            f"Step {step_id} behavior reuse必须冻结匹配的Step decorator"
+        )
+    mappings = list(resolution.get("action_mappings") or ())
+    sequence = list(candidate.get("call_sequence") or ())
+    if not sequence:
+        errors.append(
+            f"Step {step_id} behavior reuse candidate缺少冻结call_sequence"
+        )
+        return errors
+    if len(mappings) != len(sequence):
+        errors.append(
+            f"Step {step_id} behavior reuse action_mappings长度不匹配"
+        )
+        return errors
+    mapping_action_ids = [
+        str(item.get("action_id") or "") for item in mappings
+        if isinstance(item, dict)
+    ]
+    if set(mapping_action_ids) != set(covered) or len(
+            mapping_action_ids
+    ) != len(set(mapping_action_ids)):
+        errors.append(
+            f"Step {step_id} behavior reuse action_mappings覆盖不匹配"
+        )
+        return errors
+    for index, (mapping, call) in enumerate(zip(mappings, sequence)):
+        if not isinstance(mapping, dict):
+            errors.append(
+                f"Step {step_id} behavior reuse action_mapping必须是object"
+            )
+            continue
+        if any((
+            mapping.get("call_index") != index,
+            str(mapping.get("operation") or "")
+            != str(call.get("operation") or ""),
+            str(mapping.get("target") or "")
+            != str(call.get("target") or ""),
+        )):
+            errors.append(
+                f"Step {step_id} behavior reuse action_mapping与冻结调用不一致"
+            )
+            continue
+        action = actions.get(str(mapping.get("action_id") or "")) or {}
+        action_target = action.get("target") or {}
+        if str(mapping.get("target") or "") != str(
+                action_target.get("locator_name") or ""
+        ):
+            errors.append(
+                f"Step {step_id} behavior reuse action_mapping与冻结Action目标不一致"
+            )
+        value_provenance = mapping.get("value_provenance") or {}
+        if call.get("value") is not None:
+            if any((
+                value_provenance.get("kind") is None,
+                value_provenance.get("literal") != call.get("value"),
+            )):
+                errors.append(
+                    f"Step {step_id} behavior reuse action_mapping值证明不一致"
+                )
+        elif call.get("value_parameter"):
+            if value_provenance.get("kind") is None:
+                errors.append(
+                    f"Step {step_id} behavior reuse action_mapping缺少值证明"
+                )
+            elif not _candidate_binds_value_parameter(
+                    candidate,
+                    target_step,
+                    str(call.get("value_parameter") or ""),
+            ):
+                errors.append(
+                    f"Step {step_id} behavior reuse action_mapping的"
+                    "value_parameter未由匹配的 decorator 参数绑定"
+                )
     return errors
+
+
+def _candidate_binds_value_parameter(candidate, target_step, parameter):
+    for contract in candidate.get("step_parameter_contracts") or ():
+        if not isinstance(contract, dict):
+            continue
+        if str(contract.get("matcher") or "") not in {"parse", "cfparse"}:
+            continue
+        if step_pattern_contract_matches(contract, target_step):
+            return any(
+                str(binding.get("parameter") or "") == parameter
+                and str(binding.get("capture_kind") or "") == "named"
+                for binding in contract.get("parameter_bindings") or ()
+                if isinstance(binding, dict)
+            )
+    return False
 
 
 def _normalize_window_owners(value):
@@ -3014,7 +3210,41 @@ def _normalize_implementation_resolution(value):
             str(value.get("candidate_id") or "").strip() or None
         ),
         "reason": str(value.get("reason") or "").strip(),
+        "symbol": str(value.get("symbol") or "").strip() or None,
+        "step_pattern": str(
+            value.get("step_pattern") or ""
+        ).strip() or None,
+        "step_decorator": str(
+            value.get("step_decorator") or ""
+        ).strip().casefold() or None,
+        "action_mappings": [
+            {
+                "action_id": str(item.get("action_id") or "").strip(),
+                "call_index": item.get("call_index"),
+                "operation": str(item.get("operation") or "").strip(),
+                "target": str(item.get("target") or "").strip(),
+                "value_provenance": _normalize_value_provenance(
+                    item.get("value_provenance"),
+                    source=None,
+                    value_action_ids=(),
+                ),
+            }
+            for item in value.get("action_mappings") or ()
+            if isinstance(item, dict)
+        ],
     }
+
+
+def _matched_step_pattern_contract(candidate, target_step):
+    contracts = [
+        {
+            "decorator": str(contract.get("decorator") or "").casefold(),
+            "pattern": str(contract.get("pattern") or ""),
+        }
+        for contract in candidate_step_pattern_contracts(candidate)
+        if step_pattern_contract_matches(contract, target_step)
+    ]
+    return contracts[0] if len(contracts) == 1 else None
 
 
 def _implementation_resolution_identity(value):
@@ -3946,7 +4176,7 @@ def _validate_operation_action_roles(
         errors.append(
             f"Step {step_id} 值操作 {op} 缺少 value_provenance"
         )
-    recorded_value_kinds = {"recorded_action", "legacy_recorded_action"}
+    recorded_value_kinds = {"recorded_action"}
     if value_kind in recorded_value_kinds and not value_action_ids:
         errors.append(
             f"Step {step_id} 录制值操作 {op} 缺少 value_action_ids"
@@ -3978,21 +4208,6 @@ def _normalize_value_provenance(value, *, source, value_action_ids):
             }
             and item not in (None, "")
         }
-    actions = _unique_strings(value_action_ids)
-    if actions:
-        return {
-            "kind": "legacy_recorded_action",
-            "action_id": actions[0],
-        }
-    source = str(source or "")
-    if source.startswith("examples."):
-        return {"kind": "examples", "reference": source.split(".", 1)[1]}
-    if source.startswith("table."):
-        return {"kind": "data_table", "reference": source.split(".", 1)[1]}
-    if source.startswith("runtime."):
-        return {"kind": "runtime", "binding": source.split(".", 1)[1]}
-    if source == "literal":
-        return {"kind": "legacy_literal"}
     return {}
 
 
@@ -4007,10 +4222,8 @@ def _validate_operation_value_provenance(step_id, operation, brief):
     kind = str(provenance.get("kind") or "")
     allowed = {
         "recorded_action",
-        "legacy_recorded_action",
         "feature_literal",
         "semantic_literal",
-        "legacy_literal",
         "examples",
         "data_table",
         "decision",
@@ -4026,27 +4239,26 @@ def _validate_operation_value_provenance(step_id, operation, brief):
         )
     value_actions = set(operation.get("value_action_ids") or ())
     source = str(operation.get("source") or "")
-    if kind in {"recorded_action", "legacy_recorded_action"}:
+    if kind == "recorded_action":
         action_id = str(provenance.get("action_id") or "")
         if not action_id or action_id not in value_actions:
             errors.append(
                 f"Step {step_id} recorded value provenance与value Action不一致"
             )
-        if kind == "recorded_action":
-            frozen_value = resolve_recorded_action_value(
-                brief,
-                step_id,
-                action_id,
-                operation.get("op"),
+        frozen_value = resolve_recorded_action_value(
+            brief,
+            step_id,
+            action_id,
+            operation.get("op"),
+        )
+        if frozen_value is None:
+            errors.append(
+                f"Step {step_id} recorded Action缺少冻结值: {action_id}"
             )
-            if frozen_value is None:
-                errors.append(
-                    f"Step {step_id} recorded Action缺少冻结值: {action_id}"
-                )
-            elif operation.get("value") != frozen_value:
-                errors.append(
-                    f"Step {step_id} recorded value与冻结Action不一致: {action_id}"
-                )
+        elif operation.get("value") != frozen_value:
+            errors.append(
+                f"Step {step_id} recorded value与冻结Action不一致: {action_id}"
+            )
     elif value_actions:
         errors.append(
             f"Step {step_id} {kind} value provenance不能声明value Action"
@@ -4054,7 +4266,6 @@ def _validate_operation_value_provenance(step_id, operation, brief):
     if kind in {
         "semantic_literal",
         "feature_literal",
-        "legacy_literal",
     } and source != "literal":
         errors.append(f"Step {step_id} {kind}必须使用literal source")
     if (
@@ -4130,10 +4341,6 @@ def _validate_operation_value_provenance(step_id, operation, brief):
         capability is not None
         and capability.requires_value_action
         and kind not in {"data_table", "runtime"}
-        and not (
-            kind == "legacy_recorded_action"
-            and source.startswith(("table.", "runtime."))
-        )
         and operation.get("value") is None
     ):
         errors.append(f"Step {step_id} 值操作 {operation.get('op')} 的冻结值为空")

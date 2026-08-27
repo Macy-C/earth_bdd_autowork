@@ -62,7 +62,6 @@ def build_generation_request(
         latest=True,
         write=True,
         repair=True,
-        memory_migrate=True,
         initialize_workflow=True,
         execution_profile=None,
 ):
@@ -140,6 +139,13 @@ def build_generation_request(
                 evidence_artifacts,
             ),
         }
+        input_recovery = _freeze_confirmed_input_recovery(
+            entry["step"],
+            timeline_state,
+            evidence_graph,
+        )
+        if input_recovery:
+            evidence_entry["input_recovery"] = input_recovery
         evidence.append(evidence_entry)
 
     selected_step_ids = {entry["id"] for entry in selected_steps}
@@ -225,7 +231,6 @@ def build_generation_request(
                 "scenario": scenario_entry,
                 "steps": selected_steps,
             }},
-            migrate=memory_migrate,
         )
     except Exception as error:
         memory_error = error
@@ -422,6 +427,85 @@ def _target_readiness(reviews):
         "target_reconciliation_required": bool(reviews),
         "target_hard_blocker_count": len(hard_blockers),
     }
+
+
+def _freeze_confirmed_input_recovery(step, timeline_state, evidence_graph):
+    step = dict(step or {})
+    state = dict(timeline_state or {})
+    graph_actions = {
+        str(action.get("action_id") or ""): dict(action or {})
+        for action in (evidence_graph or {}).get("actions") or ()
+        if isinstance(action, dict) and action.get("action_id")
+    }
+    result = []
+    for raw_candidate in (
+            state.get("confirmed_keyboard_input_exclusions") or ()
+    ):
+        candidate = dict(raw_candidate or {})
+        literal = str(candidate.get("excluded_input_text") or "")
+        target_action_id = str(candidate.get("target_action_id") or "")
+        target = graph_actions.get(target_action_id) or {}
+        target_value = dict(target.get("target") or {})
+        reason = None
+        if candidate.get("status") != "pending_target_validation":
+            reason = str(candidate.get("reason") or "target_unavailable")
+        elif not literal or literal not in str(step.get("text") or ""):
+            reason = "literal_not_declared"
+        elif target.get("type") not in {"click", "focus"}:
+            reason = "target_action_unavailable"
+        elif target_value.get("locator_validation") != "unique_target_match":
+            reason = "target_not_unique"
+        elif not target_value.get("locator_candidate_id"):
+            reason = "target_candidate_missing"
+        elif _recovery_target_identity(target_value) != candidate.get(
+                "target_identity"
+        ):
+            reason = "target_identity_changed"
+        frozen = {
+            "candidate_id": str(candidate.get("candidate_id") or ""),
+            "status": "eligible" if reason is None else "unavailable",
+            "reason": reason,
+            "step_id": str(step.get("id") or ""),
+            "confirmed_edit_id": str(
+                candidate.get("confirmed_edit_id") or ""
+            ),
+            "excluded_action_id": str(
+                candidate.get("excluded_action_id") or ""
+            ),
+            "excluded_event_ids": list(
+                candidate.get("excluded_event_ids") or ()
+            ),
+            "literal": literal or None,
+            "value_reference": "step_text" if literal else None,
+            "target_action_id": target_action_id or None,
+            "target_fingerprint": target_value.get("target_fingerprint"),
+            "locator_name": target_value.get("locator_name"),
+            "locator_candidate_id": target_value.get("locator_candidate_id"),
+        }
+        result.append({
+            key: value
+            for key, value in frozen.items()
+            if value not in (None, "", [], {})
+        })
+    return result
+
+
+def _recovery_target_identity(target):
+    target = dict(target or {})
+    element = target.get("element") or {}
+    root_name = str(target.get("root_name") or "")
+    process_id = element.get("process_id")
+    handle = element.get("handle")
+    runtime_id = list(element.get("runtime_id") or ())
+    if root_name and process_id and handle:
+        return {
+            "root_name": root_name,
+            "process_id": int(process_id),
+            "handle": int(handle),
+        }
+    if root_name and runtime_id:
+        return {"root_name": root_name, "runtime_id": runtime_id}
+    return None
 
 
 def _specification_fingerprint(feature, scenario, steps):

@@ -47,10 +47,10 @@ def validate_ai_bundle(session_dir):
 
     manifest = _read_json(session_dir / "manifest.json", errors)
     context = _read_json(session_dir / "ai" / "context.json", errors)
-    if manifest.get("schema_version") == "2.0":
-        target_index = {}
-    else:
-        target_index = _read_json(session_dir / "ai" / "target-index.json", errors)
+    target_index = _read_json(
+        session_dir / "ai" / "target-index.json",
+        errors,
+    )
     contract = _read_json(session_dir / "ai" / "generation-contract.json", errors)
     locator_drafts = _read_yaml(session_dir / "ai" / "locator-drafts.yaml", errors)
     versioned_values = [
@@ -166,22 +166,21 @@ def validate_ai_bundle(session_dir):
                 continue
             if not (session_dir / relative_path).exists():
                 errors.append(f"artifact 文件不存在: {relative_path}")
-        if manifest.get("schema_version") != "2.0":
-            for key in (
-                "actions_auto",
-                "actions_effective",
-                "timeline_state",
-                "locator_candidates_auto",
-                "locator_candidates_effective",
-            ):
-                relative_path = artifacts.get(key)
-                if not relative_path:
-                    errors.append(
-                        f"2.1 完成 Step 缺少 artifact 索引: "
-                        f"step={step.get('step', {}).get('id')}, key={key}"
-                    )
-                elif not (session_dir / relative_path).exists():
-                    errors.append(f"artifact 文件不存在: {relative_path}")
+        for key in (
+            "actions_auto",
+            "actions_effective",
+            "timeline_state",
+            "locator_candidates_auto",
+            "locator_candidates_effective",
+        ):
+            relative_path = artifacts.get(key)
+            if not relative_path:
+                errors.append(
+                    f"2.1 完成 Step 缺少 artifact 索引: "
+                    f"step={step.get('step', {}).get('id')}, key={key}"
+                )
+            elif not (session_dir / relative_path).exists():
+                errors.append(f"artifact 文件不存在: {relative_path}")
 
         media_path = artifacts.get("media_index")
         if media_path and (session_dir / media_path).exists():
@@ -363,27 +362,20 @@ def _review_step_semantics(
     _validate_window_evidence(take_dir, take, errors)
     projection_store = ProjectionStore(take_dir)
     projection = projection_store.current()
-    effective_actions_path = projection_store.artifact_path(
-        "actions_effective",
-        legacy=("actions.effective.json", "actions.json"),
-        snapshot=projection,
-    )
+    if projection is None:
+        errors.append(
+            f"Take 缺少有效 Projection 5.7: {take_path}；"
+            "旧 Run 需要使用旧版本或独立离线迁移工具"
+        )
+        return
+    effective_actions_path = projection.path("actions_effective")
     actions_data = _read_json(effective_actions_path, errors)
     tree_diff = _read_json(take_dir / "ui" / "tree-diff.json", errors)
-    effective_locator_path = projection_store.artifact_path(
-        "locator_candidates_effective",
-        legacy=(
-            "locator-candidates.effective.yaml",
-            "locator-candidates.yaml",
-        ),
-        snapshot=projection,
+    effective_locator_path = projection.path(
+        "locator_candidates_effective"
     )
     locator_bundle = _read_yaml(effective_locator_path, errors)
-    effective_events_path = projection_store.artifact_path(
-        "events_effective",
-        legacy=("events.effective.jsonl", "events.jsonl"),
-        snapshot=projection,
-    )
+    effective_events_path = projection.path("events_effective")
     events = _read_jsonl(effective_events_path, errors)
     event_map = {event.get("id"): event for event in events}
     target_map = {

@@ -121,7 +121,7 @@ class TimelineEditorWindow:
         self.pending_supplement_before_action_id = None
         self.timeline_revision = None
         self.review_action_map = {}
-        self.keyboard_fragment_rows = {}
+        self.keyboard_event_rows = {}
         self.busy = False
         self.closed = False
         self.mutation_controls = []
@@ -151,6 +151,9 @@ class TimelineEditorWindow:
             f"timeline:{id(self)}:observation:"
         )
         self.observation_poll_after_id = None
+        self.preview_operation_key = f"timeline:{id(self)}:preview"
+        self.preview_poll_after_id = None
+        self.preview_sequence = 0
 
         self._build_ui()
         self.refresh(notify=False)
@@ -462,26 +465,31 @@ class TimelineEditorWindow:
             command=self.ignore_selected_observation,
         ).pack(side="left", padx=6)
 
-    def _toggle_keyboard_fragment(self, fragment):
-        action = self.current_action or {}
-        action_id = action.get("id")
-        key_event_ids = fragment.get("key_event_ids") or ()
-        if not action_id or not key_event_ids:
-            self.status_var.set("当前键盘片段无可校正的原始事件。")
+    def _toggle_keyboard_event(
+            self,
+            keyboard_event,
+            *,
+            action_id=None,
+            event_row_id=None,
+        ):
+        action_id = action_id or (self.current_action or {}).get("id")
+        event_id = str(keyboard_event.get("event_id") or "")
+        if not action_id or not event_id:
+            self.status_var.set("当前键盘操作无可校正的原始事件。")
             return
-        include = not bool(fragment.get("included"))
+        include = not bool(keyboard_event.get("included"))
         self._apply(
-            lambda store, _ids: store.set_keyboard_fragment_included(
+            lambda store, _ids: store.set_keyboard_event_included(
                 action_id,
-                key_event_ids,
+                event_id,
                 include,
             ),
             [],
-            select_ids=[action_id],
+            select_ids=[event_row_id or action_id],
             completion_message=(
-                "已恢复键盘片段。"
+                "已恢复键盘事件。"
                 if include
-                else "已忽略键盘片段；原始录制仍然保留。"
+                else "已忽略键盘事件；原始录制仍然保留。"
             ),
         )
 
@@ -826,6 +834,7 @@ class TimelineEditorWindow:
             state=None,
             media_bundle=None,
         ):
+        tree_view = self._capture_tree_view_state()
         state = state or self.store.materialize()
         self.timeline_revision = state.get("timeline_revision")
         self.review_action_map = {
@@ -833,8 +842,8 @@ class TimelineEditorWindow:
             for action in state.get("actions", [])
             if action.get("id")
         }
-        self.keyboard_fragment_rows = {}
-        current_selection = set(select_ids or self.tree.selection())
+        self.keyboard_event_rows = {}
+        current_selection = set(select_ids or tree_view["selection"])
         self.tree.delete(*self.tree.get_children())
         for action in state.get("actions", []):
             action_id = action["id"]
@@ -850,7 +859,7 @@ class TimelineEditorWindow:
                 "end",
                 iid=action_id,
                 tags=tags,
-                open=False,
+                open=action_id in tree_view["expanded"],
                 values=(
                     "✓" if action.get("included", True) else "×",
                     action.get("ordinal"),
@@ -858,23 +867,22 @@ class TimelineEditorWindow:
                 ),
             )
             if action.get("type") == "keyboard":
-                for index, fragment in enumerate(
-                        self.store.keyboard_fragments(action_id),
-                        start=1,
-                ):
-                    fragment_id = f"{action_id}:key:{index}"
-                    self.keyboard_fragment_rows[fragment_id] = {
+                for keyboard_event in self.store.keyboard_events(action_id):
+                    event_row_id = (
+                        f"{action_id}:event:{keyboard_event['event_id']}"
+                    )
+                    self.keyboard_event_rows[event_row_id] = {
                         "action_id": action_id,
-                        "fragment": fragment,
+                        "event": keyboard_event,
                     }
                     self.tree.insert(
                         action_id,
                         "end",
-                        iid=fragment_id,
+                        iid=event_row_id,
                         values=(
-                            "✓" if fragment.get("included") else "×",
+                            "✓" if keyboard_event.get("included") else "×",
                             "",
-                            _keyboard_fragment_label(fragment),
+                            _keyboard_event_label(keyboard_event),
                         ),
                     )
         existing = [action_id for action_id in current_selection if self.tree.exists(action_id)]
@@ -882,6 +890,7 @@ class TimelineEditorWindow:
             self.tree.selection_set(existing)
         elif self.tree.get_children():
             self.tree.selection_set(self.tree.get_children()[0])
+        self._restore_tree_view_state(tree_view, existing)
         self.undo_button.configure(state="normal" if state.get("can_undo") else "disabled")
         self.redo_button.configure(state="normal" if state.get("can_redo") else "disabled")
         if media_bundle is not None:
@@ -892,6 +901,32 @@ class TimelineEditorWindow:
             self._reload_media()
         self._on_selection()
         self._refresh_observations()
+
+    def _capture_tree_view_state(self):
+        expanded = {
+            item
+            for item in self.tree.get_children()
+            if bool(self.tree.item(item, "open"))
+        }
+        yview = self.tree.yview()
+        return {
+            "expanded": expanded,
+            "selection": tuple(self.tree.selection()),
+            "focus": self.tree.focus(),
+            "yview": yview[0] if yview else 0.0,
+        }
+
+    def _restore_tree_view_state(self, tree_view, selected):
+        focus = tree_view.get("focus")
+        if focus and self.tree.exists(focus):
+            self.tree.focus(focus)
+        elif selected:
+            self.tree.focus(selected[0])
+        try:
+            self.tree.yview_moveto(float(tree_view.get("yview") or 0.0))
+        except tk.TclError:
+            pass
+
     def _selected_ids(self):
         action_ids = list(self.tree.selection())
         if not action_ids:
@@ -913,9 +948,13 @@ class TimelineEditorWindow:
         if len(action_ids) != 1:
             self.status_var.set("忽略或恢复时请只选择一个动作。")
             return
-        fragment = self.keyboard_fragment_rows.get(action_ids[0])
-        if fragment is not None:
-            self._toggle_keyboard_fragment(fragment["fragment"])
+        keyboard_event = self.keyboard_event_rows.get(action_ids[0])
+        if keyboard_event is not None:
+            self._toggle_keyboard_event(
+                keyboard_event["event"],
+                action_id=keyboard_event["action_id"],
+                event_row_id=action_ids[0],
+            )
             return
         action = self.review_action_map.get(action_ids[0]) or {}
         ignored = (
@@ -923,8 +962,29 @@ class TimelineEditorWindow:
             or (action.get("role") or "business") == "noise"
         )
         if not ignored:
+            if action.get("type") == "keyboard":
+                confirmed = messagebox.askyesno(
+                    "忽略整段输入",
+                    "这会移除整段键盘输入的有效证据。"
+                    "原始录制仍会保留，是否继续？",
+                    parent=self.window.winfo_toplevel(),
+                )
+                if not confirmed:
+                    self.status_var.set("已保留整段键盘输入。")
+                    return
+            if action.get("type") == "keyboard":
+                operation = lambda store, ids: store.apply_edit(
+                    "exclude",
+                    ids,
+                    {"confirmed_keyboard_exclusion": True},
+                )
+            else:
+                operation = lambda store, ids: store.apply_edit(
+                    "exclude",
+                    ids,
+                )
             self._apply(
-                lambda store, ids: store.apply_edit("exclude", ids),
+                operation,
                 action_ids,
                 completion_message="已忽略该动作；原始证据仍然保留。",
             )
@@ -948,9 +1008,10 @@ class TimelineEditorWindow:
         if self.busy:
             self.status_var.set("录制修改正在保存，请等待当前操作完成。")
             return "break"
-        fragment = self.keyboard_fragment_rows.get(action_id)
+        keyboard_event = self.keyboard_event_rows.get(action_id)
         action = self.review_action_map.get(
-            fragment["action_id"] if fragment is not None else action_id
+            keyboard_event["action_id"]
+            if keyboard_event is not None else action_id
         )
         if action is None:
             return "break"
@@ -1357,6 +1418,7 @@ class TimelineEditorWindow:
         if self.operations is not None:
             self.operations.abandon_prefix(self.mutation_operation_key)
             self.operations.abandon_prefix(self.observation_operation_prefix)
+            self.operations.abandon_prefix(self.preview_operation_key)
         supplement = self.supplement_window
         if supplement is not None and not supplement.closed:
             supplement.force_close()
@@ -1367,6 +1429,7 @@ class TimelineEditorWindow:
         for after_id in (
             self.mutation_poll_after_id,
             self.observation_poll_after_id,
+            self.preview_poll_after_id,
             self.busy_after_id,
         ):
             if after_id is None:
@@ -1377,21 +1440,27 @@ class TimelineEditorWindow:
                 pass
         self.mutation_poll_after_id = None
         self.observation_poll_after_id = None
+        self.preview_poll_after_id = None
         self.busy_after_id = None
 
     def _on_selection(self, event=None):
         selected = list(self.tree.selection())
         if not selected:
             return
-        fragment = self.keyboard_fragment_rows.get(selected[0])
+        keyboard_event = self.keyboard_event_rows.get(selected[0])
         action = self.review_action_map.get(
-            fragment["action_id"] if fragment is not None else selected[0]
+            keyboard_event["action_id"]
+            if keyboard_event is not None else selected[0]
         )
         if action is None:
             return
-        if fragment is not None:
+        if keyboard_event is not None:
             self.simple_ignore_button.configure(
-                text="恢复片段" if not fragment["fragment"].get("included") else "忽略片段",
+                text=(
+                    "恢复键盘事件"
+                    if not keyboard_event["event"].get("included")
+                    else "忽略键盘事件"
+                ),
                 state="normal",
             )
             self._show_action(action)
@@ -1505,6 +1574,21 @@ class TimelineEditorWindow:
         action_id = (self.current_action or {}).get("id") or "action"
         output = self.take_dir / "extracted_frames" / f"{action_id}-view.png"
         video_path = (media.get("video") or {}).get("path")
+        if self.operations is not None:
+            self.preview_sequence += 1
+            sequence = self.preview_sequence
+            self.status_var.set("正在提取动作视频帧...")
+            self.operations.submit(
+                self.preview_operation_key,
+                extract_video_frame,
+                self.take_dir,
+                video_ms=video_ms,
+                video_path=video_path,
+                output_path=output,
+                context={"sequence": sequence, "action_id": action_id},
+            )
+            self._schedule_preview_poll()
+            return
         try:
             frame = extract_video_frame(
                 self.take_dir,
@@ -1516,6 +1600,50 @@ class TimelineEditorWindow:
             self.status_var.set(f"已显示动作视频帧: {video_ms} ms")
         except Exception as error:
             self._clear_preview(f"抽取视频帧失败: {type(error).__name__}: {error}")
+
+    def _schedule_preview_poll(self):
+        if self.closed or self.preview_poll_after_id is not None:
+            return
+        self.preview_poll_after_id = self.window.after(
+            40,
+            self._poll_preview_result,
+        )
+
+    def _poll_preview_result(self):
+        self.preview_poll_after_id = None
+        if self.closed:
+            return
+        results = self.operations.drain(key=self.preview_operation_key)
+        if not results:
+            if self.operations.list_active(key=self.preview_operation_key):
+                self._schedule_preview_poll()
+            return
+        current_action_id = (self.current_action or {}).get("id") or ""
+        current_result = next((
+            result
+            for result in reversed(results)
+            if (
+                (result.context or {}).get("sequence")
+                == self.preview_sequence
+                and (result.context or {}).get("action_id")
+                == current_action_id
+            )
+        ), None)
+        if current_result is None:
+            if self.operations.list_active(key=self.preview_operation_key):
+                self._schedule_preview_poll()
+            return
+        if current_result.status != "completed" or current_result.error is not None:
+            error = current_result.error
+            self._clear_preview(
+                f"抽取视频帧失败: "
+                f"{type(error).__name__}: {error}"
+                if error is not None
+                else "任务未完成。"
+            )
+            return
+        self._show_image(current_result.value)
+        self.status_var.set("已显示动作视频帧。")
 
     def _clear_preview(self, text):
         self.photo = None
@@ -1683,36 +1811,11 @@ def _action_summary_label(action):
     return text
 
 
-def _keyboard_fragment_label(fragment):
-    key = (fragment or {}).get("key") or {}
+def _keyboard_event_label(keyboard_event):
+    key = (keyboard_event or {}).get("key") or {}
     name = str(key.get("name") or "")
-    return (
-        "输入 " + name
-        if (
-            len((fragment or {}).get("key_event_ids") or ()) > 1
-            or (len(name) == 1 and name.isprintable())
-        )
-        else _keyboard_key_label(name)
-    )
-
-
-def _keyboard_fragments(action):
-    keys = list((action or {}).get("keys") or ())
-    fragments = []
-    text = []
-    for item in keys:
-        name = str((item or {}).get("name") or "")
-        if len(name) == 1 and name.isprintable():
-            text.append(name)
-            continue
-        if text:
-            fragments.append("输入 " + "".join(text))
-            text = []
-        if name:
-            fragments.append(_keyboard_key_label(name))
-    if text:
-        fragments.append("输入 " + "".join(text))
-    return fragments or ["未记录可展示的键盘片段"]
+    event_type = str(keyboard_event.get("event_type") or "keyboard")
+    return f"{event_type} · {_keyboard_key_label(name)}"
 
 
 def _keyboard_key_label(name):

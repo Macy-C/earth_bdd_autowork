@@ -72,6 +72,7 @@ from autowork_core.utils.debug_tools.recorder.dto import (
     WorkspaceMaterializationDTO,
     WindowOwnershipSummaryDTO,
     WorkbenchDTO,
+    XPathTechnicalDetailDTO,
 )
 from autowork_core.utils.debug_tools.recorder.decision_pack import (
     load_decision_pack,
@@ -663,6 +664,7 @@ class RecorderQueryService:
             selected=take.get("id") == selected_take_id,
             timeline_revision=take.get("timeline_revision"),
             evidence_summary=_take_evidence_summary(directory_path),
+            xpath_details=_take_xpath_details(directory_path),
         )
 
     def _scenario_step_ids(self):
@@ -1052,6 +1054,60 @@ def _take_evidence_summary(directory_path):
     )
 
 
+def _take_xpath_details(directory_path):
+    if directory_path is None:
+        return ()
+    try:
+        graph = TakeQueryService(directory_path).evidence_graph()
+    except (OSError, ValueError):
+        return ()
+    result = []
+    for action in (graph or {}).get("actions") or ():
+        target = (action or {}).get("target") or {}
+        locator = target.get("locator") or {}
+        if str(locator.get("by") or "").casefold() != "xpath":
+            continue
+        xpath = str(locator.get("value") or "")
+        if not xpath:
+            continue
+        positional = bool(
+            target.get("locator_strategy") == "positional_fallback"
+            or target.get("positional_fallback") is True
+        )
+        unique = target.get("locator_validation") == "unique_target_match"
+        result.append(XPathTechnicalDetailDTO(
+            action_id=str(action.get("action_id") or ""),
+            ordinal=(
+                int(action["ordinal"])
+                if action.get("ordinal") is not None
+                else None
+            ),
+            locator_name=(
+                str(target.get("locator_name"))
+                if target.get("locator_name")
+                else None
+            ),
+            xpath=xpath,
+            validation=str(target.get("locator_validation") or "unvalidated"),
+            stability=str(
+                (target.get("locator_stability") or {}).get("status")
+                or "unknown"
+            ),
+            generation_status=(
+                "position_risk"
+                if positional
+                else "eligible"
+                if unique
+                else "not_eligible"
+            ),
+        ))
+    return tuple(sorted(result, key=lambda item: (
+        item.ordinal is None,
+        item.ordinal or 0,
+        item.action_id,
+    )))
+
+
 def _effective_readiness(readiness, ambiguity_projection):
     if not isinstance(ambiguity_projection, dict):
         return readiness
@@ -1428,7 +1484,6 @@ def _feedback_history(session_dir, request_id):
     try:
         events, _warnings = load_memory_events(
             find_recording_root(session_dir),
-            migrate=False,
         )
     except OSError:
         return ()
@@ -1512,6 +1567,8 @@ def _verification_summary(
         transaction_valid
         and result is not None
         and result_status in {"completed", "completed_no_changes"}
+        and getattr(result, "failure_category", None)
+        != "generated_with_issues"
         and result.stages is not None
         and result.stages.implementation.status == "passed"
         and result.stages.transaction.status == "passed"
@@ -2734,6 +2791,8 @@ def _job_result_label(status, category):
         return (
             "真实运行已验证"
             if category == "runtime_validated"
+            else "代码已生成，存在待处理项"
+            if category == "generated_with_issues"
             else "静态生成已完成"
         )
     return {
@@ -2809,7 +2868,7 @@ def _stage_transaction_status(report):
     if (
         (report.get("implementation_manifest") or {}).get(
             "implementation_manifest_version"
-        ) in {"1.6", "1.7"}
+        ) in {"1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12"}
         and (report.get("terminal_snapshot_audit") or {}).get("status")
         != "passed"
     ):

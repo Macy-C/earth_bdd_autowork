@@ -24,9 +24,8 @@ class TakeQueryService:
         media_path = resolve_take_artifact(
             self.take_dir,
             "media_index",
-            "media-index.json",
         )
-        return self._read_json_path(media_path)
+        return self._read_json_path(media_path) if media_path is not None else {}
 
     def media_bundle(self):
         return self.media_index(), load_action_media(self.take_dir)
@@ -40,17 +39,19 @@ class TakeQueryService:
         path = resolve_take_artifact(
             self.take_dir,
             "evidence_graph",
-            "evidence/graph.json",
         )
-        return self._read_json_path(path) if path.exists() else None
+        return (
+            self._read_json_path(path)
+            if path is not None and path.exists()
+            else None
+        )
 
     def effective_observation_events(self):
         path = resolve_take_artifact(
             self.take_dir,
             "events_effective",
-            "events.effective.jsonl",
         )
-        if not path.exists():
+        if path is None or not path.exists():
             return ()
         try:
             lines = path.read_text(encoding="utf-8").splitlines()

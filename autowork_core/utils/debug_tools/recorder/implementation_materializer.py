@@ -79,7 +79,19 @@ def materialize_implementation_scaffold(
         document = locator_documents[path]
         existing = document.get(key)
         if existing is not None and existing != patch:
-            raise ValueError(f"Locator patch conflicts with existing key: {path}:{key}")
+            enrich = (
+                task.get("operation") == "ensure_or_enrich"
+                and isinstance(existing, dict)
+                and all(patch.get(field) == value for field, value in existing.items())
+            )
+            refine_content = (
+                task.get("operation") == "ensure_or_refine_content"
+                and _is_content_identity_refinement(existing, patch)
+            )
+            if not enrich and not refine_content:
+                raise ValueError(
+                    f"Locator patch conflicts with existing key: {path}:{key}"
+                )
         document[key] = patch
 
     for path, document in locator_documents.items():
@@ -150,6 +162,16 @@ def materialize_implementation_scaffold(
         _seal_journal(journal)
         write_json_atomic(journal_path, journal)
     return audit
+
+
+def _is_content_identity_refinement(existing, patch):
+    if not isinstance(existing, dict) or not isinstance(patch, dict):
+        return False
+    removed = set(existing) - set(patch)
+    return bool(removed) and removed <= {"name", "title"} and all(
+        existing.get(field) == value
+        for field, value in patch.items()
+    )
 
 
 def system_materialization_matches(project_root, audit):

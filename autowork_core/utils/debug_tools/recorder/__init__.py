@@ -26,11 +26,6 @@ __all__ = [
 	"load_evidence_context",
 	"build_generation_brief",
 	"inspect_workflow",
-	"submit_generation_plan",
-	"prepare_generation",
-	"finish_generation",
-	"abort_generation",
-	"import_legacy_request",
 ]
 
 
@@ -87,30 +82,6 @@ def __getattr__(name):
 		)
 
 		return inspect_workflow
-	if name == "submit_generation_plan":
-		from autowork_core.utils.debug_tools.recorder.workflow_service import (
-			submit_generation_plan,
-		)
-
-		return submit_generation_plan
-	if name in ("prepare_generation", "finish_generation", "abort_generation"):
-		from autowork_core.utils.debug_tools.recorder.generation_workflow import (
-			abort_generation,
-			finish_generation,
-			prepare_generation,
-		)
-
-		return {
-			"abort_generation": abort_generation,
-			"prepare_generation": prepare_generation,
-			"finish_generation": finish_generation,
-		}[name]
-	if name == "import_legacy_request":
-		from autowork_core.utils.debug_tools.recorder.legacy_import import (
-			import_legacy_request,
-		)
-
-		return import_legacy_request
 	if name == "validate_ai_bundle":
 		from autowork_core.utils.debug_tools.recorder.bundle_validator import validate_ai_bundle
 

@@ -1,6 +1,7 @@
 import pyperclip
 from pywinauto.keyboard import SendKeys
 from autowork_core.actions.action_helper import _do_click, _is_coords_target
+from autowork_core.actions.element_actions import get_text
 from autowork_core.common.element_finder import get_element
 from autowork_core.common.log_helper import log_call
 
@@ -122,6 +123,54 @@ def send_text_keys(context, locator, keys, wait_type="enabled", wait_timeout=5, 
         except Exception:
             pass
     SendKeys(keys, with_spaces=True)
+
+
+def remove_text(context, locator, text, wait_type="enabled", wait_timeout=5, visual_timeout=10, entry_point=None):
+    entry_point = log_call(
+        entry_point,
+        locator=locator,
+        text=text,
+        wait_type=wait_type,
+        wait_timeout=wait_timeout,
+        visual_timeout=visual_timeout,
+    )
+    text = str(text)
+    if not text:
+        raise ValueError("remove_text待删除文本不能为空")
+    actual = str(get_text(
+        context,
+        locator,
+        timeout=wait_timeout,
+        entry_point=entry_point,
+    ))
+    count = actual.count(text)
+    if count != 1:
+        raise ValueError(
+            "remove_text要求待删除文本恰好出现一次: "
+            f"text={text!r}, count={count}, actual={actual!r}"
+        )
+    expected = actual.replace(text, "", 1)
+    input_text(
+        context,
+        locator,
+        expected,
+        wait_type=wait_type,
+        wait_timeout=wait_timeout,
+        visual_timeout=visual_timeout,
+        entry_point=entry_point,
+    )
+    observed = str(get_text(
+        context,
+        locator,
+        timeout=wait_timeout,
+        entry_point=entry_point,
+    ))
+    if observed != expected:
+        raise RuntimeError(
+            "remove_text最终状态不一致: "
+            f"expected={expected!r}, actual={observed!r}"
+        )
+    return expected
 #========================================== edit_box ===============================================
 
 

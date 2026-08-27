@@ -8,6 +8,28 @@ import win32gui
 import win32process
 
 
+MIN_RECORDABLE_WINDOW_EDGE = 16
+
+
+def is_recordable_window_handle(handle):
+    try:
+        handle = int(handle)
+    except (TypeError, ValueError):
+        return False
+    if not handle or not win32gui.IsWindow(handle):
+        return False
+    if not win32gui.IsWindowVisible(handle):
+        return False
+    try:
+        left, top, right, bottom = win32gui.GetWindowRect(handle)
+    except Exception:
+        return False
+    return (
+        int(right) - int(left) >= MIN_RECORDABLE_WINDOW_EDGE
+        and int(bottom) - int(top) >= MIN_RECORDABLE_WINDOW_EDGE
+    )
+
+
 def freeze_window_identity(window):
     value = {
         key: window.get(key)

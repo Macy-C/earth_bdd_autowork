@@ -42,6 +42,20 @@ VK_F8 = 0x77
 VK_F9 = 0x78
 
 
+def captured_xpath_status(xpath, *, point=None, tree_matched=False):
+    point_text = (
+        f" @ {point[0]},{point[1]}"
+        if point is not None
+        else ""
+    )
+    scope_text = "已匹配当前控件树" if tree_matched else "未匹配当前控件树"
+    return (
+        f"已捕获鼠标点控件{point_text}，{scope_text}；"
+        f"已复制待验证 XPath 建议: {xpath}。"
+        "该建议不等于可生成定位器，需在 Recorder 中完成唯一目标验证。"
+    )
+
+
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
@@ -454,9 +468,11 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.app.clipboard_append(xpath)
         self.last_xpath = None
 
-        point_text = f" @ {x},{y}" if x is not None and y is not None else ""
-        scope_text = "已匹配当前控件树" if tree_id else "未匹配当前控件树"
-        self.set_status(f"已捕获鼠标点控件{point_text}，{scope_text}，已复制 XPath: {xpath}")
+        self.set_status(captured_xpath_status(
+            xpath,
+            point=(x, y) if x is not None and y is not None else None,
+            tree_matched=bool(tree_id),
+        ))
 
     def clear_captured_tree_mark(self):
         if not self.captured_tree_id:

@@ -23,45 +23,6 @@ _PROFILE_DEFINITIONS = (
             "authority_change": "terminate_job",
         },
     },
-    {
-        "profile_id": "precision",
-        "label": "专心精确（已退役）",
-        "start_allowed": False,
-        "investigation_policy": "expanded_on_demand",
-        "user_interaction_policy": "frontloaded_only",
-        "repair_policy": {
-            "design": "progress_bounded_technical",
-            "implementation": "manifest_scoped",
-            "authority_change": "terminate_job",
-        },
-    },
-    {
-        "profile_id": "legacy_script_maintenance",
-        "label": "老脚本维护",
-        "start_allowed": False,
-        "investigation_policy": "not_implemented",
-        "user_interaction_policy": "frontloaded_only",
-        "repair_policy": {
-            "design": "not_implemented",
-            "implementation": "not_implemented",
-            "authority_change": "terminate_job",
-        },
-    },
-)
-
-_HISTORICAL_PROFILE_DEFINITIONS = (
-    {
-        "profile_id": "precision",
-        "label": "专心精确",
-        "start_allowed": True,
-        "investigation_policy": "expanded_on_demand",
-        "user_interaction_policy": "frontloaded_only",
-        "repair_policy": {
-            "design": "progress_bounded_technical",
-            "implementation": "manifest_scoped",
-            "authority_change": "terminate_job",
-        },
-    },
 )
 
 
@@ -101,11 +62,7 @@ def profile_lease_is_recognized(profile):
             return True
     except ValueError:
         return False
-    return any(
-        _profile_value(definition).get("profile_fingerprint") == fingerprint
-        for definition in _HISTORICAL_PROFILE_DEFINITIONS
-        if definition.get("profile_id") == profile_id
-    )
+    return False
 
 
 def project_generation_admission(

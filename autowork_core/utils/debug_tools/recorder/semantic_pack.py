@@ -16,20 +16,7 @@ from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
 SEMANTIC_PACK_VERSION = "6.1"
-SUPPORTED_SEMANTIC_PACK_VERSIONS = {
-    "5.0",
-    "5.1",
-    "5.2",
-    "5.3",
-    "5.4",
-    "5.5",
-    "5.6",
-    "5.7",
-    "5.8",
-    "5.9",
-    "6.0",
-    SEMANTIC_PACK_VERSION,
-}
+SUPPORTED_SEMANTIC_PACK_VERSIONS = {SEMANTIC_PACK_VERSION}
 ASSERTION_OPERATIONS = (
     "assert_collection_equal",
     "assert_ocr_contains",
@@ -72,7 +59,6 @@ def build_semantic_pack(
         step=None,
         observation_intents=None,
         annotation_model_version=None,
-        legacy_observation_notes=False,
         write_path=None,
     ):
     take_dir = Path(take_dir).resolve()
@@ -172,8 +158,6 @@ def build_semantic_pack(
         role_candidates.append(roles)
         if action.get("type") == "observe" or action.get("role") == "assertion":
             observation_intent = intent_map.get(action_id)
-            if observation_intent is None and legacy_observation_notes:
-                observation_intent = _legacy_observation_intent(action)
             neutral_observation = _is_neutral_observation_intent(
                 observation_intent
             )
@@ -326,7 +310,6 @@ def build_semantic_pack(
         "structured_observations": structured_observations,
         "observation_intents": typed_intents,
         "annotation_model_version": annotation_model_version,
-        "legacy_observation_notes": bool(legacy_observation_notes),
         "unresolved_decisions": unresolved,
         "policy": {
             "raw_evidence_immutable": True,
@@ -1312,10 +1295,7 @@ def _declared_assertion_expectations(
         ])
     if source_kind == "observed_state":
         return _dedupe_expectations(expectations)
-    declared_parts = [str(step.get("text") or "")]
-    if (observation_intent or {}).get("authority") == "legacy_migrated":
-        declared_parts.append(str(action.get("note") or ""))
-    declared_text = " ".join(declared_parts)
+    declared_text = str(step.get("text") or "")
     example_values = scenario.get("example_values") or {}
     example_keys = _step_example_keys(step, scenario)
     matches = [
@@ -1610,21 +1590,6 @@ def _filter_assertion_candidates(candidates, observation_intent):
             }
         ]
     return []
-
-
-def _legacy_observation_intent(action):
-    note = " ".join(str(action.get("note") or "").casefold().split())
-    if "window title" not in note or "contains" not in note:
-        return None
-    return {
-        "annotation_type": "observation_intent",
-        "authority": "legacy_migrated",
-        "focus": "window_title",
-        "relation": "contains",
-        "expected_source": {"kind": "auto", "reference": None},
-        "property_name": None,
-        "business_meaning": "",
-    }
 
 
 def _binding_candidates(action, events, step, scenario):

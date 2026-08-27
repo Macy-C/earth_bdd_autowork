@@ -16,10 +16,9 @@ from autowork_core.utils.debug_tools.recorder.identity import (
 )
 
 
-IMPLEMENTATION_MANIFEST_VERSION = "1.7"
+IMPLEMENTATION_MANIFEST_VERSION = "1.12"
 IMPLEMENTATION_PACKET_VERSION = "1.2"
 READABLE_IMPLEMENTATION_MANIFEST_VERSIONS = {
-    "1.6",
     IMPLEMENTATION_MANIFEST_VERSION,
 }
 
@@ -73,7 +72,9 @@ def compact_implementation_manifest_contract():
             "Prepare rejects symbolic links in generation roots or guarded project paths; snapshots never follow link targets.",
             "Every Step exposes its exact decorator keyword, template pattern, and function parameters; Scenario Outline inputs bind to those parameters.",
             "Every named operation target exposes one strict $loc: runtime reference; bare locator names are not implementation arguments.",
-            "Text-content read and assertion locators omit dynamic name/title values while retaining frozen structural identity such as AutoId, control type, and Root.",
+            "Window Root locators preserve only criteria explicitly frozen in root_criteria; observed runtime titles are evidence and are never promoted automatically into title/title_re locator constraints.",
+            "A top-level Root patch may enrich an existing system-owned mapping only when every existing field already equals the frozen patch; ordinary locator patches remain exact ensure operations.",
+            "Text-content read, removal, and assertion locators omit dynamic name/title values while retaining frozen structural identity such as AutoId, control type, and Root; materialization may only remove those two fields from an otherwise identical mapping.",
             "A read-only locator key requires a content-addressed locator/window-root candidate; Page method string references do not prove YAML key existence.",
             "Exact Page method reuse binds the frozen linear call sequence and verifies the Step method call plus its frozen arguments; modify/create remain writable body implementations.",
             "Manifest does not generate implementation bodies or replace Plan-to-Code validation.",
@@ -323,7 +324,15 @@ def build_implementation_manifest(
                 "window_owner": route.get("owner_id"),
                 "view_owner": route.get("view_owner"),
                 "target_action_ids": route.get("action_ids") or [],
-                "operation": "ensure",
+                "operation": (
+                    "ensure_or_enrich"
+                    if str(locator.get("kind") or "") == "top_level"
+                    else "ensure_or_refine_content"
+                    if _has_text_content_operation(
+                        route.get("operations") or []
+                    )
+                    else "ensure"
+                ),
                 "patch": patch,
             }
             locator_tasks.append(task)
@@ -357,12 +366,20 @@ def build_implementation_manifest(
                 "owner": step.get("behavior_owner"),
                 "strategy": behavior.get("strategy"),
                 "candidate_id": behavior.get("candidate_id"),
+                "symbol": behavior.get("symbol"),
+                "step_decorator": behavior.get("step_decorator"),
+                "step_pattern": behavior.get("step_pattern"),
             },
             "page_object": step.get("page_object"),
             "locator_file": locator_file,
             "table_usage": step.get("table_usage"),
             "operations": operation_tasks,
             "locator_patch": locator_tasks,
+            "unresolved_issues": [
+                dict(item)
+                for item in step.get("unresolved_issues") or ()
+                if isinstance(item, dict)
+            ],
         })
 
     for authorization in plan.get("pic_authorizations") or ():
@@ -596,6 +613,28 @@ def build_implementation_packet(manifest):
             "function_parameters": definition.get("function_parameters") or [],
             "page": page,
             "operations": operations,
+            "unresolved_issues": list(
+                step.get("unresolved_issues") or ()
+            ),
+            "issue_template": (
+                {
+                    "import": (
+                        "from autowork_core.runtime.generation_issue import "
+                        "unresolved_generation_issue"
+                    ),
+                    "call": "unresolved_generation_issue",
+                    "arguments": [
+                        {
+                            "issue_id": issue.get("issue_id"),
+                            "step_id": issue.get("step_id"),
+                            "issue_type": issue.get("issue_type"),
+                        }
+                        for issue in step.get("unresolved_issues") or ()
+                    ],
+                }
+                if step.get("unresolved_issues")
+                else None
+            ),
         })
     return {
         "implementation_packet_version": IMPLEMENTATION_PACKET_VERSION,
@@ -1333,7 +1372,7 @@ def _locator_patch(
             ) or ()
             if str(item.get("root_name") or "") == root_name
         ), {})
-        patch = dict(window.get("root_criteria") or {})
+        patch = _window_root_patch(window)
         patch["top_level"] = True
         return patch
     action = next((
@@ -1411,11 +1450,17 @@ def _locator_patch(
     return patch
 
 
+def _window_root_patch(window):
+    return dict((window or {}).get("root_criteria") or {})
+
+
 def _locator_content_is_observed(target, operations):
-    if str(target.get("control_type") or "").casefold() not in {
-            "text",
-            "static",
-    }:
+    control_type = str(
+        target.get("control_type") or ""
+    ).casefold()
+    if control_type in {"edit", "document"}:
+        return _has_text_content_operation(operations)
+    if control_type not in {"text", "static"}:
         return False
     for operation in operations:
         if not isinstance(operation, dict):
@@ -1446,6 +1491,21 @@ def _locator_content_is_observed(target, operations):
         ):
             return True
     return False
+
+
+def _has_text_content_operation(operations):
+    return any(
+        isinstance(operation, dict)
+        and str(operation.get("op") or "") in {
+            "save_text",
+            "remove_text",
+            "assert_text_empty",
+            "assert_text_equal",
+            "assert_text_contains",
+            "assert_text_not_contains",
+        }
+        for operation in operations or ()
+    )
 
 
 def _package_markers(files, baseline):

@@ -27,10 +27,7 @@ from autowork_core.utils.debug_tools.recorder.query_service import (
     query_request_decision_media,
 )
 from autowork_core.utils.debug_tools.recorder.generation_transaction import (
-    abort_generation_transaction,
     TRANSACTION_VERSION,
-    finish_generation_transaction,
-    prepare_generation_transaction,
 )
 from autowork_core.utils.debug_tools.recorder.generation_contract import (
     compact_ai_capability_contract,
@@ -52,7 +49,9 @@ from autowork_core.utils.debug_tools.recorder.generation_job_service import (
     prepare_generation_job,
     compare_generation_job_takes,
     query_generation_job_action_knowledge,
+    query_generation_job_design_context,
     query_generation_job_evidence,
+    query_generation_job_implementation_packet,
     reconcile_generation_job_runtime,
     retire_generation_job,
     retry_generation_job,
@@ -81,10 +80,6 @@ from autowork_core.utils.debug_tools.recorder.technical_repair import (
 )
 from autowork_core.utils.debug_tools.recorder.workflow_service import (
     inspect_workflow,
-    submit_decision_answers,
-    submit_generation_design,
-    submit_generation_plan,
-    validate_generation_design,
 )
 from autowork_core.utils.debug_tools.recorder.workflow_state import (
     load_workflow_state,
@@ -556,47 +551,6 @@ def _session_artifact_path(session_dir, value):
     ).resolve()
 
 
-def prepare_generation(request_path, *, project_root=None):
-    return prepare_generation_transaction(
-        request_path,
-        project_root=project_root,
-    )
-
-
-def finish_generation(
-        report_path,
-        *,
-    changed_files=None,
-    derive_changed_files=False,
-        summary="",
-        project_root=None,
-):
-    return finish_generation_transaction(
-        report_path,
-        changed_files=changed_files,
-    derive_changed_files=derive_changed_files,
-        summary=summary,
-        project_root=project_root,
-    )
-
-
-def validate_implementation(report_path, *, project_root=None):
-    return finish_generation_transaction(
-        report_path,
-        derive_changed_files=True,
-        validate_only=True,
-        project_root=project_root,
-    )
-
-
-def abort_generation(report_path, *, reason, project_root=None):
-    return abort_generation_transaction(
-        report_path,
-        reason=reason,
-        project_root=project_root,
-    )
-
-
 def query_generation_plan(request_path, *, section=None, step_id=None):
     request_path = Path(request_path).resolve()
     request = _read_json(request_path)
@@ -897,22 +851,14 @@ def main(argv=None):
         "start-job,inspect-job,retry-job,retire-job,design-job,prepare-job,"
         "validate-job-implementation,finish-job,abort-job,"
         "reconcile-job-runtime,job-evidence,job-compare-takes,"
-        "job-action-knowledge,benchmark"
+        "job-action-knowledge,job-design-context,"
+        "job-implementation-packet,benchmark"
     )
     commands = parser.add_subparsers(
         dest="command",
         required=True,
         metavar="{" + visible_commands + "}",
     )
-
-    def hidden_command(name):
-        command = commands.add_parser(name)
-        commands._choices_actions = [
-            action
-            for action in commands._choices_actions
-            if action.dest != name
-        ]
-        return command
 
     inspect = commands.add_parser("inspect")
     inspect.add_argument("request_path")
@@ -1042,47 +988,16 @@ def main(argv=None):
     job_knowledge.add_argument("--action-id")
     job_knowledge.add_argument("--operation", action="append", default=[])
     job_knowledge.add_argument("--list", action="store_true")
-    prepare = hidden_command("prepare")
-    prepare.add_argument("request_path")
-    prepare.add_argument("--project-root")
-    finish = hidden_command("finish")
-    finish.add_argument("report_path")
-    finish.add_argument("--changed-file", action="append", default=[])
-    finish.add_argument("--summary", default="")
-    finish.add_argument("--project-root")
-    validate_implementation_command = hidden_command(
-        "validate-implementation"
+    job_design_context = commands.add_parser("job-design-context")
+    job_design_context.add_argument("job_path")
+    job_design_context.add_argument("--step-id")
+    job_implementation_packet = commands.add_parser(
+        "job-implementation-packet"
     )
-    validate_implementation_command.add_argument("report_path")
-    validate_implementation_command.add_argument("--project-root")
-    abort = hidden_command("abort")
-    abort.add_argument("report_path")
-    abort.add_argument("--reason", required=True)
-    abort.add_argument("--project-root")
-    adjust = hidden_command("adjust")
-    adjust.add_argument("request_path")
-    adjustment_input = adjust.add_mutually_exclusive_group(required=True)
-    adjustment_input.add_argument("--plan-json")
-    adjustment_input.add_argument("--plan-file")
-    adjust.add_argument("--note", default="")
-    design = hidden_command("design")
-    design.add_argument("request_path")
-    design_input = design.add_mutually_exclusive_group(required=True)
-    design_input.add_argument("--design-json")
-    design_input.add_argument("--design-file")
-    design.add_argument("--note", default="")
-    validate_design = hidden_command("validate-design")
-    validate_design.add_argument("request_path")
-    validate_design_input = validate_design.add_mutually_exclusive_group(
-        required=True
-    )
-    validate_design_input.add_argument("--design-json")
-    validate_design_input.add_argument("--design-file")
-    answer = hidden_command("answer")
-    answer.add_argument("request_path")
-    answer_input = answer.add_mutually_exclusive_group(required=True)
-    answer_input.add_argument("--answers-json")
-    answer_input.add_argument("--answers-file")
+    job_implementation_packet.add_argument("report_path")
+    packet_selector = job_implementation_packet.add_mutually_exclusive_group()
+    packet_selector.add_argument("--step-id")
+    packet_selector.add_argument("--path")
     benchmark = commands.add_parser("benchmark")
     benchmark.add_argument("request_path")
     args = parser.parse_args(argv)
@@ -1246,63 +1161,16 @@ def main(argv=None):
             operation_names=args.operation,
             list_only=args.list,
         )
-    elif args.command == "prepare":
-        request_path = Path(args.request_path).resolve()
-        request = _read_json(request_path)
-        session_dir = session_dir_for_request_path(request_path, request)
-        state = load_workflow_state(
-            session_dir,
-            request.get("request_id"),
+    elif args.command == "job-design-context":
+        result = query_generation_job_design_context(
+            args.job_path,
+            step_id=args.step_id,
         )
-        if not (
-            state.get("workflow_state_version") == "3.0"
-            and state.get("status") == "running"
-            and (state.get("active_transaction") or {}).get(
-                "transaction_id"
-            )
-        ):
-            result = _retired_request_mutation_result(
-                request,
-                "prepare",
-            )
-        else:
-            result = prepare_generation(
-                args.request_path,
-                project_root=args.project_root,
-            )
-    elif args.command == "finish":
-        result = finish_generation(
+    elif args.command == "job-implementation-packet":
+        result = query_generation_job_implementation_packet(
             args.report_path,
-            changed_files=(args.changed_file or None),
-            derive_changed_files=not bool(args.changed_file),
-            summary=args.summary,
-            project_root=args.project_root,
-        )
-    elif args.command == "validate-implementation":
-        result = validate_implementation(
-            args.report_path,
-            project_root=args.project_root,
-        )
-    elif args.command == "abort":
-        result = abort_generation(
-            args.report_path,
-            reason=args.reason,
-            project_root=args.project_root,
-        )
-    elif args.command == "adjust":
-        result = _retired_request_mutation_result(
-            _read_json(args.request_path),
-            "adjust",
-        )
-    elif args.command in {"design", "validate-design"}:
-        result = _retired_request_mutation_result(
-            _read_json(args.request_path),
-            args.command,
-        )
-    elif args.command == "answer":
-        result = _retired_request_mutation_result(
-            _read_json(args.request_path),
-            "answer",
+            step_id=args.step_id,
+            path=args.path,
         )
     else:
         request_path = Path(args.request_path).resolve()
@@ -1347,22 +1215,7 @@ def main(argv=None):
         "stale",
         "invalid",
         "rejected",
-        "retired_request_entrypoint",
     } else 1
-
-
-def _retired_request_mutation_result(request, command):
-    return {
-        "workflow_version": WORKFLOW_VERSION,
-        "status": "retired_request_entrypoint",
-        "next_action": "use_workbench_generation_job",
-        "request_id": (request or {}).get("request_id"),
-        "errors": [
-            "普通生成不再允许Request直通写入: "
-            f"command={command}; 请从Workbench完成业务确认并创建Generation Job"
-        ],
-        "warnings": [],
-    }
 
 
 def _project_cli_result(result, *, full=False):
@@ -1372,6 +1225,10 @@ def _project_cli_result(result, *, full=False):
         return _compact_job_inspect_result(result)
     if _is_job_evidence_result(result):
         return _compact_job_evidence_result(result)
+    if _is_job_design_context_result(result):
+        return _compact_job_design_context_result(result)
+    if _is_job_implementation_packet_result(result):
+        return _compact_job_implementation_packet_result(result)
     if _is_validate_job_result(result):
         return _compact_validate_job_result(result)
     if _is_prepare_job_result(result):
@@ -1411,6 +1268,8 @@ def _project_cli_result(result, *, full=False):
             "job_fingerprint",
             "generation_profile",
             "job_execution",
+            "job_transition",
+            "job_lifecycle_timing",
             "execution_boundary",
             "current_job",
             "last_job_result",
@@ -1502,6 +1361,24 @@ def _is_prepare_job_result(result):
     )
 
 
+def _is_job_design_context_result(result):
+    return bool(
+        isinstance(result, dict)
+        and result.get("generation_design_context_query_version")
+        and result.get("design_context")
+        and result.get("job_id")
+    )
+
+
+def _is_job_implementation_packet_result(result):
+    return bool(
+        isinstance(result, dict)
+        and result.get("implementation_packet_query_version")
+        and result.get("implementation_packet")
+        and result.get("transaction_id")
+    )
+
+
 def _is_validate_job_result(result):
     return bool(
         isinstance(result, dict)
@@ -1532,7 +1409,7 @@ def _compact_job_inspect_result(result):
     actions = brief.get("actions") or []
     owners = (brief.get("window_ownership") or {}).get("windows") or []
     execution = result.get("job_execution") or {}
-    return _public_cli_paths({
+    projected = {
         "transport_version": "1.0",
         "transport": "compact_job_inspect",
         "status": result.get("status"),
@@ -1547,6 +1424,10 @@ def _compact_job_inspect_result(result):
             key: execution.get(key)
             for key in ("phase", "epoch", "claim_id", "attempt_no")
         },
+        "job_transition": result.get("job_transition") or {},
+        "job_lifecycle_timing": _compact_job_lifecycle_timing(
+            result.get("job_lifecycle_timing")
+        ),
         "target": {
             "feature": (target.get("feature") or {}).get("name"),
             "scenario": scenario.get("name"),
@@ -1575,7 +1456,10 @@ def _compact_job_inspect_result(result):
         "errors": result.get("errors") or [],
         "warnings": result.get("warnings") or [],
         "full_output": "Pass --full to retrieve the unchanged full Job projection.",
-    })
+    }
+    if brief.get("generation_design_context_version"):
+        projected["design_context"] = brief
+    return _public_cli_paths(projected)
 
 
 def _compact_job_evidence_result(result):
@@ -1612,6 +1496,34 @@ def _compact_job_evidence_result(result):
     })
 
 
+def _compact_job_design_context_result(result):
+    return _public_cli_paths({
+        "transport_version": "1.0",
+        "transport": "compact_job_design_context",
+        "status": result.get("status"),
+        "request_id": result.get("request_id"),
+        "job_id": result.get("job_id"),
+        "job_transition": result.get("job_transition") or {},
+        "query": result.get("query") or {},
+        "design_context": result.get("design_context") or {},
+    })
+
+
+def _compact_job_implementation_packet_result(result):
+    return _public_cli_paths({
+        "transport_version": "1.0",
+        "transport": "compact_job_implementation_packet",
+        "status": result.get("status"),
+        "request_id": result.get("request_id"),
+        "job_id": result.get("job_id"),
+        "transaction_id": result.get("transaction_id"),
+        "report_path": result.get("report_path"),
+        "job_transition": result.get("job_transition") or {},
+        "query": result.get("query") or {},
+        "implementation_packet": result.get("implementation_packet") or {},
+    })
+
+
 def _compact_prepare_job_result(result):
     materialization = result.get("system_materialization") or {}
     packet = result.get("implementation_packet") or {}
@@ -1644,6 +1556,14 @@ def _compact_prepare_job_result(result):
             "method_count": len(packet.get("methods") or []),
             "ai_editable_count": len(ai_editable_changes),
         },
+        **(
+            {"job_transition": result["job_transition"]}
+            if result.get("job_transition")
+            else {}
+        ),
+        "job_lifecycle_timing": _compact_job_lifecycle_timing(
+            result.get("job_lifecycle_timing")
+        ),
         "system_owned_files": materialization.get("system_owned_files") or [],
         "system_materialization_status": materialization.get("status"),
         "errors": result.get("errors") or [],
@@ -1673,6 +1593,14 @@ def _compact_validate_job_result(result):
             "warning_count": len(attempt.get("warnings") or []),
         },
         "ai_editable_changes": result.get("ai_editable_changes") or [],
+        **(
+            {"job_transition": result["job_transition"]}
+            if result.get("job_transition")
+            else {}
+        ),
+        "job_lifecycle_timing": _compact_job_lifecycle_timing(
+            result.get("job_lifecycle_timing")
+        ),
         "system_owned_files": materialization.get("system_owned_files") or [],
         "system_materialization_status": materialization.get("status"),
         "errors": result.get("errors") or attempt.get("errors") or [],
@@ -1699,6 +1627,14 @@ def _compact_finish_job_result(result):
         "static_status": execution.get("static_status"),
         "runtime_status": execution.get("runtime_status"),
         "terminal_snapshot_status": terminal.get("status"),
+        **(
+            {"job_transition": result["job_transition"]}
+            if result.get("job_transition")
+            else {}
+        ),
+        "job_lifecycle_timing": _compact_job_lifecycle_timing(
+            result.get("job_lifecycle_timing")
+        ),
         "errors": result.get("errors") or [],
         "warnings": result.get("warnings") or [],
         "full_output": "Pass --full to retrieve the complete terminal transaction report.",
@@ -1731,6 +1667,37 @@ def _compact_budget(value):
             "enforcement",
         )
         if key in value
+    }
+
+
+def _compact_job_lifecycle_timing(value):
+    if not isinstance(value, dict):
+        return {
+            "version": None,
+            "status": "unavailable",
+            "active_stage": None,
+            "segments": [],
+        }
+    active = value.get("active_stage") or {}
+    segments = [
+        {
+            key: item.get(key)
+            for key in (
+                "stage",
+                "started_at",
+                "finished_at",
+                "duration_ms",
+            )
+            if key in item
+        }
+        for item in value.get("segments") or ()
+        if isinstance(item, dict)
+    ]
+    return {
+        "version": value.get("job_lifecycle_timing_ledger_version"),
+        "status": value.get("status"),
+        "active_stage": active.get("name"),
+        "segments": segments,
     }
 
 

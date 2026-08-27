@@ -92,6 +92,18 @@ class RecorderReviewWindow:
             f"request:{session.run_id}:{uuid.uuid4().hex}:"
         )
         self.job_operation_key = f"{self.request_operation_prefix}job"
+        self.generation_command_operation_key = (
+            f"{self.request_operation_prefix}command"
+        )
+        self.generation_command_after_id = None
+        self.generation_command_sequence = 0
+        self.generation_command_running = False
+        self.model_refresh_operation_key = (
+            f"review-model:{session.run_id}:{uuid.uuid4().hex}"
+        )
+        self.model_refresh_poll_after_id = None
+        self.model_refresh_sequence = 0
+        self.model_refresh_running = False
         self.closed = False
         self.take_map = {}
         self.diagnostics = []
@@ -133,6 +145,9 @@ class RecorderReviewWindow:
         self.question_frame = None
         self.question_tree = None
         self.question_detail = None
+        self.xpath_details_frame = None
+        self.xpath_tree = None
+        self.xpath_detail = None
         self.question_image = None
         self.question_image_ref = None
         self.question_open_button = None
@@ -486,6 +501,55 @@ class RecorderReviewWindow:
             text="现场仅帮助理解问题；选择仍以真实业务规则为准。",
         ).pack(side="left", padx=10)
 
+        xpath_details = ttk.Frame(self.detail_notebook)
+        self.xpath_details_frame = xpath_details
+        xpath_details.rowconfigure(0, weight=1)
+        xpath_details.columnconfigure(0, weight=1)
+        self.xpath_tree = ttk.Treeview(
+            xpath_details,
+            columns=("action", "locator", "status"),
+            show="headings",
+            selectmode="browse",
+            height=5,
+        )
+        for column, label, width in (
+            ("action", "操作", 70),
+            ("locator", "定位名称", 180),
+            ("status", "生成状态", 220),
+        ):
+            self.xpath_tree.heading(column, text=label)
+            self.xpath_tree.column(
+                column,
+                width=width,
+                minwidth=60,
+                stretch=column != "action",
+            )
+        self.xpath_tree.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=8,
+            pady=(8, 4),
+        )
+        self.xpath_tree.bind(
+            "<<TreeviewSelect>>",
+            lambda event: self._show_selected_xpath_detail(),
+        )
+        self.xpath_detail = tk.Text(
+            xpath_details,
+            wrap="word",
+            height=8,
+            font=("Consolas", 9),
+        )
+        self.xpath_detail.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=8,
+            pady=(4, 8),
+        )
+        self.xpath_detail.configure(state="disabled")
+
         result = ttk.Frame(self.detail_notebook)
         self.result_frame = result
         self.detail_notebook.add(result, text="本次生成")
@@ -584,8 +648,12 @@ class RecorderReviewWindow:
         ).pack(fill="x", padx=12, pady=(0, 10))
 
     def refresh(self):
-        selected = self.selected_step_id()
-        self.model = self.query_service.get_workbench(selected)
+        self.status_var.set("正在加载当前录制与生成状态...")
+        self._reload_model()
+
+    def _apply_model(self, model, step_id):
+        selected = self.selected_step_id() or step_id
+        self.model = model
         self.tree.delete(*self.tree.get_children())
         for step in self.model.steps:
             selected_take = next(
@@ -625,7 +693,9 @@ class RecorderReviewWindow:
         self._sync_result_tabs()
         self._refresh_diagnostics()
         self._refresh_take_selector()
+        self._sync_xpath_technical_details()
         self._update_controls()
+        self._notify_context_change()
         self._restore_or_schedule_request()
 
     def _on_step_selected(self, event=None):
@@ -637,6 +707,7 @@ class RecorderReviewWindow:
         self._notify_context_change()
 
     def _on_take_selected(self, event=None):
+        self._sync_xpath_technical_details()
         self._update_controls()
         self._notify_context_change()
 
@@ -767,7 +838,7 @@ class RecorderReviewWindow:
             return
         self.last_request_path = None
         self.status_var.set("用于生成的录制版本已更新，正在更新 Copilot 任务。")
-        self.refresh()
+        self._reload_model()
         self._notify_context_change()
 
     def _notify_context_change(self):
@@ -858,7 +929,7 @@ class RecorderReviewWindow:
             readiness = mutation_result.get("readiness")
         else:
             readiness = self.session.refresh_after_timeline_edit(take_dir)
-        self.refresh()
+        self._reload_model()
         return readiness
 
     def _restore_or_schedule_request(self):
@@ -988,6 +1059,8 @@ class RecorderReviewWindow:
             self.request_refresh_after_id,
             self.request_refresh_poll_after_id,
             self.job_operation_after_id,
+            self.generation_command_after_id,
+            self.model_refresh_poll_after_id,
         ):
             if after_id is None:
                 continue
@@ -998,8 +1071,18 @@ class RecorderReviewWindow:
         self.request_refresh_after_id = None
         self.request_refresh_poll_after_id = None
         self.job_operation_after_id = None
+        self.generation_command_after_id = None
+        self.model_refresh_poll_after_id = None
         self.operations.abandon_prefix(
             self.request_operation_prefix,
+            wait=True,
+        )
+        self.operations.abandon_prefix(
+            self.generation_command_operation_key,
+            wait=True,
+        )
+        self.operations.abandon_prefix(
+            self.model_refresh_operation_key,
             wait=True,
         )
         if self._owns_operations:
@@ -1024,28 +1107,7 @@ class RecorderReviewWindow:
             )
             self.status_var.set(f"当前场景尚未完成：{labels}。")
             return
-        try:
-            request = self.request_service.ensure_latest(step_ids, repair=True)
-            self.last_request_path = (
-                self.session.session_dir / request["request_path"]
-            )
-            workflow = self.request_service.workflow_state(step_ids)
-            self._reload_model()
-        except Exception as error:
-            self.request_refresh_error = error
-            self.last_request_path = None
-            self.status_var.set(
-                f"准备 Copilot 任务失败: {type(error).__name__}: {error}"
-            )
-            self._update_controls()
-            return
-        self.request_refresh_error = None
-        status = _request_status_label(workflow)
-        self.status_var.set(
-            f"{self._scenario_scope_label()} Copilot 任务已准备"
-            f"（{status}，{len(step_ids)} 个 Step）: "
-            f"{self.last_request_path}"
-        )
+        self._schedule_request_refresh(step_ids, delay_ms=0)
         self._update_controls()
 
     def copy_generation_command(self):
@@ -1060,38 +1122,110 @@ class RecorderReviewWindow:
             )
             self.status_var.set(f"当前场景尚未完成：{labels}。")
             return
+        profile_var = getattr(self, "generation_profile_var", None)
+        profile_id = (
+            profile_var.get()
+            if profile_var is not None
+            else "generation_first"
+        )
+        self.generation_command_sequence += 1
+        sequence = self.generation_command_sequence
+        self.generation_command_running = True
         try:
-            profile_var = getattr(self, "generation_profile_var", None)
-            profile_id = (
-                profile_var.get()
-                if profile_var is not None
-                else "generation_first"
-            )
-            command = self.request_service.generation_command(
+            self.operations.submit(
+                self.generation_command_operation_key,
+                self._create_generation_command,
                 step_ids,
-                profile_id=profile_id,
+                profile_id,
+                context=(sequence, tuple(step_ids)),
             )
-            request = self.request_service.latest(step_ids)
         except Exception as error:
+            self.generation_command_running = False
             self.status_var.set(
                 f"准备 Copilot 任务失败: {type(error).__name__}: {error}"
             )
             return
+        self.status_var.set("正在准备 Copilot 任务...")
+        self._schedule_generation_command_poll()
+
+    def _create_generation_command(self, step_ids, profile_id):
+        command = self.request_service.generation_command(
+            step_ids,
+            profile_id=profile_id,
+        )
+        auto_repair = getattr(
+            self.request_service,
+            "last_auto_repair_audit",
+            None,
+        ) or {}
+        request = self.request_service.latest(step_ids)
+        return {
+            "command": command,
+            "request": request,
+            "auto_repair": auto_repair,
+        }
+
+    def _schedule_generation_command_poll(self):
+        if self.closed or self.generation_command_after_id is not None:
+            return
+        self.generation_command_after_id = self.window.after(
+            40,
+            self._poll_generation_command,
+        )
+
+    def _poll_generation_command(self):
+        self.generation_command_after_id = None
+        result = self.operations.next_result(
+            key=self.generation_command_operation_key,
+        )
+        if result is None:
+            if self.operations.list_active(
+                    key=self.generation_command_operation_key,
+            ):
+                self._schedule_generation_command_poll()
+            return
+        sequence, step_ids = result.context or (None, ())
+        is_current = all((
+            not self.closed,
+            sequence == self.generation_command_sequence,
+            tuple(step_ids) == self.scenario_step_ids(),
+        ))
+        self.generation_command_running = bool(self.operations.list_active(
+            key=self.generation_command_operation_key,
+        ))
+        if not is_current:
+            return
+        if result.status != "completed" or result.error is not None:
+            error = result.error
+            self.status_var.set(
+                f"准备 Copilot 任务失败: {type(error).__name__}: {error}"
+                if error is not None
+                else "准备 Copilot 任务未完成。"
+            )
+            self._update_controls()
+            return
+        value = result.value or {}
+        request = value.get("request") or {}
         self.last_request_path = (
             self.session.session_dir / request["request_path"]
-            if request is not None
+            if request.get("request_path")
             else None
         )
         self.parent.clipboard_clear()
-        self.parent.clipboard_append(command)
+        self.parent.clipboard_append(value.get("command") or "")
+        auto_repair = value.get("auto_repair") or {}
         self.status_var.set(
             f"已创建{self._scenario_scope_label()}的 Generation Job"
             f"（{len(step_ids)} 个 Step）；"
+            + (
+                f"已自动修复 {auto_repair.get('applied_count')} 项目标证据；"
+                if auto_repair.get("applied_count")
+                else ""
+            )
+            +
             "已复制 /recorder-generate Job 命令，粘贴到 Copilot Chat 即可继续。"
         )
         self._reload_model()
-        self._refresh_decision_questions()
-        self._update_controls()
 
     def run_recommended_action(self):
         model = getattr(self, "model", None)
@@ -1218,7 +1352,6 @@ class RecorderReviewWindow:
             return
         if result.status == "completed" and result.error is None:
             self._reload_model()
-            self._update_controls()
             self.status_var.set(
                 "已创建新的 Generation Job。"
                 if result.context == "retry"
@@ -1480,7 +1613,7 @@ class RecorderReviewWindow:
             return
         self.decision_selections = {}
         self.status_var.set("业务确认已提交，生成任务正在重新检查。")
-        self.refresh()
+        self._reload_model()
 
     def _render_question_media(self, question):
         self.question_image_ref = None
@@ -1674,6 +1807,59 @@ class RecorderReviewWindow:
             and question_frame is not None
         ):
             self.detail_notebook.select(question_frame)
+
+    def _sync_xpath_technical_details(self):
+        frame = getattr(self, "xpath_details_frame", None)
+        tree = getattr(self, "xpath_tree", None)
+        detail_widget = getattr(self, "xpath_detail", None)
+        if frame is None or tree is None or detail_widget is None:
+            return
+        take = self.selected_take_entry()
+        details = tuple(getattr(take, "xpath_details", ()) or ())
+        tree.delete(*tree.get_children())
+        for index, item in enumerate(details):
+            tree.insert(
+                "",
+                "end",
+                iid=f"xpath-detail-{index}",
+                values=(
+                    f"操作 {item.ordinal}" if item.ordinal is not None else "操作",
+                    item.locator_name or "未命名",
+                    _xpath_generation_status_label(item.generation_status),
+                ),
+            )
+        self._set_detail_tab_visible(
+            frame,
+            "技术详情",
+            bool(details),
+        )
+        if tree.get_children():
+            tree.selection_set(tree.get_children()[0])
+        self._show_selected_xpath_detail()
+
+    def _show_selected_xpath_detail(self):
+        tree = getattr(self, "xpath_tree", None)
+        detail_widget = getattr(self, "xpath_detail", None)
+        if tree is None or detail_widget is None:
+            return
+        take = self.selected_take_entry()
+        details = tuple(getattr(take, "xpath_details", ()) or ())
+        selected = tree.selection()
+        item = None
+        if selected:
+            try:
+                item = details[int(selected[0].rsplit("-", 1)[-1])]
+            except (IndexError, ValueError):
+                item = None
+        text = (
+            "当前录制版本没有 XPath 技术详情。"
+            if item is None
+            else _xpath_technical_detail_text(item)
+        )
+        detail_widget.configure(state="normal")
+        detail_widget.delete("1.0", "end")
+        detail_widget.insert("1.0", text)
+        detail_widget.configure(state="disabled")
 
     def _set_detail_tab_visible(self, frame, label, visible):
         frame_id = str(frame)
@@ -1901,20 +2087,76 @@ class RecorderReviewWindow:
             self._refresh_diagnostics()
 
     def _reload_model(self):
-        self.model = self.query_service.get_workbench(
-            self.selected_step_id()
+        if self.closed:
+            return
+        self.model_refresh_sequence += 1
+        sequence = self.model_refresh_sequence
+        step_id = self.selected_step_id()
+        self.model_refresh_running = True
+        self.operations.submit(
+            self.model_refresh_operation_key,
+            self._query_workbench_model,
+            self.query_service,
+            step_id,
+            context=(sequence, step_id),
+            pass_token=True,
         )
-        self.summary_var.set(
-            f"Feature: {self.model.feature_name}    "
-            f"Scenario: {self.model.scenario_name}    "
-            f"范围: {self.model.scope.label}"
+        self._schedule_model_refresh_poll()
+
+    @staticmethod
+    def _query_workbench_model(token, query_service, step_id):
+        token.raise_if_cancelled()
+        model = query_service.get_workbench(step_id)
+        token.raise_if_cancelled()
+        return model
+
+    def _schedule_model_refresh_poll(self):
+        if self.closed or self.model_refresh_poll_after_id is not None:
+            return
+        self.model_refresh_poll_after_id = self.window.after(
+            40,
+            self._poll_model_refresh_result,
         )
-        self.capture_summary_var.set(_capture_summary_text(self.model))
-        self.generation_summary_var.set(
-            _generation_summary_text(self.model.generation)
+
+    def _poll_model_refresh_result(self):
+        self.model_refresh_poll_after_id = None
+        result = self.operations.next_result(
+            key=self.model_refresh_operation_key,
         )
-        self._refresh_generation_result()
-        self._sync_result_tabs()
+        if result is None:
+            if self.operations.list_active(
+                    key=self.model_refresh_operation_key
+            ):
+                self._schedule_model_refresh_poll()
+            return
+        sequence, step_id = result.context or (None, None)
+        self.model_refresh_running = bool(self.operations.list_active(
+            key=self.model_refresh_operation_key,
+        ))
+        if all((
+                not self.closed,
+                sequence == self.model_refresh_sequence,
+                result.status == "completed",
+                result.error is None,
+        )):
+            self._apply_model(result.value, step_id)
+        elif all((
+                not self.closed,
+                sequence == self.model_refresh_sequence,
+                result.status not in {"cancelled", "superseded"},
+        )):
+            error = result.error or RuntimeError(
+                f"任务状态异常: {result.status}"
+            )
+            self.status_var.set(
+                "审阅状态更新失败: "
+                f"{type(error).__name__}: {error}"
+            )
+            self._update_controls()
+        if self.model_refresh_running or self.operations.has_results(
+                key=self.model_refresh_operation_key
+        ):
+            self._schedule_model_refresh_poll()
 
 
 def _status_label(status):
@@ -1947,6 +2189,23 @@ def _generation_status_label(status):
         "completed": "已完成",
         "failed": "生成未完成",
     }.get(str(status), str(status or "未知"))
+
+
+def _xpath_generation_status_label(status):
+    return {
+        "eligible": "已冻结唯一 XPath，可生成",
+        "position_risk": "位置 XPath 有风险，不能直接发布",
+        "not_eligible": "XPath 尚未通过唯一目标验证",
+    }.get(str(status), "XPath 状态未知")
+
+
+def _xpath_technical_detail_text(item):
+    return "\n".join((
+        f"XPath: {item.xpath}",
+        f"唯一性: {item.validation}",
+        f"稳定性: {item.stability}",
+        f"生成资格: {_xpath_generation_status_label(item.generation_status)}",
+    ))
 
 
 def _result_status_label(status):
@@ -2142,6 +2401,13 @@ def _generation_summary_text(generation):
         return "生成：缺少必要证据，请按右侧提示校正或补录"
     if generation.workflow_status == "stale":
         return "生成：录制已变化，正在自动准备最新任务"
+    result = getattr(generation, "result", None)
+    if (
+        result is not None
+        and getattr(result, "failure_category", None)
+        == "generated_with_issues"
+    ):
+        return "生成：代码已生成但存在待处理项；修复前禁止真实运行"
     history = getattr(generation, "job_history", ())
     feedback = getattr(generation, "feedback_history", ())
     history_text = f"；任务历史 {len(history)}" if history else ""

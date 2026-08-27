@@ -15,13 +15,17 @@ from autowork_core.utils.debug_tools.recorder.transaction_integrity import (
     transaction_result_fingerprint,
 )
 from autowork_core.utils.debug_tools.recorder.workflow_state import (
+    generation_job_lifecycle_timing_is_valid,
     load_workflow_state,
+    project_generation_job_lifecycle_timing,
     transition_generation_job,
+    unavailable_generation_job_lifecycle_timing,
 )
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-GENERATION_JOB_RESULT_VERSION = "1.0"
+GENERATION_JOB_RESULT_VERSION = "1.2"
+READABLE_GENERATION_JOB_RESULT_VERSIONS = {GENERATION_JOB_RESULT_VERSION}
 JOB_STAGE_NAMES = (
     "semantic_selection",
     "design",
@@ -69,6 +73,7 @@ def publish_static_job_outcome(
     runtime_status = (
         (report.get("execution_outcome") or {}).get("runtime_status")
     )
+    unresolved_issues = list(report.get("unresolved_issues") or ())
     if static_passed and runtime_status == "runtime_pending":
         return transition_generation_job(
             **transition_fields,
@@ -78,7 +83,9 @@ def publish_static_job_outcome(
 
     status = "completed" if static_passed else "failed"
     category = (
-        "static_validated"
+        "generated_with_issues"
+        if static_passed and unresolved_issues
+        else "static_validated"
         if static_passed
         else _static_failure_category(report)
     )
@@ -86,6 +93,11 @@ def publish_static_job_outcome(
         "review_generation_result"
         if static_passed
         else "review_generation_failure"
+    )
+    transition_time, lifecycle_timing = _terminal_lifecycle_timing(
+        state,
+        phase=status,
+        next_action=next_action,
     )
     result = build_generation_job_result(
         job,
@@ -98,6 +110,8 @@ def publish_static_job_outcome(
         ),
         stages=_static_stages(report, transaction_pointer),
         completed_at=report.get("completed_at"),
+        unresolved_issues=unresolved_issues,
+        job_lifecycle_timing=lifecycle_timing,
     )
     result_path, result = persist_generation_job_result(
         session_dir,
@@ -113,6 +127,8 @@ def publish_static_job_outcome(
         phase=status,
         next_action=next_action,
         result=pointer,
+        transitioned_at=transition_time,
+        job_lifecycle_timing=lifecycle_timing,
     )
 
 
@@ -201,6 +217,11 @@ def publish_runtime_job_outcome(
             "status": "passed" if status == "completed" else "failed",
             "owner": copy.deepcopy(oracle_owner),
         }
+    transition_time, lifecycle_timing = _terminal_lifecycle_timing(
+        state,
+        phase=status,
+        next_action=next_action,
+    )
     result = build_generation_job_result(
         job,
         status=status,
@@ -209,6 +230,7 @@ def publish_runtime_job_outcome(
         attempts=_job_attempts(state, transaction_pointer),
         stages=stages,
         completed_at=completed_at,
+        job_lifecycle_timing=lifecycle_timing,
     )
     result_path, result = persist_generation_job_result(
         session_dir,
@@ -231,6 +253,8 @@ def publish_runtime_job_outcome(
         next_action=next_action,
         result=pointer,
         clear_active_transaction=True,
+        transitioned_at=transition_time,
+        job_lifecycle_timing=lifecycle_timing,
     )
 
 
@@ -278,6 +302,11 @@ def publish_pretransaction_job_failure(
         "runtime": {"status": "not_evaluated", "owner": None},
         "oracle": {"status": "not_evaluated", "owner": None},
     }
+    transition_time, lifecycle_timing = _terminal_lifecycle_timing(
+        state,
+        phase="failed",
+        next_action=next_action,
+    )
     result = build_generation_job_result(
         job,
         status="failed",
@@ -285,6 +314,8 @@ def publish_pretransaction_job_failure(
         next_action=next_action,
         attempts=copy.deepcopy(state.get("attempt_history") or []),
         stages=stages,
+        completed_at=transition_time,
+        job_lifecycle_timing=lifecycle_timing,
     )
     path, result = persist_generation_job_result(session_dir, result)
     result_pointer = generation_job_result_pointer(
@@ -304,6 +335,8 @@ def publish_pretransaction_job_failure(
         next_action=next_action,
         result=result_pointer,
         clear_active_transaction=True,
+        transitioned_at=transition_time,
+        job_lifecycle_timing=lifecycle_timing,
     )
 
 
@@ -316,6 +349,8 @@ def build_generation_job_result(
         attempts,
         stages,
         completed_at=None,
+        unresolved_issues=(),
+        job_lifecycle_timing=None,
     ):
     if status not in {"completed", "failed"}:
         raise ValueError(f"无效 Generation Job result status: {status}")
@@ -326,6 +361,10 @@ def build_generation_job_result(
         })
         for name in JOB_STAGE_NAMES
     }
+    if job_lifecycle_timing is None:
+        job_lifecycle_timing = unavailable_generation_job_lifecycle_timing()
+    if not generation_job_lifecycle_timing_is_valid(job_lifecycle_timing):
+        raise ValueError("Generation Job Result lifecycle timing无效")
     value = {
         "schema_version": SCHEMA_VERSION,
         "generation_job_result_version": GENERATION_JOB_RESULT_VERSION,
@@ -348,6 +387,8 @@ def build_generation_job_result(
         "next_action": str(next_action),
         "attempts": copy.deepcopy(attempts or []),
         "stages": normalized_stages,
+        "unresolved_issues": copy.deepcopy(unresolved_issues or []),
+        "job_lifecycle_timing": copy.deepcopy(job_lifecycle_timing),
     }
     value["result_fingerprint"] = generation_job_result_fingerprint(value)
     value["result_id"] = f"job-result-{value['result_fingerprint'][:16]}"
@@ -432,14 +473,18 @@ def generation_job_result_identity_is_valid(value):
         return False
     stages = value.get("stages") or {}
     actual = generation_job_result_fingerprint(value)
+    lifecycle_valid = generation_job_lifecycle_timing_is_valid(
+        value.get("job_lifecycle_timing")
+    )
     return bool(
         value.get("generation_job_result_version")
-        == GENERATION_JOB_RESULT_VERSION
+        in READABLE_GENERATION_JOB_RESULT_VERSIONS
         and value.get("status") in {"completed", "failed"}
         and value.get("category")
         and value.get("next_action")
         and (value.get("job") or {}).get("job_id")
         and set(stages) == set(JOB_STAGE_NAMES)
+        and lifecycle_valid
         and value.get("result_fingerprint") == actual
         and value.get("result_id") == f"job-result-{actual[:16]}"
     )
@@ -492,6 +537,7 @@ def _transaction_owner_pointer(session_dir, report_path, report):
 
 def _static_stages(report, owner):
     passed = report.get("status") in {"completed", "completed_no_changes"}
+    has_issues = bool(report.get("unresolved_issues"))
     validation = report.get("implementation_validation_ledger") or {}
     implementation_status = (
         "passed" if validation.get("latest_status") == "valid" else "failed"
@@ -522,11 +568,23 @@ def _static_stages(report, owner):
             "owner": owner,
         },
         "runtime": {
-            "status": "not_required" if passed else "not_evaluated",
+            "status": (
+                "blocked"
+                if passed and has_issues
+                else "not_required"
+                if passed
+                else "not_evaluated"
+            ),
             "owner": None,
         },
         "oracle": {
-            "status": "not_required" if passed else "not_evaluated",
+            "status": (
+                "blocked"
+                if passed and has_issues
+                else "not_required"
+                if passed
+                else "not_evaluated"
+            ),
             "owner": None,
         },
     }
@@ -561,6 +619,17 @@ def _job_attempts(state, transaction_pointer):
     ):
         history.append(current)
     return history
+
+
+def _terminal_lifecycle_timing(state, *, phase, next_action):
+    transitioned_at = datetime.now().isoformat(timespec="milliseconds")
+    return transitioned_at, project_generation_job_lifecycle_timing(
+        (state or {}).get("job_execution") or {},
+        previous_next_action=(state or {}).get("next_action"),
+        phase=phase,
+        next_action=next_action,
+        transitioned_at=transitioned_at,
+    )
 
 
 def _result_path(session_dir, job_id, fingerprint):

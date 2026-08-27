@@ -16,10 +16,9 @@ from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
 DECISION_PACK_VERSION = "5.8"
-SUPPORTED_DECISION_PACK_VERSIONS = {"5.7", DECISION_PACK_VERSION}
+SUPPORTED_DECISION_PACK_VERSIONS = {DECISION_PACK_VERSION}
 ANSWER_VERSION = "5.1"
-LEGACY_ANSWER_VERSION = "5.0"
-SUPPORTED_ANSWER_VERSIONS = {LEGACY_ANSWER_VERSION, ANSWER_VERSION}
+SUPPORTED_ANSWER_VERSIONS = {ANSWER_VERSION}
 LEGACY_TECHNICAL_PATCH_KINDS = {
     "binding",
     "operation",
@@ -164,12 +163,9 @@ def decision_pack_pointer(session_dir, pack, path):
 def validate_answers(pack, answers, *, request=None):
     answers = dict(answers or {})
     errors = []
-    expected_answer_version = (
-        LEGACY_ANSWER_VERSION
-        if pack.get("decision_pack_version") == "5.7"
-        else ANSWER_VERSION
-    )
-    if answers.get("answer_version") != expected_answer_version:
+    if pack.get("decision_pack_version") != DECISION_PACK_VERSION:
+        errors.append("Decision Pack 版本无效")
+    if answers.get("answer_version") != ANSWER_VERSION:
         errors.append("answer_version 无效")
     if answers.get("pack_id") != pack.get("pack_id"):
         errors.append("答案不属于当前 Decision Pack")

@@ -70,7 +70,16 @@ class RootStore(dict):
 
     def __init__(self):
         super().__init__()
+        self._launch_handle_baseline: frozenset[int] | None = None
         super().__setitem__(self.LAST_ROOT_KEY, None)
+
+    def set_launch_handle_baseline(self, handles):
+        self._launch_handle_baseline = frozenset(
+            int(handle) for handle in handles
+        )
+
+    def launch_handle_baseline(self):
+        return self._launch_handle_baseline
 
     def __setitem__(self, key, value):
         super().__setitem__(self._key(key), value)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-AI_CAPABILITY_REGISTRY_VERSION = "1.4"
+AI_CAPABILITY_REGISTRY_VERSION = "1.5"
 _UNSET = object()
 _AI_EXCLUSION_POLICIES = frozenset({
     "direct_pic",
@@ -164,6 +164,20 @@ AI_CAPABILITIES = (
         use_when=("The business intent is a shortcut, navigation key, or incremental key sequence.",),
         avoid_when=("The business result is a final text value that input_text can set directly.",),
         alternatives=("input_text",),
+    ),
+    _capability(
+        "remove_text",
+        "interaction",
+        plan_enabled=True,
+        value_argument=(1, "data_or_name"),
+        table_value_argument=(1, "data_or_name"),
+        requires_value_action=True,
+        recorded_action_types=("keyboard",),
+        purpose="Remove one uniquely occurring business substring and verify the final value.",
+        use_when=("The business intent names text to delete from an editable value.",),
+        avoid_when=("The text is absent, occurs more than once, or caret movement itself is the business behavior.",),
+        alternatives=("input_text", "send_text_keys"),
+        required_control_types=("Edit", "Document"),
     ),
     _capability("clear_text", "interaction", plan_enabled=False),
     _capability(

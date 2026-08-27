@@ -115,7 +115,8 @@ def inspect_workflow(
     if request.get("request_version") != "3.0":
         status = "blocked"
         errors.append(
-            "旧请求不能进入 V3 运行时；请通过 legacy_import 物化新的 RequestV3"
+            "旧版 Request 不再支持；请从原始录制证据重新物化当前 RequestV3，"
+            "或通过 recording_portability 导入完整录制包"
         )
         brief = None
         current_revision = {}
@@ -369,26 +370,6 @@ def submit_decision_answers(request_path, answers):
     }
 
 
-def submit_generation_plan(
-    request_path,
-    plan,
-    *,
-    note="",
-    confirmation_source="user_adjustment",
-    plan_origin=None,
-):
-    return _submit_generation_input(
-        request_path,
-        plan,
-        input_kind="generation_intent",
-        input_version="1.0",
-        compiler=compile_generation_intent,
-        note=note,
-        confirmation_source=confirmation_source,
-        plan_origin=plan_origin,
-    )
-
-
 def submit_generation_design(
         request_path,
         design,
@@ -413,44 +394,6 @@ def submit_generation_design(
         generation_job_claim_id=generation_job_claim_id,
         generation_job_expected_epoch=generation_job_expected_epoch,
     )
-
-
-def validate_generation_design(request_path, design):
-    try:
-        prepared = _prepare_generation_input(
-            request_path,
-            design,
-            input_kind="generation_design",
-            input_version=GENERATION_DESIGN_VERSION,
-            compiler=compile_generation_design,
-            confirmation_source="ai_generated",
-            plan_origin="external_ai",
-            write=False,
-        )
-    except (OSError, TypeError, ValueError) as error:
-        message = str(error)
-        category = _validation_issue_category(message)
-        return {
-            "generation_design_validation_version": "1.0",
-            "status": "invalid",
-            "request_id": None,
-            "issues": [{
-                "stage": "design_compile",
-                "category": category,
-                "code": _validation_issue_code(message),
-                "message": message,
-                "ai_repairable": category == "technical",
-                "user_action_required": category != "technical",
-            }],
-            "compiled_plan": None,
-        }
-    return {
-        "generation_design_validation_version": "1.0",
-        "status": "valid",
-        "request_id": prepared["request"].get("request_id"),
-        "issues": [],
-        "compiled_plan": prepared["normalized"],
-    }
 
 
 def _submit_generation_input(
@@ -555,13 +498,11 @@ def _prepare_generation_input(
     if confirmation_source not in {
         "ai_generated",
         "user_adjustment",
-        "legacy_import",
     }:
         raise ValueError(f"无效 Plan 确认来源: {confirmation_source}")
     if plan_origin is None:
         plan_origin = {
             "user_adjustment": "human_authored",
-            "legacy_import": "legacy_import",
         }.get(confirmation_source)
     if confirmation_source == "ai_generated" and plan_origin is None:
         raise ValueError(

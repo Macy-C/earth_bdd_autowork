@@ -12,7 +12,6 @@ from autowork_core.utils.debug_tools.recorder.generation_contract import (
 )
 from autowork_core.utils.debug_tools.recorder.decision_pack import (
     ANSWER_VERSION,
-    LEGACY_ANSWER_VERSION,
     load_decision_pack,
 )
 from autowork_core.utils.debug_tools.recorder.generation_job_service import (
@@ -25,6 +24,9 @@ from autowork_core.utils.debug_tools.recorder.generation_job_service import (
 from autowork_core.utils.debug_tools.recorder.project_memory import (
     inspect_request_memory_freshness,
 )
+from autowork_core.utils.debug_tools.recorder.technical_repair import (
+    RequestTechnicalRepairService,
+)
 from autowork_core.utils.debug_tools.recorder.workflow_service import (
     inspect_workflow,
     submit_decision_answers,
@@ -36,12 +38,19 @@ from autowork_core.utils.debug_tools.recorder.workflow_state import (
 
 _SESSION_LOCKS = {}
 _SESSION_LOCKS_GUARD = threading.Lock()
+_AUTO_TARGET_REPAIR_CODES = frozenset({
+    "partial_action_envelope",
+    "locator_not_uniquely_validated",
+})
+_AUTO_TARGET_REPAIR_MAX_PASSES = 3
+_AUTO_TARGET_REPAIR_MAX_APPLIES = 8
 
 
 class GenerationRequestService:
     def __init__(self, session_dir):
         self.session_dir = Path(session_dir).resolve()
         self._lock = _session_lock(self.session_dir)
+        self.last_auto_repair_audit = None
 
     def latest(self, step_ids):
         with self._lock:
@@ -99,20 +108,127 @@ class GenerationRequestService:
             )
 
     def generation_job(self, step_ids, *, profile_id="generation_first"):
-        request = self.latest(step_ids)
-        if request is None:
-            request = self.ensure_latest(step_ids, repair=True)
-        path = request_repository.resolve_request_path(
-            self.session_dir,
-            request["request_path"],
-        )
-        result = admit_generation_job(path, profile_id=profile_id)
-        if result.get("status") == "rejected":
-            raise ValueError(
-                "生成前检查未通过: "
-                + ", ".join(result.get("errors") or [])
+        with self._lock:
+            step_ids = request_repository.normalize_step_ids(step_ids)
+            request = self.latest(step_ids)
+            if request is None:
+                request = self.ensure_latest(step_ids, repair=True)
+            request, audit = self._auto_repair_before_admission(
+                step_ids,
+                request,
             )
-        return result
+            self.last_auto_repair_audit = audit
+            path = request_repository.resolve_request_path(
+                self.session_dir,
+                request["request_path"],
+            )
+            result = admit_generation_job(path, profile_id=profile_id)
+            if result.get("status") == "rejected":
+                raise ValueError(
+                    "生成前检查未通过: "
+                    + ", ".join(result.get("errors") or [])
+                )
+            return {**result, "pre_admission_auto_repair": audit}
+
+    def _auto_repair_before_admission(self, step_ids, request):
+        audit = {
+            "status": "not_needed",
+            "initial_request_id": request.get("request_id"),
+            "final_request_id": request.get("request_id"),
+            "pass_count": 0,
+            "applied_count": 0,
+            "receipts": [],
+            "skipped": [],
+            "exhausted": False,
+        }
+        seen = set()
+        for pass_index in range(_AUTO_TARGET_REPAIR_MAX_PASSES):
+            state = load_workflow_state(
+                self.session_dir,
+                request.get("request_id"),
+            )
+            if state.get("current_job"):
+                audit["status"] = "skipped_current_job"
+                break
+            path = request_repository.resolve_request_path(
+                self.session_dir,
+                request["request_path"],
+            )
+            inspected, brief = inspect_workflow(
+                path,
+                write=True,
+                return_brief=True,
+            )
+            if brief is None or inspected.get("status") in {
+                "blocked",
+                "stale",
+            }:
+                audit["status"] = "skipped_unavailable_brief"
+                break
+            issues = _auto_target_repair_issues(brief)
+            if not issues:
+                audit["status"] = (
+                    "applied" if audit["applied_count"] else "not_needed"
+                )
+                break
+            audit["pass_count"] = pass_index + 1
+            progressed = False
+            repair_service = RequestTechnicalRepairService(path)
+            for issue in issues:
+                identity = (issue["step_id"], issue["action_id"])
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if audit["applied_count"] >= _AUTO_TARGET_REPAIR_MAX_APPLIES:
+                    audit["exhausted"] = True
+                    break
+                try:
+                    pack = repair_service.build_pack(
+                        step_id=issue["step_id"],
+                        action_id=issue["action_id"],
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError) as error:
+                    audit["skipped"].append({
+                        **issue,
+                        "reason": f"{type(error).__name__}: {error}",
+                    })
+                    continue
+                candidates = (
+                    ((pack.get("issues") or [{}])[0]).get("candidates")
+                    or []
+                )
+                if pack.get("route") != "auto_fix" or len(candidates) != 1:
+                    audit["skipped"].append({
+                        **issue,
+                        "reason": str(pack.get("route") or "unavailable"),
+                        "candidate_count": len(candidates),
+                    })
+                    continue
+                result = repair_service.apply_auto_fix(
+                    step_id=issue["step_id"],
+                    action_id=issue["action_id"],
+                )
+                receipt = result.get("receipt") or {}
+                audit["receipts"].append({
+                    "step_id": issue["step_id"],
+                    "action_id": issue["action_id"],
+                    "receipt_id": receipt.get("receipt_id"),
+                    "candidate_id": receipt.get("candidate_id"),
+                })
+                audit["applied_count"] += 1
+                request = self.ensure_latest(step_ids, repair=True)
+                audit["final_request_id"] = request.get("request_id")
+                progressed = True
+                break
+            if audit["exhausted"] or not progressed:
+                audit["status"] = (
+                    "exhausted" if audit["exhausted"] else "unresolved"
+                )
+                break
+        else:
+            audit["exhausted"] = True
+            audit["status"] = "exhausted"
+        return request, audit
 
     def generation_command(self, step_ids, *, profile_id="generation_first"):
         job = self.generation_job(step_ids, profile_id=profile_id)
@@ -188,13 +304,8 @@ class GenerationRequestService:
             missing = sorted(expected_ids - set(selections))
             if missing:
                 raise ValueError(f"阻塞业务问题尚未全部回答: {missing}")
-            answer_version = (
-                LEGACY_ANSWER_VERSION
-                if pack.get("decision_pack_version") == "5.7"
-                else ANSWER_VERSION
-            )
             return submit_decision_answers(path, {
-                "answer_version": answer_version,
+                "answer_version": ANSWER_VERSION,
                 "pack_id": pack.get("pack_id"),
                 "pack_fingerprint": pack.get("pack_fingerprint"),
                 "revision_seal": pack.get("revision_seal"),
@@ -240,6 +351,29 @@ def _session_lock(session_dir):
     key = str(Path(session_dir).resolve()).casefold()
     with _SESSION_LOCKS_GUARD:
         return _SESSION_LOCKS.setdefault(key, threading.RLock())
+
+
+def _auto_target_repair_issues(brief):
+    grouped = {}
+    for conflict in (brief or {}).get("conflicts") or ():
+        code = str((conflict or {}).get("code") or "")
+        step_id = str((conflict or {}).get("step_id") or "")
+        action_id = str((conflict or {}).get("action_id") or "")
+        if (
+            code not in _AUTO_TARGET_REPAIR_CODES
+            or not step_id
+            or not action_id
+        ):
+            continue
+        grouped.setdefault((step_id, action_id), set()).add(code)
+    return [
+        {
+            "step_id": step_id,
+            "action_id": action_id,
+            "codes": sorted(codes),
+        }
+        for (step_id, action_id), codes in sorted(grouped.items())
+    ]
 
 
 def _project_relative_job_path(session_dir, job_path):

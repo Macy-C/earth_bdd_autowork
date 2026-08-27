@@ -27,20 +27,7 @@ from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
 BRIEF_VERSION = "4.4"
-SUPPORTED_BRIEF_VERSIONS = {
-    "3.3",
-    "3.4",
-    "3.5",
-    "3.6",
-    "3.7",
-    "3.8",
-    "3.9",
-    "4.0",
-    "4.1",
-    "4.2",
-    "4.3",
-    BRIEF_VERSION,
-}
+SUPPORTED_BRIEF_VERSIONS = {BRIEF_VERSION}
 
 
 def review_source_id(review):
@@ -77,6 +64,31 @@ class ReconciliationRepository:
             "memory": self._load_memory_summary(request),
             "semantics": self._load_semantic_summary(request),
         }
+
+    @staticmethod
+    def input_recovery(request):
+        result = []
+        for evidence in request.get("evidence") or ():
+            step_id = str((evidence.get("step") or {}).get("id") or "")
+            for candidate in evidence.get("input_recovery") or ():
+                if not isinstance(candidate, dict):
+                    continue
+                value = dict(candidate)
+                if step_id and not value.get("step_id"):
+                    value["step_id"] = step_id
+                if str(value.get("step_id") or "") != step_id:
+                    raise ValueError(
+                        "input recovery candidate跨Step引用: "
+                        f"{value.get('step_id')} != {step_id}"
+                    )
+                result.append(value)
+        candidate_ids = [
+            str(item.get("candidate_id") or "")
+            for item in result
+        ]
+        if not all(candidate_ids) or len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("input recovery candidate ID缺失或冲突")
+        return result
 
     def write(self, request_id, reconciliation, brief):
         reconciliation_path = (
@@ -128,7 +140,9 @@ class ReconciliationRepository:
                 continue
             action_value = artifacts.get("actions_effective")
             if not action_value:
-                action_value = f"{take_value}/actions.effective.json"
+                raise ValueError(
+                    f"Step {step_id} 缺少 current actions_effective pointer"
+                )
             try:
                 value = json.loads(
                     resolve_session_path(

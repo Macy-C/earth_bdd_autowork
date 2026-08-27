@@ -12,7 +12,8 @@ from pathlib import Path
 import yaml
 
 from autowork_core.utils.debug_tools.recorder.code_reuse_index import (
-    step_pattern_matches,
+    candidate_step_pattern_contracts,
+    step_pattern_contract_matches,
 )
 
 from autowork_core.common.compile import (
@@ -380,7 +381,23 @@ def validate_plan_conformance(
         == "reuse"
         for step in plan.values()
     )
-    if not structured and not has_table_usage and not has_behavior_reuse:
+    has_behavior_modify = any(
+        isinstance(step, dict)
+        and (step.get("behavior_resolution") or {}).get("strategy")
+        == "modify"
+        for step in plan.values()
+    )
+    has_unresolved_issues = any(
+        isinstance(step, dict) and step.get("unresolved_issues")
+        for step in plan.values()
+    )
+    if (
+        not structured
+        and not has_table_usage
+        and not has_behavior_reuse
+        and not has_behavior_modify
+        and not has_unresolved_issues
+    ):
         return [], {
             "status": "not_applicable",
             "reason": f"No structured operations in GenerationPlanV{PLAN_VERSION}.",
@@ -547,6 +564,18 @@ def validate_plan_conformance(
         project_root,
         window_owners,
     )
+    issue_errors, issue_trace = _validate_issue_placeholders(
+        project_root,
+        plan,
+        request,
+        trees_by_path,
+    )
+    behavior_modify_errors = _validate_modified_step_behaviors(
+        project_root,
+        plan,
+        trees_by_path,
+        request,
+    )
     resolution_errors, resolution_warnings = (
         validate_owner_resolution_snapshot(
             project_root,
@@ -572,12 +601,15 @@ def validate_plan_conformance(
     )
     errors = [
         *syntax_errors,
+        *issue_errors,
+        *behavior_modify_errors,
         *ownership_errors,
         *resolution_errors,
         *implementation_errors,
     ]
     checked = []
     implementation_trace = []
+    implementation_trace.extend(issue_trace)
     matched_runtime_calls = Counter()
     changed_python_files = [
         _absolute(project_root, Path(path))
@@ -597,6 +629,8 @@ def validate_plan_conformance(
     ]
     for step_id, step in plan.items():
         if not isinstance(step, dict):
+            continue
+        if step.get("unresolved_issues"):
             continue
         declared_python = [
             _absolute(project_root, Path(path))
@@ -1122,7 +1156,7 @@ def validate_implementation_resolution_snapshot(
             elif not _step_candidate_matches_source(
                 path,
                 candidate,
-                (target_steps.get(str(step_id)) or {}).get("text"),
+                target_steps.get(str(step_id)) or {},
             ):
                 errors.append(
                     f"Step {step_id} behavior candidate {candidate_id} "
@@ -1164,8 +1198,12 @@ def validate_implementation_resolution_snapshot(
     return errors, warnings
 
 
-def _step_candidate_matches_source(path, candidate, step_text):
-    if path is None or not path.is_file() or not str(step_text or ""):
+def _step_candidate_matches_source(path, candidate, target_step):
+    if (
+        path is None
+        or not path.is_file()
+        or not str((target_step or {}).get("text") or "")
+    ):
         return False
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
@@ -1178,11 +1216,22 @@ def _step_candidate_matches_source(path, candidate, step_text):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name == symbol
     ]
+    matching_contracts = [
+        contract
+        for contract in candidate_step_pattern_contracts(candidate)
+        if step_pattern_contract_matches(contract, target_step)
+    ]
     return bool(
         len(functions) == 1
+        and len(matching_contracts) == 1
         and any(
-            step_pattern_matches(pattern, step_text)
-            for pattern in _gherkin_patterns(functions[0])
+            decorator_name(decorator.func)
+            == str(matching_contracts[0].get("decorator") or "").casefold()
+            and decorator_pattern(decorator)
+            == str(matching_contracts[0].get("pattern") or "")
+            for decorator in functions[0].decorator_list
+            if isinstance(decorator, ast.Call)
+            and decorator_name(decorator.func) in STEP_DECORATORS
         )
     )
 
@@ -2801,6 +2850,157 @@ def _matching_step_functions(tree, step_text):
                 matched.append(node)
                 break
     return matched
+
+
+def _validate_modified_step_behaviors(
+    project_root,
+    plan,
+    trees_by_path,
+    request,
+):
+    errors = []
+    for step_id, step in (plan or {}).items():
+        resolution = (step or {}).get("behavior_resolution") or {}
+        if resolution.get("strategy") != "modify":
+            continue
+        path = _owned_path(project_root, (step or {}).get("behavior_file"))
+        tree = trees_by_path.get(str(path)) if path is not None else None
+        symbol = str(resolution.get("symbol") or "")
+        pattern = str(resolution.get("step_pattern") or "")
+        decorator_name_value = str(
+            resolution.get("step_decorator") or ""
+        ).casefold()
+        target_step = next(
+            (
+                item
+                for item in ((request or {}).get("target") or {}).get(
+                    "steps"
+                ) or ()
+                if str(item.get("id") or "") == str(step_id)
+            ),
+            {},
+        )
+        contract = {
+            "decorator": decorator_name_value,
+            "pattern": pattern,
+        }
+        if any((
+                path is None,
+                tree is None,
+                not symbol,
+                not pattern,
+                not decorator_name_value,
+                not step_pattern_contract_matches(contract, target_step),
+        )):
+            errors.append(
+                f"Step {step_id} modify缺少冻结的既有Step定义身份"
+            )
+            continue
+        matches = [
+            node
+            for node in (tree.body or [])
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and any(
+                decorator_name(decorator.func) == decorator_name_value
+                and decorator_pattern(decorator) == pattern
+                for decorator in node.decorator_list
+                if isinstance(decorator, ast.Call)
+                and decorator_name(decorator.func) in STEP_DECORATORS
+            )
+        ]
+        if len(matches) != 1 or matches[0].name != symbol:
+            errors.append(
+                f"Step {step_id} modify不得新增或替换冻结的Step decorator"
+            )
+    return errors
+
+
+def _validate_issue_placeholders(
+        project_root,
+        steps,
+        request,
+        trees_by_path,
+    ):
+    errors = []
+    trace = []
+    for step_id, step in (steps or {}).items():
+        issues = list((step or {}).get("unresolved_issues") or ())
+        if not issues:
+            continue
+        path = _owned_path(project_root, (step or {}).get("behavior_file"))
+        tree = trees_by_path.get(str(path)) if path is not None else None
+        step_text = _request_step_text(request, step_id)
+        functions = _matching_step_functions(tree, step_text)
+        if path is None or tree is None or len(functions) != 1:
+            errors.append(
+                f"Step {step_id} typed issue placeholder无法唯一定位Step函数"
+            )
+            continue
+        imports = _direct_imports(tree)
+        helper_names = {
+            local_name
+            for local_name, identity in imports.items()
+            if identity == (
+                "autowork_core.runtime.generation_issue",
+                "unresolved_generation_issue",
+            )
+        }
+        if len(helper_names) != 1:
+            errors.append(
+                f"Step {step_id} typed issue placeholder必须直接导入"
+                " unresolved_generation_issue"
+            )
+            continue
+        function = functions[0]
+        body = list(function.body)
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        calls = [
+            statement.value
+            for statement in body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+            and statement.value.func.id in helper_names
+        ]
+        if len(body) != len(issues) or len(calls) != len(issues):
+            errors.append(
+                f"Step {step_id} typed issue placeholder只能包含计划helper调用"
+            )
+            continue
+        for issue, call in zip(issues, calls):
+            keywords = {
+                keyword.arg: _literal_value(keyword.value)
+                for keyword in call.keywords
+                if keyword.arg
+            }
+            if any((
+                _literal_arg(call, 0) != issue.get("issue_id"),
+                keywords.get("step_id") != issue.get("step_id"),
+                keywords.get("issue_type") != issue.get("issue_type"),
+                len(call.args) != 1,
+                set(keywords) != {"step_id", "issue_type"},
+            )):
+                errors.append(
+                    f"Step {step_id} typed issue placeholder参数与Plan不一致"
+                )
+                continue
+            trace.append({
+                "step_id": str(step_id),
+                "action_ids": list(issue.get("action_ids") or ()),
+                "implementation_location": "typed_issue_placeholder",
+                "implementation_method": None,
+                "path": _project_relative_path(project_root, path),
+                "line": getattr(call, "lineno", 0),
+                "call": "unresolved_generation_issue",
+                "issue_id": issue.get("issue_id"),
+            })
+    return errors, trace
 
 
 def _window_owner_scopes(project_root, owners):

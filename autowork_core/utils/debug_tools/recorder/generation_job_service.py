@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from autowork_core.utils.debug_tools.recorder.action_knowledge import (
 )
 from autowork_core.utils.debug_tools.recorder.ai_context_envelope import (
     build_ai_context_envelope,
+    build_envelope_brief_projection,
 )
 from autowork_core.utils.debug_tools.recorder.ai_plan_context import (
     build_ai_plan_context,
@@ -27,6 +29,7 @@ from autowork_core.utils.debug_tools.recorder.generation_contract import (
 from autowork_core.utils.debug_tools.recorder.generation_job import (
     build_generation_job,
     generation_job_lease,
+    generation_job_lease_is_valid,
     generation_job_pointer,
     load_generation_job,
     persist_generation_job,
@@ -47,10 +50,20 @@ from autowork_core.utils.debug_tools.recorder.generation_quality_gate import (
 from autowork_core.utils.debug_tools.recorder.reconciliation_repository import (
     load_generation_brief,
 )
+from autowork_core.utils.debug_tools.recorder.semantic_reconciler import (
+    brief_matches_request,
+)
 from autowork_core.utils.debug_tools.recorder.generation_transaction import (
     abort_generation_transaction,
     finish_generation_transaction,
     prepare_generation_transaction,
+)
+from autowork_core.utils.debug_tools.recorder.generation_file_lock import (
+    validate_generation_file_lease,
+)
+from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
+    build_implementation_packet,
+    implementation_manifest_identity_is_valid,
 )
 from autowork_core.utils.debug_tools.recorder.generation_profile import (
     project_generation_admission,
@@ -244,7 +257,11 @@ def admit_generation_job(request_path, *, profile_id=None):
                 expected_epoch=0,
             )
         )
-        return _job_result(session_dir, job, workflow)
+        return _with_job_transition(
+            _job_result(session_dir, job, workflow),
+            session_dir,
+            job,
+        )
     finally:
         lock.release()
 
@@ -321,7 +338,11 @@ def start_generation_job(job_path, *, expected_epoch):
         )
         if current.get("current_job") != workflow.get("current_job"):
             raise ValueError("Generation Job pointer在claim期间发生变化")
-        return _job_result(session_dir, job, workflow)
+        return _with_job_transition(
+            _job_result(session_dir, job, workflow),
+            session_dir,
+            job,
+        )
     finally:
         lock.release()
 
@@ -343,8 +364,6 @@ def retry_generation_job(job_path, *, profile_id=None):
     selected_profile = profile_id or (
         (job.get("profile_lease") or {}).get("profile_id")
     ) or "generation_first"
-    if profile_id is None and selected_profile == "precision":
-        selected_profile = "generation_first"
     return admit_generation_job(request_path, profile_id=selected_profile)
 
 
@@ -361,19 +380,31 @@ def retire_generation_job(
         session_dir, job, state = _resolve_current_job(job_path)
         execution = state.get("job_execution") or {}
         phase = execution.get("phase")
-        if phase in {"implementation", "runtime", "oracle"}:
+        has_transaction = bool(
+            execution.get("transaction")
+            or state.get("active_transaction")
+        )
+        if phase in {"runtime", "oracle"} or (
+                phase == "implementation" and has_transaction
+        ):
             raise ValueError(
                 "已进入Transaction的Generation Job必须使用abort-job或finish-job"
             )
-        if phase not in {"ready", "design"}:
-            return _job_result(session_dir, job, state)
-        if phase == "design" and execution.get("claim_id") != claim_id:
+        if phase not in {"ready", "design", "implementation"}:
+            return _with_job_transition(
+                _job_result(session_dir, job, state),
+                session_dir,
+                job,
+            )
+        if phase in {"design", "implementation"} and (
+                execution.get("claim_id") != claim_id
+        ):
             raise ValueError("Generation Job retire claim_id无效")
         issue_owner = {
             "type": "operator_retire",
             "reason": str(reason or "operator_retired"),
         }
-        return publish_pretransaction_job_failure(
+        result = publish_pretransaction_job_failure(
             session_dir,
             (job.get("request") or {})["request_id"],
             claim_id=claim_id,
@@ -383,6 +414,7 @@ def retire_generation_job(
             next_action="review_generation_result",
             issue_owner=issue_owner,
         )
+        return _with_job_transition(result, session_dir, job)
     finally:
         lock.release()
 
@@ -484,6 +516,7 @@ def query_generation_job_evidence(
         list_only=False,
     ):
     session_dir, job, _state = _resolve_known_job(job_path)
+    _require_job_query(job, "job-evidence")
     result = query_request_evidence(
         _request_path_for_job(session_dir, job),
         evidence_id=evidence_id,
@@ -496,6 +529,7 @@ def query_generation_job_evidence(
 
 def compare_generation_job_takes(job_path, *, step_id, take_ids=()):
     session_dir, job, _state = _resolve_known_job(job_path)
+    _require_job_query(job, "job-compare-takes")
     result = compare_request_takes(
         _request_path_for_job(session_dir, job),
         step_id=step_id,
@@ -513,6 +547,7 @@ def query_generation_job_action_knowledge(
         list_only=False,
     ):
     session_dir, job, _state = _resolve_known_job(job_path)
+    _require_job_query(job, "job-action-knowledge")
     brief = load_generation_brief(_brief_path_for_job(session_dir, job))
     return {
         "status": "projected",
@@ -524,6 +559,78 @@ def query_generation_job_action_knowledge(
             action_id=action_id,
             operation_names=operation_names,
             list_only=list_only,
+        ),
+    }
+
+
+def query_generation_job_design_context(job_path, *, step_id=None):
+    session_dir, job, state = _resolve_known_job(job_path)
+    _require_job_query(job, "job-design-context")
+    request = _read_json(_request_path_for_job(session_dir, job))
+    brief_path = _brief_path_for_job(session_dir, job)
+    brief = load_generation_brief(brief_path)
+    if not brief_matches_request(brief, request):
+        raise ValueError("Generation Design Context Brief身份与Request不一致")
+    result = _job_result(session_dir, job, state)
+    return {
+        "generation_design_context_query_version": "1.0",
+        "status": "projected",
+        "request_id": request.get("request_id"),
+        "job_id": job.get("job_id"),
+        "job_transition": result["job_transition"],
+        "query": {"step_id": str(step_id or "") or None},
+        "design_context": build_envelope_brief_projection(
+            brief,
+            session_dir=session_dir,
+            brief_path=brief_path,
+            step_id=step_id,
+            expanded=bool(step_id),
+        ),
+    }
+
+
+def query_generation_job_implementation_packet(
+        report_path,
+        *,
+        step_id=None,
+        path=None,
+):
+    if step_id and path:
+        raise ValueError("Implementation Packet只能按step_id或path查询")
+    session_dir, job = _job_for_transaction_report(report_path)
+    _require_job_query(job, "job-implementation-packet")
+    report_path = Path(report_path).resolve()
+    report = _read_json(report_path)
+    manifest = report.get("implementation_manifest") or {}
+    state = load_workflow_state(
+        session_dir,
+        (job.get("request") or {}).get("request_id"),
+    )
+    _validate_implementation_packet_query(state, job, report, report_path)
+    if not implementation_manifest_identity_is_valid(manifest):
+        raise ValueError("Implementation Packet Manifest身份无效")
+    packet = build_implementation_packet(manifest)
+    if report.get("implementation_packet") != packet:
+        raise ValueError("Implementation Packet与冻结Manifest不一致")
+    if (report.get("system_materialization") or {}).get("status") != "materialized":
+        raise ValueError("Implementation Packet系统物化未完成")
+    result = _job_result(session_dir, job, state)
+    return {
+        "implementation_packet_query_version": "1.0",
+        "status": "projected",
+        "request_id": (job.get("request") or {}).get("request_id"),
+        "job_id": job.get("job_id"),
+        "transaction_id": report.get("transaction_id"),
+        "report_path": str(report_path),
+        "job_transition": result["job_transition"],
+        "query": {
+            "step_id": str(step_id or "") or None,
+            "path": str(path or "") or None,
+        },
+        "implementation_packet": _project_implementation_packet(
+            packet,
+            step_id=step_id,
+            path=path,
         ),
     }
 
@@ -571,7 +678,7 @@ def submit_generation_job_design(
             "plan_id": artifact.get("plan_id"),
             "plan_path": artifact.get("plan_path"),
         })
-        return result
+        return _with_job_transition(result, session_dir, job)
     finally:
         lock.release()
 
@@ -598,7 +705,7 @@ def prepare_generation_job(
             "category": result.get("job_failure_category"),
             "errors": list(result.get("errors") or []),
         }
-        return publish_pretransaction_job_failure(
+        result = publish_pretransaction_job_failure(
             session_dir,
             (job.get("request") or {})["request_id"],
             claim_id=claim_id,
@@ -611,7 +718,7 @@ def prepare_generation_job(
             next_action="review_generation_failure",
             issue_owner=issue_owner,
         )
-    return result
+    return _with_job_transition(result, session_dir, job)
 
 
 def validate_generation_job_implementation(
@@ -621,7 +728,8 @@ def validate_generation_job_implementation(
         expected_epoch,
         project_root=None,
     ):
-    return finish_generation_transaction(
+    session_dir, job = _job_for_transaction_report(report_path)
+    result = finish_generation_transaction(
         report_path,
         derive_changed_files=True,
         validate_only=True,
@@ -629,6 +737,7 @@ def validate_generation_job_implementation(
         generation_job_claim_id=claim_id,
         generation_job_expected_epoch=expected_epoch,
     )
+    return _with_job_transition(result, session_dir, job)
 
 
 def finish_generation_job(
@@ -639,7 +748,8 @@ def finish_generation_job(
         project_root=None,
         summary="",
     ):
-    return finish_generation_transaction(
+    session_dir, job = _job_for_transaction_report(report_path)
+    result = finish_generation_transaction(
         report_path,
         derive_changed_files=True,
         validate_only=False,
@@ -648,6 +758,7 @@ def finish_generation_job(
         generation_job_claim_id=claim_id,
         generation_job_expected_epoch=expected_epoch,
     )
+    return _with_job_transition(result, session_dir, job)
 
 
 def abort_generation_job(
@@ -659,7 +770,8 @@ def abort_generation_job(
         project_root=None,
         allow_project_guard_drift=False,
     ):
-    return abort_generation_transaction(
+    session_dir, job = _job_for_transaction_report(report_path)
+    result = abort_generation_transaction(
         report_path,
         reason=reason,
         project_root=project_root,
@@ -667,6 +779,7 @@ def abort_generation_job(
         generation_job_expected_epoch=expected_epoch,
         allow_project_guard_drift=allow_project_guard_drift,
     )
+    return _with_job_transition(result, session_dir, job)
 
 
 def reconcile_generation_job_runtime(
@@ -695,18 +808,19 @@ def reconcile_generation_job_runtime(
                 != job.get("job_fingerprint"),
             )):
                 raise ValueError("Generation Job terminal result不匹配")
-            return {
+            return _with_job_transition({
                 **_job_result(session_dir, job, state),
                 "last_job_result": retired.get("last_job_result") or {},
-            }
+            }, session_dir, job)
         session_dir, job, state = _resolve_current_job(job_path)
-        return _reconcile_generation_job_runtime_locked(
+        result = _reconcile_generation_job_runtime_locked(
             session_dir,
             job,
             state,
             claim_id=claim_id,
             expected_epoch=expected_epoch,
         )
+        return _with_job_transition(result, session_dir, job)
     finally:
         lock.release()
 
@@ -1034,6 +1148,174 @@ def _transaction_report_path(session_dir, pointer):
     return path
 
 
+def _require_job_query(job, query_name):
+    allowed = set((job.get("execution_boundary") or {}).get(
+        "allowed_queries"
+    ) or ())
+    if query_name not in allowed:
+        raise ValueError(f"Generation Job不允许查询: {query_name}")
+
+
+def _validate_implementation_packet_query(state, job, report, report_path):
+    execution = (state or {}).get("job_execution") or {}
+    transaction = execution.get("transaction") or {}
+    manifest = report.get("implementation_manifest") or {}
+    if any((
+        (state or {}).get("status") != "running",
+        execution.get("phase") != "implementation",
+        execution.get("claim_id") != report.get("generation_job_claim_id"),
+        report.get("request_id") != (job.get("request") or {}).get(
+            "request_id"
+        ),
+        report.get("generation_job_lease") != generation_job_lease(job),
+        transaction.get("transaction_id") != report.get("transaction_id"),
+        transaction.get("implementation_manifest_fingerprint")
+        != manifest.get("implementation_manifest_fingerprint"),
+        _transaction_report_path(
+            Path(report.get("session_dir") or ""), transaction
+        ) != Path(report_path).resolve(),
+    )):
+        raise ValueError("Implementation Packet与当前Generation Job不一致")
+    lease_errors = validate_generation_file_lease(
+        report.get("project_root"),
+        report.get("generation_file_lease"),
+    )
+    if lease_errors:
+        raise ValueError(
+            "Implementation Packet generation file lease无效: "
+            + "; ".join(lease_errors)
+        )
+
+
+def _project_implementation_packet(packet, *, step_id=None, path=None):
+    packet = dict(packet or {})
+    requested_step_id = str(step_id or "").strip()
+    requested_path = str(path or "").replace("\\", "/").lstrip("/")
+    steps = [
+        dict(item)
+        for item in packet.get("steps") or ()
+        if isinstance(item, dict)
+    ]
+    pages = [
+        dict(item)
+        for item in packet.get("pages") or ()
+        if isinstance(item, dict)
+    ]
+    methods = [
+        dict(item)
+        for item in packet.get("methods") or ()
+        if isinstance(item, dict)
+    ]
+    known_paths = {
+        str(item.get("path") or "").replace("\\", "/")
+        for item in [*steps, *pages, *methods]
+        if item.get("path")
+    }
+    known_paths.update(
+        str(item).replace("\\", "/")
+        for item in packet.get("ai_editable_changes") or ()
+    )
+    if requested_step_id:
+        steps = [
+            item for item in steps
+            if str(item.get("step_id") or "") == requested_step_id
+        ]
+        if len(steps) != 1:
+            raise ValueError(
+                f"Implementation Packet不存在目标Step: {requested_step_id}"
+            )
+    elif requested_path:
+        if requested_path not in known_paths:
+            raise ValueError(
+                f"Implementation Packet路径不在冻结Manifest中: {requested_path}"
+            )
+        steps = [
+            item for item in steps
+            if str(item.get("path") or "").replace("\\", "/")
+            == requested_path
+        ]
+    page_paths = {
+        str((item.get("page") or {}).get("path") or "")
+        for step in steps
+        for item in [step, *(step.get("operations") or ())]
+        if isinstance(item, dict)
+        and (item.get("page") or {}).get("path")
+    }
+    if requested_path and requested_path in known_paths:
+        page_paths.add(requested_path)
+    pages = [
+        item for item in pages
+        if str(item.get("path") or "") in page_paths
+    ]
+    page_paths.update(str(item.get("path") or "") for item in pages)
+    methods = [
+        item for item in methods
+        if str(item.get("path") or "") in page_paths
+        or str(item.get("path") or "") == requested_path
+    ]
+    return {
+        "implementation_packet_projection_version": "1.0",
+        "implementation_packet_version": packet.get(
+            "implementation_packet_version"
+        ),
+        "packet_fingerprint": _fingerprint(packet),
+        "derived_from": dict(packet.get("derived_from") or {}),
+        "ai_editable_changes": list(packet.get("ai_editable_changes") or ()),
+        "system_owned_changes": list(packet.get("system_owned_changes") or ()),
+        "pages": pages,
+        "steps": steps,
+        "methods": methods,
+        "rule": packet.get("rule"),
+    }
+
+
+def _job_for_transaction_report(report_path):
+    report_path = Path(report_path).resolve()
+    report = _read_json(report_path)
+    transaction_id = str(report.get("transaction_id") or "")
+    if not transaction_id or report_path.name != "report.json":
+        raise ValueError("Generation Job Transaction report路径无效")
+    session_dir = report_path.parents[3]
+    root = (session_dir / "ai" / "generation-transactions").resolve()
+    try:
+        relative = report_path.relative_to(root)
+    except ValueError as error:
+        raise ValueError("Generation Job Transaction report路径越界") from error
+    if tuple(relative.parts) != (transaction_id, "report.json"):
+        raise ValueError("Generation Job Transaction report路径与transaction不一致")
+    reported_session = str(report.get("session_dir") or "")
+    if not reported_session or Path(reported_session).resolve() != session_dir:
+        raise ValueError("Generation Job Transaction session不一致")
+    request_id = str(report.get("request_id") or "")
+    lease = report.get("generation_job_lease") or {}
+    if not generation_job_lease_is_valid(lease):
+        raise ValueError("Generation Job Transaction lease无效")
+    state = load_workflow_state(session_dir, request_id)
+    candidates = [
+        (state.get("current_job") or {}, state.get("job_execution") or {}),
+        *(
+            ((entry or {}).get("job") or {},
+            (entry or {}).get("job_execution") or {})
+            for entry in state.get("retired_jobs") or ()
+        ),
+    ]
+    for pointer, execution in candidates:
+        if any((
+            pointer.get("job_id") != lease.get("job_id"),
+            pointer.get("job_fingerprint") != lease.get("job_fingerprint"),
+            pointer.get("nonce") != lease.get("job_nonce"),
+        )):
+            continue
+        job = load_generation_job(session_dir, pointer)
+        transaction = execution.get("transaction") or {}
+        if job is None or not transaction:
+            continue
+        if _transaction_report_path(session_dir, transaction) != report_path:
+            continue
+        return session_dir, job
+    raise ValueError("Generation Transaction与Generation Job不一致")
+
+
 def _job_result(session_dir, job, workflow):
     path = (
         Path(session_dir)
@@ -1042,12 +1324,13 @@ def _job_result(session_dir, job, workflow):
         / (job.get("request") or {})["request_id"]
         / f"job-{job['job_fingerprint']}.json"
     ).resolve()
-    retired = retired_job_entry(
-        workflow,
-        job_id=job.get("job_id"),
-    )
     retired = retired_job_entry(workflow, job_id=job.get("job_id"))
-    return {
+    execution = (
+        (retired or {}).get("job_execution")
+        or workflow.get("job_execution")
+        or {}
+    )
+    result = {
         "generation_job_service_version": "1.0",
         "status": (retired or {}).get("status") or workflow.get("status"),
         "next_action": (retired or {}).get("next_action") or workflow.get("next_action"),
@@ -1057,14 +1340,37 @@ def _job_result(session_dir, job, workflow):
         "job_fingerprint": job.get("job_fingerprint"),
         "generation_profile": _projected_generation_profile(job),
         "generation_admission": job.get("admission_receipt") or {},
-        "job_execution": (
-            (retired or {}).get("job_execution")
-            or workflow.get("job_execution")
-            or {}
-        ),
+        "job_execution": execution,
+        "job_lifecycle_timing": execution.get("job_lifecycle_timing"),
         "execution_boundary": _projected_execution_boundary(job),
         "errors": list((retired or {}).get("errors") or ()),
         "warnings": [],
+    }
+    result["job_transition"] = _job_transition(result)
+    return result
+
+
+def _job_transition(result):
+    execution = result.get("job_execution") or {}
+    return {
+        "phase": execution.get("phase"),
+        "epoch": execution.get("epoch"),
+        "claim_id": execution.get("claim_id"),
+        "attempt_no": execution.get("attempt_no"),
+        "next_action": result.get("next_action"),
+    }
+
+
+def _with_job_transition(result, session_dir, job):
+    workflow = load_workflow_state(
+        session_dir,
+        (job.get("request") or {}).get("request_id"),
+    )
+    projected = _job_result(session_dir, job, workflow)
+    return {
+        **result,
+        "job_transition": projected["job_transition"],
+        "job_lifecycle_timing": projected.get("job_lifecycle_timing"),
     }
 
 
@@ -1096,3 +1402,12 @@ def _read_json(path):
     if not isinstance(value, dict):
         raise ValueError(f"JSON必须是object: {path}")
     return value
+
+
+def _fingerprint(value):
+    return hashlib.sha256(json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import threading
 from contextlib import contextmanager
 from datetime import datetime
@@ -69,30 +68,6 @@ def ensure_knowledge_store(recording_root):
             },
         })
     return root
-
-
-def migrate_legacy_knowledge_file(
-        recording_root,
-        *,
-        legacy_relative,
-        knowledge_relative,
-):
-    recording_root = Path(recording_root).resolve()
-    root = ensure_knowledge_store(recording_root)
-    target = _contained(root, root / knowledge_relative)
-    if target.exists():
-        return target
-    source = _contained(recording_root, recording_root / legacy_relative)
-    if not source.is_file():
-        return target
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.migrating")
-    try:
-        shutil.copyfile(source, temporary)
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return target
 
 
 def resolve_knowledge_path(recording_root, relative_path):

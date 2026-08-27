@@ -58,6 +58,7 @@ def build_generation_brief(
         inputs["action_metadata"],
         inputs["memory"],
         semantics=inputs.get("semantics"),
+        input_recovery=ReconciliationRepository.input_recovery(request),
         created_at=datetime.now().isoformat(timespec="seconds"),
     )
     if write:
@@ -81,6 +82,7 @@ def reconcile_generation(
     memory,
     *,
     semantics=None,
+    input_recovery=None,
     created_at,
 ):
     semantics = semantics or {
@@ -107,6 +109,7 @@ def reconcile_generation(
         evidence,
         reviews,
         semantic_actions=semantics.get("actions") or {},
+        input_recovery=input_recovery,
     )
     adjustment = _adjustment_plan(
         request,
@@ -349,6 +352,14 @@ def _reconcile_evidence(
         conflict_codes = []
         if closure.get("status") != "complete":
             conflict_codes.append("partial_action_envelope")
+        canonical_command = (
+            (payload.get("canonical_action") or {}).get("command") or {}
+        )
+        if (
+                payload.get("type") == "keyboard"
+                and canonical_command.get("sequence_status") == "incomplete"
+        ):
+            conflict_codes.append("keyboard_sequence_incomplete")
         same_observed_target = target.get("same_observed_target")
         if same_observed_target is None:
             same_observed_target = target.get("same_runtime_target")
@@ -537,6 +548,7 @@ def _build_ambiguities(
         reviews,
         *,
         semantic_actions=None,
+    input_recovery=None,
     ):
     semantic_actions = semantic_actions or {}
     actions = evidence.get("actions") or []
@@ -544,6 +556,16 @@ def _build_ambiguities(
         (request.get("readiness") or {}).get("target_review_required")
         or []
     )
+    confirmed_input_steps = {
+        str(candidate.get("step_id") or "")
+        for candidate in input_recovery or ()
+        if all((
+            isinstance(candidate, dict),
+            candidate.get("candidate_id"),
+            candidate.get("confirmed_edit_id"),
+            candidate.get("excluded_action_id"),
+        ))
+    }
     review_states = {
         str(item.get("source_review_id") or ""): item
         for item in reviews or ()
@@ -556,6 +578,12 @@ def _build_ambiguities(
         if state.get("disposition") == "auto_resolved_excluded_timeline":
             continue
         code = str(review.get("code") or "unknown")
+        if (
+                code == "no_recorded_actions"
+                and str(review.get("step_id") or "")
+                in confirmed_input_steps
+        ):
+            continue
         if code in _TARGET_CONFLICT_CODES:
             continue
         event_ids = _source_review_event_ids(review)
@@ -621,6 +649,10 @@ def _build_ambiguities(
         semantic_actions,
     ))
     result.extend(_declared_binding_ambiguities(actions))
+    result.extend(_confirmed_input_recovery_ambiguities(
+        actions,
+        input_recovery,
+    ))
     result.extend(_specification_conflict_ambiguities(request))
     result.extend(_step_context_conflict_ambiguities(request))
     user_managed_action_ids = {
@@ -694,7 +726,11 @@ def _build_ambiguities(
                 }),
                 "source_review_ids": source_review_ids,
             },
-            code="action_implementation",
+            code=(
+                "keyboard_sequence_incomplete"
+                if "keyboard_sequence_incomplete" in codes
+                else "action_implementation"
+            ),
             step_id=step_id,
             action_ids=[action_id],
             event_ids=(
@@ -706,6 +742,11 @@ def _build_ambiguities(
             facts={
                 "conflicts": codes,
                 "action_type": (action or {}).get("type"),
+                "sequence_status": (
+                    (((action or {}).get("canonical_action") or {}).get(
+                        "command"
+                    ) or {}).get("sequence_status")
+                ),
                 "target": (action or {}).get("target") or {},
                 "parameters": (action or {}).get("parameters") or {},
                 "declared_input_binding": declared_binding,
@@ -732,6 +773,71 @@ def _build_ambiguities(
         for item in result
     }
     return [unique[key] for key in sorted(unique)]
+
+
+def _confirmed_input_recovery_ambiguities(actions, candidates):
+    actions_by_id = {
+        (str(action.get("step_id") or ""), str(action.get("action_id") or "")):
+        action
+        for action in actions or ()
+        if action.get("step_id") and action.get("action_id")
+    }
+    action_ids_by_step = {}
+    for step_id, action_id in actions_by_id:
+        action_ids_by_step.setdefault(step_id, []).append(action_id)
+    result = []
+    for candidate in candidates or ():
+        if not isinstance(candidate, dict):
+            continue
+        step_id = str(candidate.get("step_id") or "")
+        target_action_id = str(candidate.get("target_action_id") or "")
+        action = actions_by_id.get((step_id, target_action_id))
+        action_ids = (
+            [target_action_id]
+            if action is not None
+            else sorted(action_ids_by_step.get(step_id) or ())
+        )
+        if not step_id:
+            continue
+        source = {
+            "kind": "confirmed_keyboard_input_exclusion",
+            "candidate_id": str(candidate.get("candidate_id") or ""),
+            "confirmed_edit_id": str(
+                candidate.get("confirmed_edit_id") or ""
+            ),
+        }
+        facts = {"candidate": dict(candidate)}
+        eligible = candidate.get("status") == "eligible" and action is not None
+        outcomes = [{
+            "outcome": "generate_issue_placeholder",
+            "authority": "ai",
+            "effect": "issue_placeholder",
+        }]
+        if eligible:
+            outcomes.insert(0, {
+                "outcome": "implement_feature_literal_input",
+                "authority": "ai",
+                "effect": "plan_coverage",
+            })
+        result.append(_ambiguity_record(
+            source=source,
+            code="confirmed_keyboard_input_excluded",
+            step_id=step_id,
+            action_ids=action_ids,
+            event_ids=list(candidate.get("excluded_event_ids") or ()),
+            evidence_ids=[
+                evidence_id
+                for action_id in action_ids
+                for evidence_id in (
+                    (actions_by_id.get((step_id, action_id)) or {}).get(
+                        "evidence_ids"
+                    ) or ()
+                )
+            ],
+            facts=facts,
+            allowed_outcomes=outcomes,
+        ))
+    return result
 
 
 def _semantic_assertion_ambiguities(actions, semantic_actions):
@@ -1249,10 +1355,20 @@ def _conflict_ambiguity_outcomes(
         "unclassified_default_evidence",
     }:
         return []
+    if "keyboard_sequence_incomplete" in codes:
+        return [{
+            "outcome": "generate_issue_placeholder",
+            "authority": "ai",
+            "effect": "issue_placeholder",
+        }]
     outcomes = [{
         "outcome": "reuse_existing_behavior",
         "authority": "ai",
         "effect": "behavior_coverage",
+    }, {
+        "outcome": "generate_issue_placeholder",
+        "authority": "ai",
+        "effect": "issue_placeholder",
     }]
     if "positional_locator_unstable" in codes:
         return outcomes
@@ -2866,6 +2982,8 @@ def _compact_ambiguity(value):
                 "locator_name": target.get("locator_name"),
             }),
         }
+    elif code == "confirmed_keyboard_input_excluded":
+        facts = {"candidate": dict(facts.get("candidate") or {})}
     result = {
         key: value.get(key)
         for key in (
@@ -2882,6 +3000,8 @@ def _compact_ambiguity(value):
     }
     result["facts"] = _without_empty(facts)
     compact = _without_empty(result)
+    if code == "confirmed_keyboard_input_excluded":
+        compact["action_ids"] = list(value.get("action_ids") or ())
     if "allowed_outcomes" in value:
         compact["allowed_outcomes"] = list(
             value.get("allowed_outcomes") or ()
@@ -2990,9 +3110,12 @@ def _compact_reuse_candidate(value):
             "key",
             "file_sha256",
             "step_patterns",
+            "step_pattern_contracts",
             "matched_step_texts",
             "operations",
             "call_sequence",
+            "step_parameters",
+            "step_parameter_contracts",
             "references",
             "table_usage_hint",
             "quality",

@@ -73,6 +73,8 @@ def build_generation_job(
         "execution_boundary": {
             "allowed_queries": [
                 "inspect-job",
+                "job-design-context",
+                "job-implementation-packet",
                 "job-evidence",
                 "job-compare-takes",
                 "job-action-knowledge",

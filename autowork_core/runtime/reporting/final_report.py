@@ -326,8 +326,7 @@ def merge(
 
 
 def delete(
-        report_json=DEFAULT_SOURCE_REPORT_TEXT,
-        *,
+    *,
         feature_file=None,
         feature_name=None,
         scenario_name=None,
@@ -338,34 +337,29 @@ def delete(
         project_root=None,
 ):
     project_root = Path(project_root or Paths.BASE_DIR).resolve()
-    source_path = _resolve_path(report_json or DEFAULT_SOURCE_REPORT, project_root=project_root)
     target_path, html_path, log_path = _default_output_paths(
         target_path=target_report,
         html_path=html_report,
         log_path=merge_log,
         project_root=project_root,
     )
-    source = _load_report(source_path)
     target = _load_report(target_path)
-    scopes = _operation_scopes(
-        source,
+    scope = _scope_payload(
         feature_file=feature_file,
         feature_name=feature_name,
         scenario_name=scenario_name,
         example_id=example_id,
     )
-    for scope in scopes:
-        target = delete_result(target, **scope)
+    target = delete_result(target, **scope)
     _write_json_atomic(target_path, target)
     render_final_report(target, html_path=html_path)
     _append_merge_log(
         log_path,
         "delete",
         project_root=project_root,
-        source_path=source_path,
         target_path=target_path,
         html_path=html_path,
-        scopes=scopes,
+        scope=scope,
     )
     return target_path, html_path
 
@@ -435,7 +429,6 @@ def run_action(action, config=None):
         )
     if action == "delete":
         return delete(
-            config.get("report_json", DEFAULT_SOURCE_REPORT_TEXT),
             feature_file=config.get("feature_file"),
             feature_name=config.get("feature_name"),
             scenario_name=config.get("scenario_name"),
@@ -1108,7 +1101,6 @@ def build_arg_parser():
     merge_latest.add_argument("--no-add", action="store_true")
 
     delete = subparsers.add_parser("delete")
-    delete.add_argument("source", nargs="?", default=None)
     _add_scope_args(delete)
 
     subparsers.add_parser("render")
@@ -1150,7 +1142,6 @@ def main(argv=None):
             )
         elif args.command == "delete":
             target, html = delete(
-                args.source,
                 target_report=args.target,
                 html_report=args.html,
                 merge_log=args.log,

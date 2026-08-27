@@ -11,6 +11,14 @@ from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 WORKFLOW_STATE_VERSION = "3.0"
 JOB_WORKFLOW_STATE_VERSION = "5.0"
+JOB_LIFECYCLE_TIMING_LEDGER_VERSION = "1.0"
+JOB_LIFECYCLE_TIMING_STATUSES = {
+    "active",
+    "completed",
+    "failed",
+    "partial",
+    "unavailable",
+}
 WORKFLOW_STATUSES = {
     "draft",
     "ready",
@@ -22,6 +30,8 @@ WORKFLOW_STATUSES = {
     "completed",
     "failed",
 }
+
+
 def load_workflow_state(session_dir, request_id):
     if not request_id:
         return {}
@@ -73,6 +83,265 @@ def write_workflow_state(session_dir, state):
     return path
 
 
+def new_generation_job_lifecycle_timing(*, started_at, epoch):
+    started_at = str(started_at or "")
+    if not started_at:
+        raise ValueError("Generation Job lifecycle缺少开始时间")
+    event = _job_lifecycle_event(
+        "admitted",
+        started_at,
+        phase="ready",
+        next_action="start_generation_job",
+        epoch=epoch,
+    )
+    return {
+        "job_lifecycle_timing_ledger_version": (
+            JOB_LIFECYCLE_TIMING_LEDGER_VERSION
+        ),
+        "status": "active",
+        "events": [event],
+        "segments": [],
+        "active_stage": _job_lifecycle_active_stage(
+            "ready_wait",
+            started_at,
+            epoch,
+        ),
+    }
+
+
+def unavailable_generation_job_lifecycle_timing():
+    return {
+        "job_lifecycle_timing_ledger_version": (
+            JOB_LIFECYCLE_TIMING_LEDGER_VERSION
+        ),
+        "status": "unavailable",
+        "events": [],
+        "segments": [],
+        "active_stage": None,
+    }
+
+
+def project_generation_job_lifecycle_timing(
+        execution,
+        *,
+        previous_next_action,
+        phase,
+        next_action,
+        transitioned_at=None,
+        event=None,
+):
+    """Advance diagnostic timing independently from Job CAS semantics."""
+    execution = dict(execution or {})
+    transitioned_at = str(
+        transitioned_at or datetime.now().isoformat(timespec="milliseconds")
+    )
+    previous_phase = str(execution.get("phase") or "")
+    previous_epoch = int(execution.get("epoch") or 0)
+    next_epoch = previous_epoch + 1
+    timing = _normalized_job_lifecycle_timing(execution)
+    active = timing.get("active_stage") or {}
+    previous_stage = _job_lifecycle_stage(
+        previous_phase,
+        previous_next_action,
+    )
+    if active and active.get("name") != previous_stage:
+        timing["status"] = "partial"
+        active = {}
+        timing["active_stage"] = None
+    if active:
+        segment = _completed_job_lifecycle_segment(
+            active,
+            transitioned_at,
+            next_epoch,
+        )
+        if segment is None:
+            timing["status"] = "partial"
+        else:
+            timing.setdefault("segments", []).append(segment)
+    lifecycle_event = _job_lifecycle_event(
+        event or _default_job_lifecycle_event(phase),
+        transitioned_at,
+        phase=phase,
+        next_action=next_action,
+        epoch=next_epoch,
+    )
+    timing.setdefault("events", []).append(lifecycle_event)
+    next_stage = _job_lifecycle_stage(phase, next_action)
+    if next_stage is None:
+        timing["active_stage"] = None
+        if timing.get("status") != "partial":
+            timing["status"] = phase if phase in {"completed", "failed"} else "active"
+    else:
+        timing["active_stage"] = _job_lifecycle_active_stage(
+            next_stage,
+            transitioned_at,
+            next_epoch,
+        )
+        if timing.get("status") != "partial":
+            timing["status"] = "active"
+    return timing
+
+
+def generation_job_lifecycle_timing_is_valid(value):
+    if not isinstance(value, dict):
+        return False
+    if value.get("job_lifecycle_timing_ledger_version") != (
+            JOB_LIFECYCLE_TIMING_LEDGER_VERSION
+    ):
+        return False
+    if value.get("status") not in JOB_LIFECYCLE_TIMING_STATUSES:
+        return False
+    events = value.get("events")
+    segments = value.get("segments")
+    if not isinstance(events, list) or not isinstance(segments, list):
+        return False
+    if not all(_job_lifecycle_event_is_valid(item) for item in events):
+        return False
+    if not all(_job_lifecycle_segment_is_valid(item) for item in segments):
+        return False
+    active = value.get("active_stage")
+    if active is not None and not _job_lifecycle_active_stage_is_valid(active):
+        return False
+    return not (
+        value.get("status") in {"completed", "failed", "unavailable"}
+        and active is not None
+    )
+
+
+def _normalized_job_lifecycle_timing(execution):
+    timing = execution.get("job_lifecycle_timing")
+    if generation_job_lifecycle_timing_is_valid(timing):
+        return json.loads(json.dumps(timing))
+    return {
+        **unavailable_generation_job_lifecycle_timing(),
+        "status": "partial",
+    }
+
+
+def _job_lifecycle_stage(phase, next_action):
+    phase = str(phase or "")
+    next_action = str(next_action or "")
+    if phase == "ready":
+        return "ready_wait"
+    if phase == "design":
+        return "design"
+    if phase == "implementation":
+        return (
+            "prepare"
+            if next_action == "prepare_generation_transaction"
+            else "implementation"
+        )
+    if phase in {"runtime", "oracle"}:
+        return phase
+    return None
+
+
+def _default_job_lifecycle_event(phase):
+    return {
+        "design": "claimed",
+        "implementation": "implementation_advanced",
+        "runtime": "runtime_started",
+        "oracle": "oracle_started",
+        "completed": "completed",
+        "failed": "failed",
+    }.get(str(phase or ""), "observed")
+
+
+def _job_lifecycle_event(event, at, *, phase, next_action, epoch):
+    return {
+        "event": str(event),
+        "at": str(at),
+        "phase": str(phase),
+        "next_action": str(next_action),
+        "epoch": int(epoch),
+    }
+
+
+def _job_lifecycle_active_stage(name, started_at, epoch):
+    return {
+        "name": str(name),
+        "started_at": str(started_at),
+        "epoch_start": int(epoch),
+    }
+
+
+def _completed_job_lifecycle_segment(active, finished_at, epoch_end):
+    if not _job_lifecycle_active_stage_is_valid(active):
+        return None
+    duration_ms = _job_lifecycle_duration_ms(
+        active.get("started_at"),
+        finished_at,
+    )
+    if duration_ms is None:
+        return None
+    return {
+        "stage": active.get("name"),
+        "source": "workflow_state",
+        "started_at": active.get("started_at"),
+        "finished_at": str(finished_at),
+        "duration_ms": duration_ms,
+        "epoch_start": active.get("epoch_start"),
+        "epoch_end": int(epoch_end),
+    }
+
+
+def _job_lifecycle_duration_ms(started_at, finished_at):
+    try:
+        started = datetime.fromisoformat(str(started_at))
+        finished = datetime.fromisoformat(str(finished_at))
+    except (TypeError, ValueError):
+        return None
+    return max(0, int((finished - started).total_seconds() * 1000))
+
+
+def _job_lifecycle_event_is_valid(value):
+    return bool(
+        isinstance(value, dict)
+        and isinstance(value.get("event"), str)
+        and value.get("event")
+        and isinstance(value.get("at"), str)
+        and value.get("at")
+        and isinstance(value.get("phase"), str)
+        and value.get("phase")
+        and isinstance(value.get("next_action"), str)
+        and value.get("next_action")
+        and isinstance(value.get("epoch"), int)
+        and not isinstance(value.get("epoch"), bool)
+        and value.get("epoch") >= 0
+    )
+
+
+def _job_lifecycle_segment_is_valid(value):
+    return bool(
+        isinstance(value, dict)
+        and isinstance(value.get("stage"), str)
+        and value.get("stage")
+        and value.get("source") == "workflow_state"
+        and isinstance(value.get("started_at"), str)
+        and value.get("started_at")
+        and isinstance(value.get("finished_at"), str)
+        and value.get("finished_at")
+        and isinstance(value.get("duration_ms"), int)
+        and not isinstance(value.get("duration_ms"), bool)
+        and value.get("duration_ms") >= 0
+        and isinstance(value.get("epoch_start"), int)
+        and isinstance(value.get("epoch_end"), int)
+    )
+
+
+def _job_lifecycle_active_stage_is_valid(value):
+    return bool(
+        isinstance(value, dict)
+        and isinstance(value.get("name"), str)
+        and value.get("name")
+        and isinstance(value.get("started_at"), str)
+        and value.get("started_at")
+        and isinstance(value.get("epoch_start"), int)
+        and not isinstance(value.get("epoch_start"), bool)
+        and value.get("epoch_start") >= 0
+    )
+
+
 def transition_workflow(
         session_dir,
         request_id,
@@ -87,6 +356,7 @@ def transition_workflow(
     state = load_workflow_state(session_dir, request_id)
     if not state:
         raise FileNotFoundError(f"workflow state 不存在: {request_id}")
+    transitioned_at = datetime.now().isoformat(timespec="milliseconds")
     if (
         state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION
         and state.get("current_job")
@@ -96,16 +366,23 @@ def transition_workflow(
             raise ValueError(
                 "活动 Generation Job 必须通过 CAS transition 推进"
             )
+        execution = state.get("job_execution") or {}
         state["job_execution"] = {
-            **(state.get("job_execution") or {}),
+            **execution,
             "phase": "failed",
-            "epoch": int(
-                (state.get("job_execution") or {}).get("epoch") or 0
-            ) + 1,
+            "epoch": int(execution.get("epoch") or 0) + 1,
+            "job_lifecycle_timing": project_generation_job_lifecycle_timing(
+                execution,
+                previous_next_action=state.get("next_action"),
+                phase="failed",
+                next_action=next_workflow_action(status),
+                transitioned_at=transitioned_at,
+                event="workflow_stale",
+            ),
         }
     state["status"] = status
     state["next_action"] = next_workflow_action(status)
-    state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    state["updated_at"] = transitioned_at
     state["active_transaction"] = transaction
     if result is not None:
         state["last_result"] = result
@@ -132,21 +409,27 @@ def publish_generation_job(
             f"expected_epoch={expected_epoch}, current_epoch={current_epoch}"
         )
     _assert_job_pointer(pointer, request_id=request_id)
+    published_at = datetime.now().isoformat(timespec="milliseconds")
+    next_epoch = current_epoch + 1
     state.update({
         "workflow_state_version": JOB_WORKFLOW_STATE_VERSION,
         "status": "ready",
         "next_action": "start_generation_job",
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": published_at,
         "current_job": dict(pointer),
         "job_execution": {
             "phase": "ready",
-            "epoch": current_epoch + 1,
+            "epoch": next_epoch,
             "claim_id": None,
             "claimed_at": None,
             "attempt_no": 0,
             "plan": None,
             "transaction": None,
             "last_issue_fingerprint": None,
+            "job_lifecycle_timing": new_generation_job_lifecycle_timing(
+                started_at=published_at,
+                epoch=next_epoch,
+            ),
         },
         "attempt_history": [],
         "retired_jobs": list(state.get("retired_jobs") or []),
@@ -187,20 +470,26 @@ def replace_generation_job(
         last_job_result=state.get("last_job_result"),
         errors=state.get("errors"),
     ))
+    replaced_at = datetime.now().isoformat(timespec="milliseconds")
+    next_epoch = int(execution["epoch"]) + 1
     state.update({
         "status": "ready",
         "next_action": "start_generation_job",
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": replaced_at,
         "current_job": dict(pointer),
         "job_execution": {
             "phase": "ready",
-            "epoch": int(execution["epoch"]) + 1,
+            "epoch": next_epoch,
             "claim_id": None,
             "claimed_at": None,
             "attempt_no": 0,
             "plan": None,
             "transaction": None,
             "last_issue_fingerprint": None,
+            "job_lifecycle_timing": new_generation_job_lifecycle_timing(
+                started_at=replaced_at,
+                epoch=next_epoch,
+            ),
         },
         "retired_jobs": retired,
         "attempt_history": [],
@@ -234,16 +523,26 @@ def claim_generation_job(
     )
     execution = state["job_execution"]
     claim_id = f"claim-{secrets.token_hex(16)}"
+    claimed_at = datetime.now().isoformat(timespec="milliseconds")
+    next_epoch = int(execution["epoch"]) + 1
     state.update({
         "status": "running",
         "next_action": "submit_generation_design",
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": claimed_at,
         "job_execution": {
             **execution,
             "phase": "design",
-            "epoch": int(execution["epoch"]) + 1,
+            "epoch": next_epoch,
             "claim_id": claim_id,
-            "claimed_at": datetime.now().isoformat(timespec="seconds"),
+            "claimed_at": claimed_at,
+            "job_lifecycle_timing": project_generation_job_lifecycle_timing(
+                execution,
+                previous_next_action=state.get("next_action"),
+                phase="design",
+                next_action="submit_generation_design",
+                transitioned_at=claimed_at,
+                event="claimed",
+            ),
         },
     })
     write_workflow_state(session_dir, state)
@@ -269,6 +568,7 @@ def fail_generation_job_integrity(
     )):
         raise ValueError("Generation Job integrity CAS冲突")
     error_code = str(error_code or "job_integrity_failed")
+    failed_at = datetime.now().isoformat(timespec="milliseconds")
     failed_execution = {
         **execution,
         "phase": "failed",
@@ -276,6 +576,14 @@ def fail_generation_job_integrity(
         "last_issue_fingerprint": hashlib.sha256(
             error_code.encode("utf-8")
         ).hexdigest(),
+        "job_lifecycle_timing": project_generation_job_lifecycle_timing(
+            execution,
+            previous_next_action=state.get("next_action"),
+            phase="failed",
+            next_action="review_generation_failure",
+            transitioned_at=failed_at,
+            event="integrity_failed",
+        ),
     }
     return _retire_current_generation_job(
         session_dir,
@@ -305,6 +613,9 @@ def transition_generation_job(
         issue_fingerprint=None,
         result=None,
         clear_active_transaction=False,
+        transitioned_at=None,
+        lifecycle_event=None,
+        job_lifecycle_timing=None,
     ):
     allowed_phases = {
         "design",
@@ -335,6 +646,24 @@ def transition_generation_job(
             "issue_fingerprint": execution.get("last_issue_fingerprint"),
         })
     terminal = phase in {"completed", "failed"}
+    transition_time = str(
+        transitioned_at or datetime.now().isoformat(timespec="milliseconds")
+    )
+    if job_lifecycle_timing is None:
+        timing = project_generation_job_lifecycle_timing(
+            execution,
+            previous_next_action=state.get("next_action"),
+            phase=phase,
+            next_action=next_action,
+            transitioned_at=transition_time,
+            event=lifecycle_event,
+        )
+    else:
+        if not generation_job_lifecycle_timing_is_valid(
+                job_lifecycle_timing
+        ):
+            raise ValueError("Generation Job lifecycle timing无效")
+        timing = json.loads(json.dumps(job_lifecycle_timing))
     next_execution = {
         **execution,
         "phase": phase,
@@ -353,6 +682,7 @@ def transition_generation_job(
             if issue_fingerprint is not None
             else execution.get("last_issue_fingerprint")
         ),
+        "job_lifecycle_timing": timing,
     }
     if terminal:
         return _retire_current_generation_job(
@@ -370,7 +700,7 @@ def transition_generation_job(
     state.update({
         "status": "running",
         "next_action": next_action,
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": transition_time,
         "job_execution": next_execution,
         "attempt_history": history,
     })

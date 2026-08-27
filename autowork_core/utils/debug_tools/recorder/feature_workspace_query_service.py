@@ -33,22 +33,7 @@ class FeatureWorkspaceQueryService:
         self.recording_root = Path(recording_root).resolve()
 
     def get_workspace(self):
-        catalog = load_recording_catalog(self.recording_root)
-        warnings = []
-        try:
-            delivery_index = load_feature_delivery_index(
-                self.recording_root
-            )
-        except Exception as error:
-            delivery_index = {"features": {}}
-            warnings.append(
-                f"Feature录制资料记录不可用: {type(error).__name__}: {error}"
-            )
-        entries = tuple(
-            item
-            for item in catalog.get("sessions") or ()
-            if isinstance(item, dict)
-        )
+        entries, delivery_index, warnings = self._workspace_state()
         features = []
         seen_ids = {}
         for source_path in collect_feature_files(self.feature_root):
@@ -102,6 +87,39 @@ class FeatureWorkspaceQueryService:
             warnings=tuple(warnings),
         )
 
+    def get_feature(self, source_path):
+        source_path = _safe_workspace_feature_path(
+            source_path,
+            self.feature_root,
+        )
+        plan = load_feature_plan(source_path)
+        entries, delivery_index, warnings = self._workspace_state()
+        feature = self._feature_dto(
+            plan,
+            entries,
+            (delivery_index.get("features") or {}).get(plan.id),
+        )
+        return feature, tuple(warnings)
+
+    def _workspace_state(self):
+        catalog = load_recording_catalog(self.recording_root)
+        warnings = []
+        try:
+            delivery_index = load_feature_delivery_index(
+                self.recording_root
+            )
+        except Exception as error:
+            delivery_index = {"features": {}}
+            warnings.append(
+                f"Feature录制资料记录不可用: {type(error).__name__}: {error}"
+            )
+        entries = tuple(
+            item
+            for item in catalog.get("sessions") or ()
+            if isinstance(item, dict)
+        )
+        return entries, delivery_index, warnings
+
     def _feature_dto(self, plan, entries, delivery):
         matching = [
             entry
@@ -142,6 +160,7 @@ class FeatureWorkspaceQueryService:
             scenarios.append(_scenario_dto(
                 scenario,
                 candidates,
+                recording_root=self.recording_root,
                 expected_step_ids=expected_step_ids,
                 expected_business_fingerprint=expected_fingerprint,
                 export_entry=export_entry,
@@ -158,7 +177,7 @@ class FeatureWorkspaceQueryService:
             default="",
         ) or None
         recorded_count = sum(
-            scenario.recording_state in {"partial", "recorded"}
+            scenario.recording_state == "recorded"
             for scenario in scenarios
         )
         outdated_count = sum(
@@ -231,6 +250,7 @@ def _scenario_dto(
         scenario,
         candidates,
         *,
+    recording_root,
         expected_step_ids,
         expected_business_fingerprint,
         export_entry=None,
@@ -240,10 +260,12 @@ def _scenario_dto(
     )
     if latest is None:
         state = "none"
-        label = "无录制"
+        label = "未录制"
         completed_count = 0
         issue = None
+        run_path = None
     else:
+        run_path = _safe_recording_run_relpath(latest, recording_root)
         readiness = latest.get("readiness") or {}
         steps = latest.get("steps") or ()
         recorded_step_ids = {
@@ -259,21 +281,25 @@ def _scenario_dto(
             and item.get("status") == "completed"
         }
         completed_count = len(completed_step_ids & expected_step_ids)
-        if business_fingerprint != expected_business_fingerprint:
+        if run_path is None:
+            state = "invalid"
+            label = "需处理"
+            issue = "录制Run路径不在录制根目录内"
+        elif business_fingerprint != expected_business_fingerprint:
             state = "outdated"
-            label = "有旧录制"
+            label = "需更新"
             issue = None
         elif not recorded_step_ids <= expected_step_ids:
             state = "invalid"
-            label = "录制需检查"
+            label = "需处理"
             issue = "录制Step与当前Feature不一致"
         elif readiness.get("bundle_valid") is not True:
             state = "invalid"
-            label = "录制需检查"
+            label = "需处理"
             issue = "录制文件损坏或不完整"
         elif readiness.get("semantic_ready") is not True:
             state = "invalid"
-            label = "录制需检查"
+            label = "需处理"
             issue = "录制证据需要检查"
         elif (
             recorded_step_ids == expected_step_ids
@@ -289,7 +315,7 @@ def _scenario_dto(
             issue = None
         else:
             state = "partial"
-            label = f"已录制 {completed_count}/{len(expected_step_ids)} Step"
+            label = "未完成"
             issue = None
     return FeatureScenarioDTO(
         scenario_id=scenario.id,
@@ -308,8 +334,24 @@ def _scenario_dto(
         export_updated_at=(
             str(export_entry.get("updated_at")) if export_entry else None
         ),
+        run_path=run_path,
         issue=issue if latest else None,
     )
+
+
+def _safe_recording_run_relpath(entry, recording_root):
+    raw_path = str(entry.get("path") or "").strip()
+    if not raw_path:
+        return None
+    root = Path(recording_root).resolve()
+    candidate = (root / raw_path).resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return None
+    if relative == Path("."):
+        return None
+    return relative.as_posix()
 
 
 def _display_path(path, root):
@@ -321,7 +363,7 @@ def _display_path(path, root):
 
 def _safe_workspace_feature_path(path, root):
     root = Path(root).resolve()
-    candidate = Path(path).absolute()
+    candidate = Path(path).resolve()
     try:
         relative = candidate.relative_to(root)
     except ValueError as error:
@@ -340,12 +382,9 @@ def _safe_workspace_feature_path(path, root):
 
 
 def _recording_summary(recorded, total, outdated):
-    if recorded:
-        label = f"录制覆盖 {recorded}/{total}"
-    else:
-        label = "无录制"
+    label = f"{recorded}/{total} 已录制"
     if outdated:
-        label += f" · 旧录制 {outdated}"
+        label += f" · {outdated} 需更新"
     return label
 
 

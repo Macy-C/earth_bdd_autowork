@@ -8,6 +8,13 @@ from pathlib import Path
 from autowork_core.utils.debug_tools.recorder.ai_capability_registry import (
     capability_by_name,
 )
+from autowork_core.utils.debug_tools.recorder.action_knowledge import (
+    operation_compatibility,
+)
+from autowork_core.utils.debug_tools.recorder.code_reuse_index import (
+    candidate_step_pattern_contracts,
+    step_pattern_contract_matches,
+)
 from autowork_core.utils.debug_tools.recorder.identity import (
     locator_candidate_id as expected_locator_candidate_id,
 )
@@ -149,12 +156,14 @@ def compact_generation_design_contract():
         },
         "step_behavior": {
             "required": ["strategy"],
-            "optional": ["candidate_id", "reason"],
+            "optional": ["candidate_id", "reason", "action_mappings"],
             "strategies": ["create", "reuse", "modify"],
             "rule": (
                 "reuse/modify require a frozen step_definition candidate. "
                 "create forbids candidate_id. Exact reuse forbids operations "
-                "and covers the Step; modify still requires operations."
+                "and requires action_mappings to prove every current Action "
+                "against one ordered frozen call_sequence entry; modify still "
+                "requires operations."
             ),
         },
         "method_resolution": {
@@ -288,7 +297,9 @@ def compact_generation_design_contract():
             "rule": (
                 "Declare every AI-only ambiguity exactly once. Omit user-"
                 "authority and evidence-required ambiguities; mixed entries "
-                "may select only a frozen AI-authority outcome."
+                "may select only a frozen AI-authority outcome. The frozen "
+                "generate_issue_placeholder outcome creates a typed failing "
+                "Step draft; AI never supplies its issue ID or code template."
             ),
         },
         "memory_trace": {
@@ -325,11 +336,17 @@ def compile_generation_design(design, brief):
         if step.get("id")
     }
     actions_by_step = {}
+    action_orders_by_step = {}
     for action in brief.get("actions") or ():
         step_id = str(action.get("step_id") or "")
         action_id = str(action.get("id") or "")
         if step_id and action_id:
-            actions_by_step.setdefault(step_id, {})[action_id] = action
+            order = action_orders_by_step.get(step_id, 0) + 1
+            action_orders_by_step[step_id] = order
+            actions_by_step.setdefault(step_id, {})[action_id] = {
+                **action,
+                "_order": order,
+            }
 
     runtime_bindings = _compile_runtime_bindings(design)
     owners = _compile_window_owners(design, brief)
@@ -338,6 +355,10 @@ def compile_generation_design(design, brief):
         for item in design.get("steps") or ()
     }
     plan_steps = {}
+    unresolved_by_step = _compile_unresolved_issues(
+        design,
+        brief,
+    )
     for target_step in target_steps:
         step_id = str(target_step["id"])
         selected = design_steps[step_id]
@@ -348,12 +369,32 @@ def compile_generation_design(design, brief):
             step_id,
             step_file,
             actions_by_step.get(step_id, {}),
+            target_step,
         )
         table_usage = _compile_table_use(
             step_id,
             selected.get("table_use"),
             target_step.get("table"),
         )
+        unresolved = unresolved_by_step.get(step_id) or []
+        if unresolved:
+            plan_steps[step_id] = {
+                "behavior_owner": "step_orchestration",
+                "behavior_file": behavior.get("behavior_file") or step_file,
+                "behavior_resolution": behavior["resolution"],
+                "page_object": None,
+                "locator_file": None,
+                "data_file": None,
+                "operations": [],
+                "action_relationships": [],
+                "locators": [],
+                "ignored_action_ids": [],
+                "role_overrides": {},
+                "binding_decisions": {},
+                "table_usage": table_usage,
+                "unresolved_issues": unresolved,
+            }
+            continue
         if behavior["strategy"] == "reuse":
             behavior["step"]["table_usage"] = table_usage
             plan_steps[step_id] = behavior["step"]
@@ -408,6 +449,12 @@ def compile_generation_design(design, brief):
             "table_usage": table_usage,
         }
 
+    ambiguity_resolutions = _compile_ambiguities(design, brief)
+    _validate_confirmed_input_recovery_choices(
+        ambiguity_resolutions,
+        plan_steps,
+        brief,
+    )
     plan = {
         "summary": str(design.get("summary") or "").strip(),
         "scenario_model": _compile_scenario_model(
@@ -418,14 +465,56 @@ def compile_generation_design(design, brief):
         ),
         "window_owners": owners,
         "steps": plan_steps,
-        "ambiguity_resolutions": _compile_ambiguities(
-            design,
-            brief,
-        ),
+        "ambiguity_resolutions": ambiguity_resolutions,
         "memory_trace": deepcopy(design.get("memory_trace") or {}),
     }
     _validate_reused_method_sequences(plan_steps, brief)
     return plan
+
+
+def _validate_confirmed_input_recovery_choices(
+        resolutions,
+        plan_steps,
+        brief,
+    ):
+    ambiguities = {
+        str(item.get("ambiguity_id") or ""): item
+        for item in brief.get("ambiguities") or ()
+        if isinstance(item, dict) and item.get("ambiguity_id")
+    }
+    for resolution in resolutions or ():
+        if resolution.get("outcome") != "implement_feature_literal_input":
+            continue
+        ambiguity = ambiguities.get(
+            str(resolution.get("ambiguity_id") or "")
+        ) or {}
+        if ambiguity.get("code") != "confirmed_keyboard_input_excluded":
+            continue
+        candidate = (ambiguity.get("facts") or {}).get("candidate") or {}
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if not candidate_id or resolution.get("candidate_id") != candidate_id:
+            raise ValueError("确认排除输入的恢复候选不一致")
+        step_id = str(ambiguity.get("step_id") or "")
+        operations = (plan_steps.get(step_id) or {}).get("operations") or []
+        matching = [
+            operation for operation in operations
+            if all((
+                operation.get("op") == "input_text",
+                str(operation.get("target_action_id") or "")
+                == str(candidate.get("target_action_id") or ""),
+                str((operation.get("value_provenance") or {}).get("kind") or "")
+                == "feature_literal",
+                str((operation.get("value_provenance") or {}).get(
+                    "reference"
+                ) or "") == str(candidate.get("value_reference") or ""),
+                operation.get("value") == candidate.get("literal"),
+            ))
+        ]
+        if len(matching) != 1:
+            raise ValueError(
+                "确认排除输入的恢复候选必须由同一冻结目标和"
+                "Feature literal 的唯一input_text操作实现"
+            )
 
 
 def _validate_reused_method_sequences(plan_steps, brief):
@@ -502,6 +591,10 @@ def _validate_design_shape(design, brief):
         "ambiguity_choices",
         required=True,
     )
+    unresolved_step_ids = set(_compile_unresolved_issues(
+        design,
+        brief,
+    ))
     _validate_design_memory_trace(design.get("memory_trace"), brief)
     _reject_duplicate_design_keys(
         owners,
@@ -561,19 +654,25 @@ def _validate_design_shape(design, brief):
         behavior_strategy = str(
             (step.get("step_behavior") or {}).get("strategy") or "create"
         )
-        _validate_resolution_choice(
+        _validate_step_behavior_choice(
             step.get("step_behavior"),
             label="step_behavior",
             default="create",
         )
         if (
             behavior_strategy != "reuse"
+            and str(step.get("step_id") or "") not in unresolved_step_ids
             and (
                 not isinstance(step.get("operations"), list)
                 or not step["operations"]
             )
         ):
             raise ValueError(f"Design Step {step.get('step_id')}缺少operations")
+        if (
+            str(step.get("step_id") or "") in unresolved_step_ids
+            and step.get("operations")
+        ):
+            raise ValueError("issue placeholder Step不能声明operations")
         if behavior_strategy == "reuse" and step.get("operations"):
             raise ValueError("step_behavior reuse不能声明operations")
         if behavior_strategy == "reuse" and step.get("action_relationships"):
@@ -834,6 +933,60 @@ def _validate_resolution_choice(value, *, label, default):
         raise ValueError(f"{label} {strategy}缺少candidate_id")
     if strategy == "create" and candidate_id:
         raise ValueError(f"{label} create不能声明candidate_id")
+    return strategy
+
+
+def _validate_step_behavior_choice(value, *, label, default):
+    if value is None:
+        return default
+    if not isinstance(value, dict):
+        raise ValueError(f"{label}必须是object")
+    _reject_unknown_fields(
+        value,
+        {"strategy", "candidate_id", "reason", "action_mappings"},
+        label,
+    )
+    strategy = str(value.get("strategy") or "")
+    if strategy not in {"create", "reuse", "modify"}:
+        raise ValueError(f"{label} strategy无效: {strategy}")
+    candidate_id = str(value.get("candidate_id") or "").strip()
+    if strategy in {"reuse", "modify"} and not candidate_id:
+        raise ValueError(f"{label} {strategy}缺少candidate_id")
+    if strategy == "create" and candidate_id:
+        raise ValueError(f"{label} create不能声明candidate_id")
+    mappings = value.get("action_mappings")
+    if strategy == "reuse":
+        if not isinstance(mappings, list) or not mappings:
+            raise ValueError("step_behavior reuse缺少action_mappings")
+    elif mappings is not None:
+        raise ValueError(
+            "只有step_behavior reuse可以声明action_mappings"
+        )
+    for mapping in mappings or ():
+        if not isinstance(mapping, dict):
+            raise ValueError("action_mappings必须是object array")
+        _reject_unknown_fields(
+            mapping,
+            {"action_id", "call_index", "operation", "target", "value_source"},
+            "step_behavior action_mapping",
+        )
+        if not isinstance(mapping.get("action_id"), str) or not (
+                mapping["action_id"].strip()
+        ):
+            raise ValueError("action_mapping缺少action_id")
+        if not isinstance(mapping.get("call_index"), int) or isinstance(
+                mapping.get("call_index"), bool
+        ) or mapping["call_index"] < 0:
+            raise ValueError("action_mapping.call_index必须为非负整数")
+        for field in ("operation", "target"):
+            if not isinstance(mapping.get(field), str) or not (
+                    mapping[field].strip()
+            ):
+                raise ValueError(f"action_mapping缺少{field}")
+        if "value_source" in mapping and not isinstance(
+                mapping.get("value_source"), dict
+        ):
+            raise ValueError("action_mapping.value_source必须是object")
     return strategy
 
 
@@ -1570,9 +1723,12 @@ def _compile_action_relationships(
 
 def _action_ordinal(action):
     value = action.get("ordinal")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("action_relationship缺少冻结Action ordinal")
-    return value
+    if not isinstance(value, bool) and isinstance(value, int) and value > 0:
+        return value
+    value = action.get("_order")
+    if not isinstance(value, bool) and isinstance(value, int) and value > 0:
+        return value
+    raise ValueError("action_relationship缺少冻结Action顺序")
 
 
 def _validate_transport_action(source, consumer):
@@ -2156,14 +2312,90 @@ def _compile_ambiguities(design, brief):
     return result
 
 
-def _compile_step_behavior(selected, brief, step_id, step_file, actions):
+def _compile_unresolved_issues(design, brief):
+    ambiguities = {
+        str(item.get("ambiguity_id") or ""): item
+        for item in brief.get("ambiguities") or ()
+        if isinstance(item, dict) and item.get("ambiguity_id")
+    }
+    selections = {
+        str(item.get("ambiguity_id") or ""): item
+        for item in design.get("ambiguity_choices") or ()
+        if isinstance(item, dict) and item.get("ambiguity_id")
+    }
+    result = {}
+    actions_by_step = {}
+    for action in brief.get("actions") or ():
+        step_id = str(action.get("step_id") or "")
+        action_id = str(action.get("id") or "")
+        if step_id and action_id and action.get("role") != "noise":
+            actions_by_step.setdefault(step_id, []).append(action_id)
+    for ambiguity_id, selection in selections.items():
+        if selection.get("outcome") != "generate_issue_placeholder":
+            continue
+        ambiguity = ambiguities.get(ambiguity_id) or {}
+        allowed = next((
+            item
+            for item in ambiguity.get("allowed_outcomes") or ()
+            if item.get("outcome") == "generate_issue_placeholder"
+            and item.get("authority") == "ai"
+            and item.get("effect") == "issue_placeholder"
+        ), None)
+        if allowed is None:
+            raise ValueError(
+                f"Design ambiguity outcome无效: "
+                f"{ambiguity_id}/generate_issue_placeholder"
+            )
+        step_id = str(ambiguity.get("step_id") or "")
+        if not step_id:
+            raise ValueError(
+                f"placeholder ambiguity缺少step_id: {ambiguity_id}"
+            )
+        issue_id = "generation-issue-" + hashlib.sha256(
+            f"{brief.get('request_id')}:{step_id}:{ambiguity_id}".encode(
+                "utf-8"
+            )
+        ).hexdigest()[:16]
+        result.setdefault(step_id, []).append({
+            "issue_id": issue_id,
+            "issue_type": str(
+                ambiguity.get("code") or "unresolved_generation"
+            ),
+            "step_id": step_id,
+            "ambiguity_id": ambiguity_id,
+            "action_ids": list(actions_by_step.get(step_id) or ()),
+            "source_action_ids": list(ambiguity.get("action_ids") or ()),
+            "evidence_ids": list(ambiguity.get("evidence_ids") or ()),
+            "reason": str(selection.get("reason") or "").strip(),
+        })
+    return result
+
+
+def _compile_step_behavior(
+        selected,
+        brief,
+        step_id,
+        step_file,
+        actions,
+        target_step,
+    ):
     value = dict(selected.get("step_behavior") or {})
     strategy = str(value.get("strategy") or "create")
     reason = str(
         value.get("reason")
         or "Compiled from the AI Step behavior strategy."
     )
+    exact_candidates = _exact_step_behavior_candidates(
+        brief,
+        target_step,
+        step_file,
+    )
     if strategy == "create":
+        if exact_candidates:
+            raise ValueError(
+                "当前Step范围已存在精确匹配定义；行为不复用时必须"
+                "选择绑定候选的modify"
+            )
         return {
             "strategy": strategy,
             "resolution": {
@@ -2199,7 +2431,28 @@ def _compile_step_behavior(selected, brief, step_id, step_file, actions):
         raise ValueError(
             f"Design不能修改当前Step所属文件之外的定义: {candidate_id}"
         )
+    exact_candidate_ids = {
+            str(item.get("candidate_id") or "")
+            for item in exact_candidates
+    }
+    if strategy == "modify" and candidate_id not in exact_candidate_ids:
+        raise ValueError(
+            "当前Step范围的modify必须绑定精确匹配的Step candidate: "
+            f"{candidate_id}"
+        )
     if strategy == "reuse":
+        matched_contract = _matched_step_pattern_contract(
+            candidate,
+            target_step,
+        )
+        mappings = _compile_step_behavior_action_mappings(
+            value.get("action_mappings"),
+            candidate,
+            actions,
+            step_id,
+            brief,
+            target_step,
+        )
         return {
             "strategy": strategy,
             "step": {
@@ -2209,8 +2462,13 @@ def _compile_step_behavior(selected, brief, step_id, step_file, actions):
                     "strategy": "reuse",
                     "candidate_id": candidate_id,
                     "reason": reason,
+                    "step_decorator": matched_contract["decorator"],
+                    "step_pattern": matched_contract["pattern"],
+                    "action_mappings": mappings,
                 },
-                "covered_action_ids": list(actions),
+                "covered_action_ids": [
+                    item["action_id"] for item in mappings
+                ],
                 "page_object": None,
                 "locator_file": None,
                 "data_file": None,
@@ -2221,15 +2479,211 @@ def _compile_step_behavior(selected, brief, step_id, step_file, actions):
                 "binding_decisions": {},
             },
         }
+    matched_contract = _matched_step_pattern_contract(candidate, target_step)
     return {
         "strategy": strategy,
         "resolution": {
             "strategy": "modify",
             "candidate_id": candidate_id,
             "reason": reason,
+            "symbol": candidate.get("symbol"),
+            "step_decorator": matched_contract["decorator"],
+            "step_pattern": matched_contract["pattern"],
         },
         "behavior_file": candidate.get("path") or step_file,
     }
+
+
+def _exact_step_behavior_candidates(brief, target_step, step_file):
+    step_text = str((target_step or {}).get("text") or "")
+    if not step_text:
+        return []
+    scope = (
+        (((brief.get("target") or {}).get("scenario") or {}).get(
+            "step_scope_binding"
+        ) or {}).get("resolved_step_scope")
+        or {}
+    )
+    visible_files = {
+        str(path).replace("\\", "/")
+        for path in scope.get("files") or ()
+    }
+    current_file = str(step_file or "").replace("\\", "/")
+    result = []
+    for candidate in (
+            (brief.get("semantics") or {}).get("reuse_candidates") or ()
+    ):
+        if not isinstance(candidate, dict) or candidate.get("kind") != (
+                "step_definition"
+        ):
+            continue
+        candidate_path = str(candidate.get("path") or "").replace(
+            "\\", "/"
+        )
+        if candidate_path != current_file or (
+                visible_files and candidate_path not in visible_files
+        ):
+            continue
+        if len(_matching_step_pattern_contracts(
+            candidate,
+            target_step,
+        )) != 1:
+            continue
+        if step_text not in {
+                str(item) for item in candidate.get("matched_step_texts") or ()
+        }:
+            continue
+        if "exact_step_pattern" not in (
+                candidate.get("reasons") or ()
+        ):
+            continue
+        result.append(candidate)
+    return result
+
+
+def _matching_step_pattern_contracts(candidate, target_step):
+    return [
+        {
+            "decorator": str(contract.get("decorator") or "").casefold(),
+            "pattern": str(contract.get("pattern") or ""),
+        }
+        for contract in candidate_step_pattern_contracts(candidate)
+        if step_pattern_contract_matches(contract, target_step)
+    ]
+
+
+def _matched_step_pattern_contract(candidate, target_step):
+    contracts = _matching_step_pattern_contracts(candidate, target_step)
+    if len(contracts) != 1:
+        raise ValueError("Step candidate的匹配 Gherkin decorator/pattern不唯一")
+    return contracts[0]
+
+
+def _compile_step_behavior_action_mappings(
+        mappings,
+        candidate,
+        actions,
+        step_id,
+    brief,
+    target_step,
+    ):
+    sequence = list(candidate.get("call_sequence") or ())
+    if not sequence:
+        raise ValueError(
+            "step_behavior reuse candidate缺少冻结call_sequence"
+        )
+    mappings = [dict(item) for item in mappings or ()]
+    action_ids = set(actions)
+    mapped_ids = [str(item.get("action_id") or "") for item in mappings]
+    if set(mapped_ids) != action_ids or len(mapped_ids) != len(set(mapped_ids)):
+        raise ValueError(
+            f"Step {step_id} action_mappings必须精确覆盖当前Action"
+        )
+    call_indexes = [item.get("call_index") for item in mappings]
+    if call_indexes != list(range(len(sequence))):
+        raise ValueError(
+            "step_behavior action_mappings必须按冻结call_sequence顺序完整映射"
+        )
+    result = []
+    for mapping in mappings:
+        action_id = str(mapping["action_id"])
+        action = actions[action_id]
+        call = sequence[mapping["call_index"]]
+        operation = str(mapping["operation"])
+        target = str(mapping["target"])
+        if operation != str(call.get("operation") or ""):
+            raise ValueError(
+                f"Step {step_id} action {action_id} 映射操作不一致"
+            )
+        if target != str(call.get("target") or ""):
+            raise ValueError(
+                f"Step {step_id} action {action_id} 映射目标不一致"
+            )
+        action_target = action.get("target") or {}
+        if target != str(action_target.get("locator_name") or ""):
+            raise ValueError(
+                f"Step {step_id} action {action_id} 映射目标与冻结Action不一致"
+            )
+        compatibility = operation_compatibility(operation, action)
+        if compatibility["status"] == "incompatible":
+            raise ValueError(
+                f"Step {step_id} action {action_id} 映射操作与冻结Action不兼容"
+            )
+        expected_value = call.get("value")
+        value_source = mapping.get("value_source")
+        value_provenance = None
+        if expected_value is not None:
+            value, _source, _ids, value_provenance, _parameters = (
+                _compile_value_source(
+                    step_id,
+                    value_source,
+                    action_id,
+                    actions,
+                    brief,
+                    target_step,
+                    {},
+                    operation,
+                )
+            )
+            if value != expected_value:
+                raise ValueError(
+                    f"Step {step_id} action {action_id} 映射值与冻结调用不一致"
+                )
+        elif call.get("value_parameter") and value_source is None:
+            raise ValueError(
+                f"Step {step_id} action {action_id} 映射缺少value_source"
+            )
+        elif call.get("value_parameter"):
+            parameter = str(call.get("value_parameter") or "")
+            if parameter not in set(candidate.get("step_parameters") or ()):
+                raise ValueError(
+                    f"Step {step_id} action {action_id} 映射引用非Step参数"
+                )
+            if not _candidate_binds_value_parameter(
+                    candidate,
+                    target_step,
+                    parameter,
+            ):
+                raise ValueError(
+                    f"Step {step_id} action {action_id} 映射的value_parameter"
+                    "未由匹配的 decorator 参数绑定"
+                )
+            _value, _source, _ids, value_provenance, _parameters = (
+                _compile_value_source(
+                    step_id,
+                    value_source,
+                    action_id,
+                    actions,
+                    brief,
+                    target_step,
+                    {},
+                    operation,
+                )
+            )
+        result.append({
+            "action_id": action_id,
+            "call_index": mapping["call_index"],
+            "operation": operation,
+            "target": target,
+            "value_provenance": value_provenance,
+        })
+    return result
+
+
+def _candidate_binds_value_parameter(candidate, target_step, parameter):
+    for contract in candidate.get("step_parameter_contracts") or ():
+        if not isinstance(contract, dict):
+            continue
+        if str(contract.get("matcher") or "") not in {"parse", "cfparse"}:
+            continue
+        if step_pattern_contract_matches(contract, target_step):
+            return any(
+                str(binding.get("parameter") or "") == parameter
+                and str(binding.get("capture_kind") or "") == "named"
+                for binding in contract.get("parameter_bindings") or ()
+                if isinstance(binding, dict)
+            )
+    return False
 
 
 def _compile_table_use(step_id, value, table):

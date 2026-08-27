@@ -4,15 +4,20 @@ import hashlib
 import json
 
 
+TRANSACTION_TRANSPORT_FIELDS = {
+    "completion_fingerprint",
+    "job_lifecycle_timing",
+    "job_transition",
+    "report_path",
+    "result_fingerprint",
+}
+
+
 def completed_report_fingerprint(report):
     value = {
         key: item
         for key, item in dict(report or {}).items()
-        if key not in {
-            "completion_fingerprint",
-            "result_fingerprint",
-            "report_path",
-        }
+        if key not in TRANSACTION_TRANSPORT_FIELDS
     }
     return _fingerprint(value)
 
@@ -21,7 +26,12 @@ def transaction_result_fingerprint(report):
     value = {
         key: item
         for key, item in dict(report or {}).items()
-        if key not in {"result_fingerprint", "report_path"}
+        if key not in {
+            "job_lifecycle_timing",
+            "job_transition",
+            "report_path",
+            "result_fingerprint",
+        }
     }
     return _fingerprint(value)
 

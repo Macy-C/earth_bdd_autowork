@@ -1,5 +1,5 @@
 from loguru import logger
-from pywinauto import Desktop
+from pywinauto import Desktop, findwindows
 import re
 from time import monotonic, sleep
 from autowork_core.common.compile import (
@@ -553,6 +553,47 @@ def _root_spec_from_criteria(entry):
     )
 
 
+def _native_uia_window_bridge_root(backend, criteria):
+    if (
+        str(backend).casefold() != "uia"
+        or str(criteria.get("control_type") or "").casefold()
+        != "window"
+        or not str(criteria.get("class_name") or "").strip()
+    ):
+        return None
+
+    try:
+        handles = findwindows.find_windows(
+            class_name=str(criteria["class_name"]),
+            visible_only=_to_bool(criteria.get("visible_only", True)),
+        )
+    except Exception:
+        return None
+
+    identity_criteria = dict(criteria)
+    identity_criteria.pop("control_type", None)
+    candidates = []
+    for handle in handles:
+        try:
+            root = Desktop(backend="uia").window(handle=handle)
+            wrapper = root.wrapper_object()
+        except Exception:
+            continue
+        if str(_element_value(wrapper, "control_type") or "").casefold() == (
+                "window"
+        ):
+            continue
+        if _element_matches_criteria(wrapper, identity_criteria):
+            candidates.append(root)
+
+    if len(candidates) > 1:
+        raise ElementAmbiguousError(
+            "UIA native window bridge匹配到多个窗口: "
+            f"class_name={criteria['class_name']} count={len(candidates)}"
+        )
+    return candidates[0] if candidates else None
+
+
 def _element_value(element, key):
     source = getattr(element, "element_info", element)
     if key == "auto_id":
@@ -774,6 +815,13 @@ def _resolve_self_top_root(windows, locator):
 
     criteria = dict(locator.criteria)
     backend = criteria.pop("backend", "uia")
+    native_bridge = _native_uia_window_bridge_root(backend, criteria)
+    if native_bridge is not None:
+        windows.set_last(native_bridge)
+        logger.debug(
+            f"^^^^^^ 已通过native handle切换UIA桥接root -> {locator.name}"
+        )
+        return RootResolveResult(root=native_bridge)
     root = Desktop(backend=backend).window(
         **_pywinauto_name_criteria(criteria)
     )

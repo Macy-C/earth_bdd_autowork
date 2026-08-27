@@ -11,6 +11,7 @@ from time import sleep
 from typing import TYPE_CHECKING
 
 import psutil
+import win32gui
 from loguru import logger
 
 from autowork_core.common.root_store import RootStore
@@ -35,6 +36,7 @@ class ScenarioRuntimeState:
     variables: dict[str, object] = field(default_factory=dict)
     tag_decision: "RuntimeTagDecision | None" = None
     root_pid: int | None = None
+    window_handles_before: set[int] = field(default_factory=set)
     process_snapshot_before: set[int] = field(default_factory=set)
     process_tracking_pending: bool = False
     started_pids: set[int] = field(default_factory=set)
@@ -68,6 +70,8 @@ def initialize_ui_scenario(context, scenario):
     prepare_project_scenario(context, scenario)
 
 def _start_managed_application(context, scenario, state):
+    state.window_handles_before = get_top_level_window_handles()
+    state.windows.set_launch_handle_baseline(state.window_handles_before)
     begin_process_tracking(context)
     state.root_pid = start_configured_application()
     state.application_cleanup_required = True
@@ -153,6 +157,17 @@ def get_process_snapshot():
         process.pid: process
         for process in psutil.process_iter(attrs=["pid"])
     }
+
+
+def get_top_level_window_handles():
+    handles = set()
+
+    def collect(handle, _data):
+        handles.add(int(handle))
+        return True
+
+    win32gui.EnumWindows(collect, None)
+    return handles
 
 def get_pid_snapshot():
     return set(get_process_snapshot())

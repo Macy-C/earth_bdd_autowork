@@ -22,9 +22,6 @@ from autowork_core.utils.debug_tools.recorder.evidence_graph import (
     build_evidence_graph,
 )
 from autowork_core.utils.debug_tools.recorder.identity import stable_digest
-from autowork_core.utils.debug_tools.recorder.legacy_artifacts import (
-    migrate_legacy_timeline_artifacts,
-)
 from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION
 from autowork_core.utils.debug_tools.recorder.projection_store import (
     ProjectionStore,
@@ -47,7 +44,7 @@ from autowork_core.utils.debug_tools.recorder.writer import (
 )
 
 
-TIMELINE_PROTOCOL_VERSION = "1.0"
+TIMELINE_PROTOCOL_VERSION = "1.1"
 LOCATOR_PROJECTION_VERSION = "2.0"
 EDIT_OPERATIONS = {
     "exclude",
@@ -60,9 +57,13 @@ EDIT_OPERATIONS = {
     "merge",
     "insert_supplement",
     "target_binding_repair",
-    "keyboard_fragment",
+    "keyboard_event_fragment",
 }
-USER_EDIT_OPERATIONS = {"exclude", "include", "keyboard_fragment"}
+USER_EDIT_OPERATIONS = {
+    "exclude",
+    "include",
+    "keyboard_event_fragment",
+}
 ACTION_ROLES = ("business", "setup", "assertion", "noise", "transport")
 
 
@@ -84,38 +85,49 @@ class TimelineStore:
         self.edits_path = self.take_dir / "timeline-edits.jsonl"
         self.projections = ProjectionStore(self.take_dir)
         self.supplements = SupplementRepository(self.take_dir)
-        migrate_legacy_timeline_artifacts(
-            self.take_dir,
-            TIMELINE_PROTOCOL_VERSION,
-        )
+        self._reject_legacy_artifacts()
+
+    def _reject_legacy_artifacts(self):
+        legacy = [
+            name
+            for name in ("actions.json", "locator-candidates.yaml")
+            if (self.take_dir / name).exists()
+        ]
+        if legacy and not self.auto_path.exists():
+            raise ValueError(
+                "当前 Recorder 只支持 schema 2.1；旧 Run 需要使用旧版本"
+                "或独立离线迁移工具: " + ", ".join(legacy)
+            )
 
     @property
     def effective_path(self):
         return self.projections.artifact_path(
             "actions_effective",
-            legacy="actions.effective.json",
-        ) or (self.take_dir / "actions.effective.json")
+        ) or (self.projections.root / "__missing__" / "actions.effective.json")
 
     @property
     def events_effective_path(self):
         return self.projections.artifact_path(
             "events_effective",
-            legacy="events.effective.jsonl",
-        ) or (self.take_dir / "events.effective.jsonl")
+        ) or (
+            self.projections.root / "__missing__" / "events.effective.jsonl"
+        )
 
     @property
     def locator_effective_path(self):
         return self.projections.artifact_path(
             "locator_candidates_effective",
-            legacy="locator-candidates.effective.yaml",
-        ) or (self.take_dir / "locator-candidates.effective.yaml")
+        ) or (
+            self.projections.root
+            / "__missing__"
+            / "locator-candidates.effective.yaml"
+        )
 
     @property
     def state_path(self):
         return self.projections.artifact_path(
             "timeline_state",
-            legacy="timeline-state.json",
-        ) or (self.take_dir / "timeline-state.json")
+        ) or (self.projections.root / "__missing__" / "timeline-state.json")
 
     def initialize(self, actions):
         auto = {
@@ -140,93 +152,134 @@ class TimelineStore:
             reason,
         )
 
-    def keyboard_fragments(self, action_id):
-        action = self._keyboard_fragment_review_action(action_id)
+    def keyboard_events(self, action_id):
+        action = self._keyboard_review_action(action_id)
         if action is None or action.get("type") != "keyboard":
-            raise ValueError("键盘片段只能属于当前键盘动作")
+            raise ValueError("键盘事件只能属于当前键盘动作")
+        source_events = self._keyboard_source_events(action)
+        if not source_events:
+            return []
         excluded = {
             str(item)
-            for item in action.get("excluded_key_event_ids") or ()
+            for item in action.get("excluded_keyboard_event_ids") or ()
         }
-        fragments = []
-        text_events = []
-        text_keys = []
+        return [{
+            "event_id": str(event.get("id") or ""),
+            "event_type": str(event.get("event_type") or ""),
+            "key": copy.deepcopy(event.get("key") or {}),
+            "included": str(event.get("id") or "") not in excluded,
+        } for event in source_events]
 
-        def flush_text():
-            if not text_events:
-                return
-            fragments.append({
-                "key_event_ids": list(text_events),
-                "key_event_id": text_events[0],
-                "key": {"name": "".join(text_keys)},
-                "included": not any(
-                    item in excluded for item in text_events
-                ),
-            })
-            text_events.clear()
-            text_keys.clear()
-
-        for event_id, key in zip(
-                action.get("event_ids") or (),
-                action.get("keys") or (),
-        ):
-            event_id = str(event_id)
-            name = str((key or {}).get("name") or "")
-            if len(name) == 1 and name.isprintable():
-                text_events.append(event_id)
-                text_keys.append(name)
-                continue
-            flush_text()
-            fragments.append({
-                "key_event_ids": [event_id],
-                "key_event_id": event_id,
-                "key": copy.deepcopy(key),
-                "included": event_id not in excluded,
-            })
-        flush_text()
-        return fragments
-
-    def set_keyboard_fragment_included(
+    def set_keyboard_event_included(
             self,
             action_id,
-            key_event_ids,
+            event_id,
             included,
             *,
             expected_revision=None,
         ):
+        return self._set_keyboard_events_included(
+            action_id,
+            (event_id,),
+            included,
+            expected_revision=expected_revision,
+            payload_key="event_id",
+        )
+
+    def set_keyboard_events_included(
+            self,
+            action_id,
+            event_ids,
+            included,
+            *,
+            expected_revision=None,
+        ):
+        return self._set_keyboard_events_included(
+            action_id,
+            event_ids,
+            included,
+            expected_revision=expected_revision,
+            payload_key="event_ids",
+        )
+
+    def _set_keyboard_events_included(
+            self,
+            action_id,
+            event_ids,
+            included,
+            *,
+            expected_revision,
+            payload_key,
+        ):
         if expected_revision is not None:
             self.require_revision(expected_revision)
-        action = self._keyboard_fragment_review_action(action_id)
+        action = self._keyboard_review_action(action_id)
         if action is None or action.get("type") != "keyboard":
-            raise ValueError("键盘片段只能属于当前键盘动作")
-        if isinstance(key_event_ids, str):
-            key_event_ids = [key_event_ids]
-        key_event_ids = [str(item) for item in key_event_ids or () if item]
-        action_event_ids = {
-            str(item) for item in action.get("event_ids") or ()
+            raise ValueError("键盘事件只能属于当前键盘动作")
+        event_ids = _keyboard_edit_event_ids({"event_ids": event_ids})
+        source_ids = {
+            str(item.get("id") or "")
+            for item in self._keyboard_source_events(action)
         }
-        if not key_event_ids or not set(key_event_ids) <= action_event_ids:
-            raise ValueError("键盘片段不属于当前动作")
+        if not event_ids or not set(event_ids) <= source_ids:
+            raise ValueError("键盘事件不属于当前动作")
         excluded = {
             str(item)
-            for item in action.get("excluded_key_event_ids") or ()
+            for item in action.get("excluded_keyboard_event_ids") or ()
         }
         if included:
-            excluded.difference_update(key_event_ids)
+            excluded.difference_update(event_ids)
         else:
-            excluded.update(key_event_ids)
-        if len(excluded) >= len(action.get("event_ids") or ()):
-            raise ValueError("不能排除全部键盘片段；请忽略整个动作")
+            excluded.update(event_ids)
+        if len(excluded) >= len(source_ids):
+            raise ValueError(
+                "不能逐事件排除整段键盘输入；请明确确认后忽略整段输入"
+            )
+        payload = {
+            payload_key: (
+                event_ids[0] if payload_key == "event_id" else event_ids
+            ),
+            "included": bool(included),
+        }
         record = self._edit_record(
-            "keyboard_fragment",
+            "keyboard_event_fragment",
             [str(action_id)],
-            {"key_event_ids": key_event_ids, "included": bool(included)},
-            "keyboard_fragment_user_correction",
+            payload,
+            "keyboard_event_user_correction",
         )
         self._append_record(record)
         return self.materialize()
 
-    def _keyboard_fragment_review_action(self, action_id):
+    def _keyboard_source_events(self, action):
+        source = action.get("source") or {}
+        if source.get("kind") == "supplement":
+            events = self.supplements.load_events(source.get("supplement_id"))
+        else:
+            path = self.take_dir / "events.jsonl"
+            if not path.is_file():
+                return []
+            events = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        source_ids = {
+            str(item)
+            for item in (
+                action.get("media_event_ids")
+                or action.get("event_ids")
+                or ()
+            )
+        }
+        return [
+            event for event in events
+            if (
+                str(event.get("id") or "") in source_ids
+                and event.get("event_type") in {"key_down", "key_up"}
+            )
+        ]
+
+    def _keyboard_review_action(self, action_id):
         if not self.auto_path.exists():
             return None
         auto = self._load_auto()
@@ -379,25 +432,32 @@ class TimelineStore:
                 raise ValueError(f"未知动作角色: {payload.get('role')}")
             if not payload.get("type"):
                 raise ValueError("update 必须提供 payload.type")
-        if operation == "keyboard_fragment":
-            if len(action_ids) != 1:
-                raise ValueError("键盘片段编辑一次只能作用于一个动作")
-            if not isinstance(payload.get("included"), bool):
-                raise ValueError("键盘片段编辑必须提供included布尔值")
-            key_event_ids = [
-                str(item) for item in payload.get("key_event_ids") or ()
-                if item
+        if operation == "exclude":
+            selected = [
+                action for action in current_actions
+                if action.get("id") in set(action_ids)
             ]
-            action = next((
-                item for item in current_actions
-                if item.get("id") == action_ids[0]
-            ), None)
+            if any(action.get("type") == "keyboard" for action in selected):
+                if any((
+                    len(action_ids) != 1,
+                    payload.get("confirmed_keyboard_exclusion") is not True,
+                )):
+                    raise ValueError("忽略整段键盘输入需要明确确认")
+        if operation == "keyboard_event_fragment":
+            if len(action_ids) != 1:
+                raise ValueError("键盘事件编辑一次只能作用于一个动作")
+            if not isinstance(payload.get("included"), bool):
+                raise ValueError("键盘事件编辑必须提供included布尔值")
+            action = self._keyboard_review_action(action_ids[0])
             if action is None or action.get("type") != "keyboard":
-                raise ValueError("键盘片段只能属于当前键盘动作")
-            if not key_event_ids or not set(key_event_ids) <= {
-                str(item) for item in action.get("event_ids") or ()
-            }:
-                raise ValueError("键盘片段不属于当前动作")
+                raise ValueError("键盘事件只能属于当前键盘动作")
+            source_ids = {
+                str(event.get("id") or "")
+                for event in self._keyboard_source_events(action)
+            }
+            event_ids = _keyboard_edit_event_ids(payload)
+            if not event_ids or not set(event_ids) <= source_ids:
+                raise ValueError("键盘事件不属于当前动作")
 
         record = self._edit_record(operation, action_ids, payload, reason)
         self._append_record(record)
@@ -537,7 +597,7 @@ class TimelineStore:
             else:
                 actions = _apply_record(actions, record)
 
-        actions = self._materialize_keyboard_fragments(actions)
+        actions = self._materialize_keyboard_event_fragments(actions)
 
         target_repairs = {
             str((record.get("payload") or {}).get("target_event_id") or ""):
@@ -550,7 +610,14 @@ class TimelineStore:
             )
         }
 
+        metadata = _load_json_file(self.take_dir / "take.json")
         review_actions = _reindex_actions(actions)
+        confirmed_input_exclusions = _confirmed_keyboard_input_exclusions(
+            review_actions,
+            edits,
+            active,
+            step_id=str((metadata.get("step") or {}).get("id") or ""),
+        )
         effective_actions = [
             {key: value for key, value in action.items() if key != "included"}
             for action in review_actions
@@ -593,6 +660,9 @@ class TimelineStore:
                 for record in edits
             ),
             "actions": review_actions,
+            "confirmed_keyboard_input_exclusions": (
+                confirmed_input_exclusions
+            ),
             "role_contract": {
                 "business": "generate business operation",
                 "setup": "generate prerequisite/setup behavior",
@@ -601,8 +671,6 @@ class TimelineStore:
                 "transport": "preserve navigation context; do not treat as business assertion",
             },
         }
-        metadata = _load_json_file(self.take_dir / "take.json")
-
         source_revision = self._projection_source_revision(
             revision,
             effective_actions,
@@ -682,13 +750,6 @@ class TimelineStore:
                 step=metadata.get("step") or {},
                 observation_intents=observation_intents,
                 annotation_model_version=annotation_model_version,
-                legacy_observation_notes=(
-                    _legacy_observation_notes_enabled(
-                        self.take_dir,
-                        manifest,
-                        metadata,
-                    )
-                ),
             )
             pic_audit = build_pic_template_audit(
                 self.take_dir,
@@ -959,48 +1020,40 @@ class TimelineStore:
                 events.append(event)
         return events
 
-    def _materialize_keyboard_fragments(self, actions):
+    def _materialize_keyboard_event_fragments(self, actions):
         if not any(
                 action.get("type") == "keyboard"
-                and action.get("excluded_key_event_ids")
+                and action.get("excluded_keyboard_event_ids")
                 for action in actions
         ):
             return actions
-        events_path = self.take_dir / "events.jsonl"
-        if not events_path.is_file():
-            raise ValueError("键盘片段编辑缺少原始events.jsonl")
-        events = [
-            json.loads(line)
-            for line in events_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        event_map = {
-            str(event.get("id") or ""): event
-            for event in events
-            if event.get("id")
-        }
         for action in actions:
             excluded = {
                 str(item)
-                for item in action.get("excluded_key_event_ids") or ()
+                for item in action.get("excluded_keyboard_event_ids") or ()
             }
             if action.get("type") != "keyboard" or not excluded:
                 continue
-            original_ids = [str(item) for item in action.get("event_ids") or ()]
-            kept_ids = [item for item in original_ids if item not in excluded]
-            if not kept_ids:
-                continue
-            action["event_ids"] = kept_ids
+            original_key_ids = [
+                str(item) for item in action.get("event_ids") or ()
+            ]
+            kept_key_ids = [
+                item for item in original_key_ids if item not in excluded
+            ]
+            action["event_ids"] = kept_key_ids
             action["keys"] = [
                 item
                 for index, item in enumerate(action.get("keys") or ())
-                if index < len(original_ids) and original_ids[index] in kept_ids
+                if (
+                    index < len(original_key_ids)
+                    and original_key_ids[index] in kept_key_ids
+                )
             ]
-            action["media_event_ids"] = _keyboard_media_event_ids(
-                action.get("media_event_ids") or original_ids,
-                excluded,
-                event_map,
-            )
+            action["media_event_ids"] = [
+                str(item)
+                for item in action.get("media_event_ids") or original_key_ids
+                if str(item) not in excluded
+            ]
             if action["media_event_ids"]:
                 action["commit_event_id"] = action["media_event_ids"][-1]
         return actions
@@ -1093,11 +1146,47 @@ class TimelineStore:
     def load_edits(self):
         if not self.edits_path.exists():
             return []
-        return [
+        edits = [
             json.loads(line)
             for line in self.edits_path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        active = _active_edit_map(edits)
+        if any(
+                record.get("operation") == "keyboard_fragment"
+                and active.get(record.get("edit_id"), True)
+                for record in edits
+        ):
+            raise ValueError(
+                "keyboard_fragment 编辑已退役；"
+                "请重新检查当前录制内容"
+            )
+        if self.auto_path.is_file():
+            keyboard_action_ids = {
+                str(action.get("id") or "")
+                for action in _normalize_actions(
+                    self._load_auto().get("actions") or ()
+                )
+                if action.get("type") == "keyboard"
+            }
+            if any(
+                    record.get("kind") == "edit"
+                    and active.get(record.get("edit_id"), True)
+                    and record.get("operation") == "exclude"
+                    and keyboard_action_ids & {
+                        str(item)
+                        for item in record.get("action_ids") or ()
+                    }
+                    and (record.get("payload") or {}).get(
+                        "confirmed_keyboard_exclusion"
+                    ) is not True
+                    for record in edits
+            ):
+                raise ValueError(
+                    "未确认的整段键盘输入排除已退役；"
+                    "请重新检查当前录制内容"
+                )
+        return edits
 
     def current_revision(self):
         return _timeline_revision(self.load_edits())
@@ -1192,27 +1281,6 @@ def _run_directory_for_take(take_dir):
     return take_dir
 
 
-def _legacy_observation_notes_enabled(take_dir, manifest, metadata):
-    if (
-            manifest.get("annotation_model_version")
-            or metadata.get("annotation_model_version")
-    ):
-        return False
-    take_dir = Path(take_dir).resolve()
-    candidates = [
-        take_dir / "semantic-pack.json",
-        *sorted(take_dir.glob("projections/*/semantic-pack.json")),
-    ]
-    legacy_versions = {f"5.{minor}" for minor in range(8)}
-    for path in candidates:
-        if not path.is_file():
-            continue
-        value = _load_json_file(path)
-        if value.get("semantic_pack_version") in legacy_versions:
-            return True
-    return False
-
-
 def _normalize_action_ids(action_ids):
     if isinstance(action_ids, str):
         action_ids = [action_ids]
@@ -1276,6 +1344,142 @@ def _user_controllable_edit(record):
     )
 
 
+def _confirmed_keyboard_input_exclusions(
+        actions,
+        edits,
+        active,
+        *,
+        step_id,
+    ):
+    by_id = {
+        str(action.get("id") or ""): action
+        for action in actions or ()
+        if action.get("id")
+    }
+    result = []
+    for record in edits or ():
+        if any((
+            record.get("kind") != "edit",
+            not active.get(record.get("edit_id"), True),
+            record.get("operation") != "exclude",
+            (record.get("payload") or {}).get(
+                "confirmed_keyboard_exclusion"
+            ) is not True,
+        )):
+            continue
+        action_ids = [
+            str(item) for item in record.get("action_ids") or () if item
+        ]
+        if len(action_ids) != 1:
+            continue
+        excluded = by_id.get(action_ids[0])
+        if excluded is None or excluded.get("type") != "keyboard":
+            continue
+        identity = _action_target_identity(excluded)
+        candidate_actions = [
+            action for action in actions or ()
+            if all((
+                action.get("included", True),
+                action.get("type") in {"click", "focus"},
+                int(action.get("ordinal") or 0)
+                < int(excluded.get("ordinal") or 0),
+                _action_target_identity(action) == identity,
+            ))
+        ] if identity is not None else []
+        target_action = (
+            candidate_actions[0]
+            if len(candidate_actions) == 1
+            else None
+        )
+        reason = (
+            "target_identity_unavailable"
+            if identity is None
+            else "target_missing"
+            if not candidate_actions
+            else "target_ambiguous"
+            if len(candidate_actions) > 1
+            else None
+        )
+        candidate_id = "input-recovery-" + stable_digest(
+            record.get("edit_id"),
+            excluded.get("id"),
+            target_action.get("id") if target_action else reason,
+            length=16,
+        )
+        result.append({
+            "candidate_id": candidate_id,
+            "status": (
+                "pending_target_validation"
+                if target_action is not None
+                else "unavailable"
+            ),
+            "reason": reason,
+            "step_id": step_id or None,
+            "confirmed_edit_id": record.get("edit_id"),
+            "excluded_action_id": excluded.get("id"),
+            "excluded_event_ids": list(
+                excluded.get("media_event_ids")
+                or excluded.get("event_ids")
+                or ()
+            ),
+            "excluded_input_text": _keyboard_input_text(excluded),
+            "excluded_target_identity": identity,
+            "target_action_id": (
+                target_action.get("id") if target_action else None
+            ),
+            "target_identity": (
+                _action_target_identity(target_action)
+                if target_action is not None
+                else None
+            ),
+        })
+    return result
+
+
+def _keyboard_input_text(action):
+    names = [
+        str((key or {}).get("name") or "")
+        for key in (action.get("keys") or ())
+    ]
+    if not names or not all(
+            len(name) == 1 and name.isprintable()
+            for name in names
+    ):
+        return None
+    return "".join(names)
+
+
+def _action_target_identity(action):
+    target = (action or {}).get("target") or {}
+    element = target.get("element") or {}
+    root_name = str(target.get("root_name") or "")
+    process_id = element.get("process_id")
+    handle = element.get("handle")
+    runtime_id = tuple(element.get("runtime_id") or ())
+    if root_name and process_id and handle:
+        return {
+            "root_name": root_name,
+            "process_id": int(process_id),
+            "handle": int(handle),
+        }
+    if root_name and runtime_id:
+        return {
+            "root_name": root_name,
+            "runtime_id": list(runtime_id),
+        }
+    auto_id = str(element.get("auto_id") or "")
+    control_type = str(element.get("control_type") or "")
+    class_name = str(element.get("class_name") or "")
+    if root_name and auto_id and control_type:
+        return {
+            "root_name": root_name,
+            "auto_id": auto_id,
+            "control_type": control_type,
+            "class_name": class_name,
+        }
+    return None
+
+
 def _apply_record(actions, record):
     operation = record["operation"]
     action_ids = set(record.get("action_ids") or ())
@@ -1315,39 +1519,32 @@ def _apply_record(actions, record):
             action["note"] = payload.get("note", "")
         elif operation == "target_binding_repair":
             action["target"] = copy.deepcopy(payload["action_target"])
-        elif operation == "keyboard_fragment":
+        elif operation == "keyboard_event_fragment":
             excluded = {
                 str(item)
-                for item in action.get("excluded_key_event_ids") or ()
+                for item in action.get("excluded_keyboard_event_ids") or ()
             }
-            key_event_ids = {
-                str(item) for item in payload.get("key_event_ids") or ()
-                if item
-            }
+            event_ids = _keyboard_edit_event_ids(payload)
             if payload.get("included"):
-                excluded.difference_update(key_event_ids)
+                excluded.difference_update(event_ids)
             else:
-                excluded.update(key_event_ids)
-            action["excluded_key_event_ids"] = sorted(excluded)
+                excluded.update(event_ids)
+            action["excluded_keyboard_event_ids"] = sorted(excluded)
     return actions
 
 
-def _keyboard_media_event_ids(media_event_ids, excluded_key_event_ids, event_map):
-    excluded = set(excluded_key_event_ids)
+def _keyboard_edit_event_ids(payload):
+    payload = payload or {}
+    value = payload.get("event_ids")
+    if value is None:
+        value = (payload.get("event_id"),)
+    if isinstance(value, str):
+        value = (value,)
     result = []
-    pending_key_ups = set()
-    for event_id in media_event_ids:
-        event_id = str(event_id)
-        event = event_map.get(event_id) or {}
-        event_type = event.get("event_type")
-        key_name = str((event.get("key") or {}).get("name") or "")
-        if event_type == "key_down" and event_id in excluded:
-            pending_key_ups.add(key_name)
-            continue
-        if event_type == "key_up" and key_name in pending_key_ups:
-            pending_key_ups.discard(key_name)
-            continue
-        result.append(event_id)
+    for item in value or ():
+        event_id = str(item or "")
+        if event_id and event_id not in result:
+            result.append(event_id)
     return result
 
 

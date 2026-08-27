@@ -47,21 +47,6 @@ CURRENT_PROJECTION_ARTIFACT_KEYS = frozenset({
     "semantic_pack",
     "pic_template_audit",
 })
-LEGACY_PROJECTION_ARTIFACT_PATHS = {
-    "events_effective": Path("events.effective.jsonl"),
-    "actions_effective": Path("actions.effective.json"),
-    "timeline_state": Path("timeline-state.json"),
-    "locator_candidates_effective": Path(
-        "locator-candidates.effective.yaml"
-    ),
-    "action_media": Path("action-media.json"),
-    "media_index": Path("media-index.json"),
-    "evidence_graph": Path("evidence/graph.json"),
-    "semantic_pack": Path("semantic-pack.json"),
-    "pic_template_audit": Path("pic-template-audit.json"),
-}
-
-
 def find_latest_request(session_dir, step_ids):
     step_ids = normalize_step_ids(step_ids)
     request = _indexed_request(session_dir, step_ids)
@@ -138,29 +123,15 @@ def request_matches_current_projection(session_dir, request):
         store = ProjectionStore(take_dir)
         snapshot = store.current()
         if snapshot is None:
-            if store.pointer_path.exists():
-                return False
-            continue
+            return False
         request_hashes = evidence.get("artifact_hashes") or {}
-        relevant_keys = {
-            key
-            for key in set(artifacts) | set(snapshot.artifacts)
-            if (
-                key in CURRENT_PROJECTION_ARTIFACT_KEYS
-                or key.startswith("pic_template:")
-            )
-        }
-        for key in relevant_keys:
-            path = snapshot.path(key)
-            expected_hash = request_hashes.get(key)
-            if path is None or not expected_hash:
-                return False
-            try:
-                actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError:
-                return False
-            if actual_hash != expected_hash:
-                return False
+        if not _artifacts_match_projection_snapshot(
+                session_dir,
+                artifacts,
+                request_hashes,
+                snapshot,
+        ):
+            return False
     return True
 
 
@@ -179,35 +150,49 @@ def _request_projection_artifacts_match(session_dir, request):
         store = ProjectionStore(take_dir)
         snapshot = store.current()
         if snapshot is None:
-            if store.pointer_path.exists():
-                return False
-            if _request_artifacts_reference_projection(
-                    session_dir,
-                    store,
-                    artifacts,
-            ):
-                return False
-            continue
+            return False
         request_hashes = evidence.get("artifact_hashes") or {}
-        relevant_keys = {
-            key
-            for key in set(artifacts) | set(snapshot.artifacts)
-            if (
-                key in CURRENT_PROJECTION_ARTIFACT_KEYS
-                or key.startswith("pic_template:")
-            )
-        }
-        for key in relevant_keys:
-            path = snapshot.path(key)
-            expected_hash = request_hashes.get(key)
-            if path is None or not expected_hash:
-                return False
-            try:
-                actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError:
-                return False
-            if actual_hash != expected_hash:
-                return False
+        if not _artifacts_match_projection_snapshot(
+                session_dir,
+                artifacts,
+                request_hashes,
+                snapshot,
+        ):
+            return False
+    return True
+
+
+def _artifacts_match_projection_snapshot(
+        session_dir,
+        artifacts,
+        request_hashes,
+        snapshot,
+):
+    relevant_keys = {
+        key
+        for key in set(artifacts) | set(snapshot.artifacts)
+        if (
+            key in CURRENT_PROJECTION_ARTIFACT_KEYS
+            or key.startswith("pic_template:")
+        )
+    }
+    for key in relevant_keys:
+        current_path = snapshot.path(key)
+        declared_path = artifacts.get(key)
+        expected_hash = request_hashes.get(key)
+        if current_path is None or not declared_path or not expected_hash:
+            return False
+        try:
+            request_path = resolve_session_path(session_dir, declared_path)
+            actual_hash = hashlib.sha256(
+                current_path.read_bytes()
+            ).hexdigest()
+        except (OSError, TypeError, ValueError):
+            return False
+        if request_path != current_path.resolve():
+            return False
+        if actual_hash != expected_hash:
+            return False
     return True
 
 
@@ -232,34 +217,6 @@ def _manifest_selected_take_paths(session_dir):
         except (TypeError, ValueError):
             continue
     return result
-
-
-def _request_artifacts_reference_projection(session_dir, store, artifacts):
-    projection_roots = (store.root.resolve(), store.legacy_root.resolve())
-    for key, relative in artifacts.items():
-        if not (
-                key in CURRENT_PROJECTION_ARTIFACT_KEYS
-                or key.startswith("pic_template:")
-        ):
-            continue
-        try:
-            path = resolve_session_path(session_dir, relative)
-        except (TypeError, ValueError):
-            return True
-        if any(path.is_relative_to(root) for root in projection_roots):
-            return True
-        try:
-            take_relative = path.relative_to(store.owner_dir)
-        except ValueError:
-            return True
-        if key.startswith("pic_template:"):
-            candidate_id = key.partition(":")[2]
-            expected = Path("pic") / f"{candidate_id}.png"
-        else:
-            expected = LEGACY_PROJECTION_ARTIFACT_PATHS.get(key)
-        if expected is None or take_relative != expected:
-            return True
-    return False
 
 
 def _request_scenario_scope_matches(session_dir, request, step_ids):
@@ -325,13 +282,15 @@ def request_identity_is_valid(request, step_ids=None):
     if declared_annotation_snapshot is None:
         return False
     identity_basis = request.get("identity_basis") or {}
+    if (
+            identity_basis.get("request_identity_profile") != "business-v1"
+            or "framework_contract" in request
+    ):
+        return False
     specification_fingerprint = identity_basis.get(
         "specification_fingerprint"
     )
-    explicit_legacy = str(request.get("request_id") or "").startswith(
-        "request_legacy_v3_"
-    )
-    if not explicit_legacy and (
+    if (
             not specification_fingerprint
             or specification_fingerprint
             != _request_specification_fingerprint(request)
@@ -344,14 +303,11 @@ def request_identity_is_valid(request, step_ids=None):
     ):
         return False
     declared = request.get("request_fingerprint")
-    if not explicit_legacy and not declared:
+    if not declared:
         return False
     return bool(
         _seal_less_request_identity_is_valid(request)
-        and (
-            not declared
-            or declared == request_fingerprint(request)
-        )
+        and declared == request_fingerprint(request)
     )
 
 
@@ -453,25 +409,9 @@ def request_fingerprint(request):
 
 def _seal_less_request_identity_is_valid(request):
     request_id = str(request.get("request_id") or "")
-    framework = request.get("framework_contract") or {}
-    if request_id.startswith("request_legacy_v3_"):
-        legacy = request.get("legacy_source") or {}
-        source_fingerprint = legacy.get("evidence_fingerprint")
-        if legacy.get("import_version") != "1.0" or not source_fingerprint:
-            return False
-        expected = "request_legacy_v3_" + stable_digest(
-            legacy.get("request_id"),
-            source_fingerprint,
-            framework.get("contract_hash"),
-            length=16,
-        )
-        return request_id == expected
     target = request.get("target") or {}
     identity_basis = request.get("identity_basis") or {}
-    if (
-        identity_basis.get("request_identity_profile") == "business-v1"
-        and "framework_contract" in request
-    ):
+    if identity_basis.get("request_identity_profile") != "business-v1":
         return False
     declared_execution_fingerprint = identity_basis.get(
         "execution_profile_fingerprint"
@@ -510,8 +450,8 @@ def _seal_less_request_identity_is_valid(request):
                 "evidence_context_version"
             )
         ),
-        contract_hash=framework.get("contract_hash"),
-        api_signature_hash=framework.get("api_signature_hash"),
+        contract_hash=None,
+        api_signature_hash=None,
         reviews=(request.get("readiness") or {}).get(
             "target_review_required"
         ) or [],
@@ -671,52 +611,7 @@ def request_revision_matches(session_dir, request, expected):
         return False, current
     if current_annotation_snapshot != declared_annotation_snapshot:
         return False, current
-    legacy_current = {
-        key: value
-        for key, value in current.items()
-        if key != "seal"
-    }
-    compatibility_projection = False
-    if "source_feature_sha256" not in expected:
-        legacy_current.pop("source_feature_sha256", None)
-        compatibility_projection = True
-    if "annotation_snapshot_fingerprint" not in expected:
-        legacy_current.pop("annotation_snapshot_fingerprint", None)
-        legacy_current.pop("required_annotation_count", None)
-        compatibility_projection = True
-    expected_takes = expected.get("takes") or []
-    if expected_takes and all(
-            "step_user_context_revision" not in item
-            for item in expected_takes
-    ):
-        if any(
-                int(
-                    (
-                        item.get("step_user_context_revision") or {}
-                    ).get("revision")
-                    or 0
-                ) > 0
-                for item in legacy_current.get("takes") or []
-        ):
-            return False, current
-        legacy_current["takes"] = [
-            {
-                key: value
-                for key, value in item.items()
-                if key != "step_user_context_revision"
-            }
-            for item in legacy_current.get("takes") or []
-        ]
-        compatibility_projection = True
-    if compatibility_projection:
-        legacy_seal = hashlib.sha256(json.dumps(
-            legacy_current,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")).hexdigest()
-        return legacy_seal == expected.get("seal"), current
-    return current.get("seal") == expected.get("seal"), current
+    return current == expected, current
 
 
 def _declared_annotation_snapshot(request):
@@ -849,7 +744,7 @@ def request_scope_key(step_ids):
 
 def request_status(request, *, session_dir=None):
     if request.get("request_version") != "3.0":
-        return "legacy_import_required"
+        return "request_rematerialization_required"
     reviews = (request.get("readiness") or {}).get("target_review_required") or []
     if (request.get("readiness") or {}).get("bundle_valid") is False:
         return "blocked"

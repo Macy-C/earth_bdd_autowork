@@ -3,7 +3,6 @@
   "project_assets_root": "Bdd/ai",
   "context": [
     "context/project.md",
-    "context/continuity.md",
     "context/portable-knowledge.schema.json",
     "context/shadow-companion-policy.json",
     "context/collaboration-review.schema.json",
@@ -11,7 +10,6 @@
   ],
   "prompts": [
     "prompts/recorder-generate.md",
-    "prompts/recorder-adjust.md",
     "prompts/collaboration-review.md",
     "prompts/collaboration-promote.md"
   ],
@@ -45,7 +43,6 @@
   "discovery_adapters": [
     ".github/copilot-instructions.md",
     ".github/prompts/recorder-generate.prompt.md",
-    ".github/prompts/recorder-adjust.prompt.md",
     ".github/prompts/collaboration-review.prompt.md",
     ".github/prompts/collaboration-promote.prompt.md",
     ".github/hooks/shadow-companion.json",

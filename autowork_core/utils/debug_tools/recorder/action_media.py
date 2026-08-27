@@ -142,9 +142,8 @@ def load_action_media(take_dir):
     path = resolve_take_artifact(
         take_dir,
         "action_media",
-        "action-media.json",
     )
-    if not path.exists():
+    if path is None or not path.exists():
         return {}
     try:
         return json.loads(path.read_text(encoding="utf-8"))

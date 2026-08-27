@@ -33,8 +33,8 @@ from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-GENERATION_CONTRACT_VERSION = "6.23"
-FRAMEWORK_CONTRACT_VERSION = "3.2"
+GENERATION_CONTRACT_VERSION = "6.30"
+FRAMEWORK_CONTRACT_VERSION = "3.6"
 GENERATION_CONTRACT_LEASE_VERSION = "1.0"
 
 ALLOWED_BASE_PAGE_APIS = contract_api_groups()
@@ -94,6 +94,11 @@ def build_generation_contract(manifest):
                 "generation_workflow job-evidence <job-path> "
                 "[--evidence-id <id> | --step-id <step-id> | --action-id <action-id>]"
             ),
+            "design_context": (
+                "python -m autowork_core.utils.debug_tools.recorder."
+                "generation_workflow job-design-context <job-path> "
+                "[--step-id <step-id>]"
+            ),
             "compare_takes": (
                 "python -m autowork_core.utils.debug_tools.recorder."
                 "generation_workflow job-compare-takes <job-path> --step-id <step-id>"
@@ -116,6 +121,11 @@ def build_generation_contract(manifest):
                 "python -m autowork_core.utils.debug_tools.recorder."
                 "generation_workflow prepare-job <job-path> --claim-id <claim-id> "
                 "--expected-epoch <epoch>"
+            ),
+            "implementation_packet": (
+                "python -m autowork_core.utils.debug_tools.recorder."
+                "generation_workflow job-implementation-packet <report-path> "
+                "[--step-id <step-id> | --path <path>]"
             ),
             "validate_implementation": (
                 "python -m autowork_core.utils.debug_tools.recorder."
@@ -152,14 +162,16 @@ def build_generation_contract(manifest):
             "rules": [
                 "RequestV3 is immutable and contains facts only.",
                 "ai/workflow/<request-id>.json is the only runtime state source.",
-                "AI reads fact-first Generation Brief 4.4 by default and queries only disputed Evidence, Takes, or named operation capabilities on demand.",
+                "AI reads a fingerprinted GenerationDesignContextV1 by default; the immutable full Brief remains compiler authority and omitted detail expands only through frozen Job queries.",
                 "AI reads content-addressed Plan Context 1.1 by default; the full immutable GenerationPlan remains backend identity and expands only through the plan query.",
                 "Completed regeneration may reuse its bound Request and Plan; its own prior transaction result does not stale the Request, while newer feedback or other relevant memory still requires rematerialization.",
                 "Semantic Reconciler must classify all default evidence before fast generation.",
-                "AI submits GenerationDesignV1 semantic and implementation choices; the deterministic compiler creates one revision-bound GenerationPlanV4.2 with Scenario Model, target/value provenance, typed ambiguity, window, method resolution, runtime bindings, and a Generation Contract lease. Legacy Plan-shaped Intent remains readable.",
+                "AI submits GenerationDesignV1 semantic and implementation choices; the deterministic compiler creates one revision-bound GenerationPlanV4.2 with Scenario Model, target/value provenance, typed ambiguity, window, method resolution, runtime bindings, and a Generation Contract lease.",
                 "Generation Contract binds the exact GenerationDesign and Implementation Manifest contract versions and fingerprints; either schema change requires Request rematerialization.",
                 "Inspect is side-effect-free for transaction state; prepare opens the running transaction lease.",
-                "Prepare deterministically derives and freezes ImplementationManifestV1.7 from the validated Plan, Brief, and generation-root snapshot; AI edits only ai_editable_changes and treats system_owned_changes and read_only_reuse as immutable.",
+                "Successful Job commands return the authoritative job_transition for the next claim/epoch CAS operation; callers never infer an epoch increment.",
+                "job-implementation-packet reads only the current running Job's matching prepared Transaction, Manifest, and committed file lease.",
+                "Prepare deterministically derives and freezes ImplementationManifestV1.12 from the validated Plan, Brief, and generation-root snapshot; AI edits only ai_editable_changes and treats system_owned_changes and read_only_reuse as immutable.",
                 "Action Knowledge 1.2 projects Step/Action-scoped value_source qualification for AI-named operations without exposing values or ranking operations; the compiler re-resolves every source.",
                 "Code Reuse Index 2.2 exposes only linear direct Page-operation call_sequence as exact-reuse proof; nested, conditional, helper, or otherwise non-linear methods do not receive exact sequence proof.",
                 "Exact Page method reuse verifies the content-addressed candidate, ordered operation/target sequence, and generated Step method call arguments; locator read-only status requires a frozen locator/window-root candidate.",
@@ -169,7 +181,7 @@ def build_generation_contract(manifest):
                 "Finish runs revision, Annotation lease, Python, locator, Step scope, policy, controlled-PIC, evidence, and Plan-to-Code validation automatically.",
                 "Every newly created nested Bdd/page_obj package contains an import-free __init__.py marker; it may be empty or docstring-only and never contains imports or re-exports.",
                 "The default Brief exposes frozen facts and evidence-bound constraints, not semantic operation recommendations. AI forms operation candidates before querying Action Knowledge; only objectively incompatible target/runtime combinations are rejected, while unknown requires investigation or runtime validation.",
-                "Legacy artifacts enter only through legacy_import and never reactivate an old state machine.",
+                "Historical artifacts are only read and validated; they cannot enter the current write chain or reactivate an old state machine.",
             ],
         },
         "read_order": [
@@ -180,10 +192,16 @@ def build_generation_contract(manifest):
                 "purpose": "Read the only runtime status, next action, revision, Brief pointer, Plan pointer, and transaction result.",
             },
             {
-                "artifact": "ai/generation-briefs/<request-id>.json",
+                "artifact": "inspect.design_context",
                 "required": True,
                 "access": "default",
-                "purpose": "Default compact AI context with reconciled actions, risk, plan, and revision seal.",
+                "purpose": "Fingerprint-bound GenerationDesignContextV1 with target Steps, Action facts, ownership, and reuse candidates for one Design.",
+            },
+            {
+                "artifact": "ai/generation-briefs/<request-id>.json",
+                "required": False,
+                "access": "on_demand_frozen_job_query",
+                "purpose": "Immutable full Brief authority for compiler and explicit job-design-context expansion; not default AI context.",
             },
             {
                 "artifact": "inspect.plan_context",
@@ -198,10 +216,10 @@ def build_generation_contract(manifest):
                 "purpose": "Immutable Plan identity for prepare, finish, proof, Code Manifest, and explicit on-demand expansion.",
             },
             {
-                "artifact": "GenerationTransaction.implementation_manifest",
+                "artifact": "job-implementation-packet",
                 "required": True,
                 "access": "after_prepare",
-                "purpose": "Content-addressed edit task projection: allowed files, Gherkin patterns, dynamic inputs, methods, receivers, locator patches, package markers, and protected paths.",
+                "purpose": "Job-bound Manifest packet projection with authorized implementation syntax for the requested Step or file.",
             },
             {
                 "artifact": "inspect.ai_capabilities",
@@ -463,6 +481,7 @@ def build_generation_contract(manifest):
                 "A WindowPage locator package has exactly one top-level Root; same-window View YAML files declare no top-level Root and reference only that package Root.",
                 "Only a frozen child_view ownership candidate may authorize a WindowView root_locator. Its YAML is an isolated window package with exactly one matching top-level Root; child locators reference only that Root.",
                 "Use WindowPage for one stable business top-level Window. Use WindowView for owned subpages; a transient child HWND does not by itself create another business Page.",
+                "Observed runtime window titles remain evidence and are not promoted automatically into Root locator criteria.",
                 "Declare every long-lived top-level Root in locator YAML; generated code must not call set_root.",
                 "Generated Step Definitions and Page Objects must not contain inline locator dictionaries.",
             ],
@@ -618,38 +637,13 @@ def build_generation_contract(manifest):
                 "the selected options constrain one GenerationDesignV1 compiled into GenerationPlanV4.2."
             ),
         },
-        "legacy_compatibility": {
-            "historical_v3_recovery": {
-                "inspect": (
-                    "python -m autowork_core.utils.debug_tools.recorder."
-                    "generation_workflow inspect <request-path>"
-                ),
-                "plan": (
-                    "python -m autowork_core.utils.debug_tools.recorder."
-                    "generation_workflow plan <request-path> "
-                    "[--step-id <step-id> | --section <section>]"
-                ),
-                "finish_running_transaction": (
-                    "python -m autowork_core.utils.debug_tools.recorder."
-                    "generation_workflow finish <report-path>"
-                ),
-                "abort_running_transaction": (
-                    "python -m autowork_core.utils.debug_tools.recorder."
-                    "generation_workflow abort <report-path> --reason <reason>"
-                ),
-            },
-            "intent_contract": (
-                "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow intent-contract"
+        "schema_support": {
+            "policy": "current_only",
+            "legacy_run_handling": (
+                "Use the matching old Recorder version or an independent "
+                "offline migration tool."
             ),
-            "adjust": (
-                "retired for current generation; use Workbench admission "
-                "to create a new Generation Job"
-            ),
-            "policy": (
-                "Historical Plan-shaped input remains readable only; new "
-                "generation must use GenerationDesignV1 through design-job."
-            ),
+            "runtime_migration": False,
         },
         "media_contract": {
             "index": "<take>/media-index.json",
@@ -921,6 +915,8 @@ def _framework_contract():
             "one top-level Root per window locator package",
             "WindowView shares its WindowPage Root by default",
             "an evidence-backed child-window WindowView may own one isolated Root",
+            "a unique native top-level window projected as a non-Window UIA bridge resolves through its exact-class handle",
+            "launch mode resolves top-level Roots only from handles absent from the pre-launch desktop snapshot and never falls back to pre-existing windows",
             "new WindowPage instances are Scenario-scoped",
         ],
     }

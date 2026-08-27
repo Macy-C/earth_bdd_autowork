@@ -2,7 +2,7 @@ from typing import TypeVar, cast
 
 from autowork_core.actions.base import (
     click, double_click, right_click,
-    input_text, send_text_keys, clear_text, focus)
+    input_text, send_text_keys, remove_text, clear_text, focus)
 from autowork_core.actions.assertions import (
     assert_exists,
     assert_not_exists,
@@ -202,6 +202,11 @@ class BasePage:
         locator = self.get_locator(locator_or_name)
         keys = self.get_data(data_or_name)
         return send_text_keys(self.ctx,locator,keys, wait_type=wait_type, wait_timeout=wait_timeout, visual_timeout=visual_timeout)
+
+    def remove_text(self, locator_or_name, data_or_name, wait_type="enabled", wait_timeout=5, visual_timeout=10):
+        locator = self.get_locator(locator_or_name)
+        text = self.get_data(data_or_name)
+        return remove_text(self.ctx, locator, text, wait_type=wait_type, wait_timeout=wait_timeout, visual_timeout=visual_timeout)
 
     def clear_text(self,locator_or_name, wait_type="enabled", wait_timeout=5, visual_timeout=10):
         locator = self.get_locator(locator_or_name)

@@ -27,6 +27,17 @@ class EvidenceSummaryDTO:
 
 
 @dataclass(frozen=True)
+class XPathTechnicalDetailDTO:
+    action_id: str
+    ordinal: int | None
+    locator_name: str | None
+    xpath: str
+    validation: str
+    stability: str
+    generation_status: str
+
+
+@dataclass(frozen=True)
 class ObservationDTO:
     annotation_id: str
     event_id: str
@@ -63,6 +74,7 @@ class TakeDTO:
     selected: bool
     timeline_revision: str | None = None
     evidence_summary: EvidenceSummaryDTO | None = None
+    xpath_details: tuple[XPathTechnicalDetailDTO, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -137,6 +149,7 @@ class FeatureScenarioDTO:
     updated_at: str | None
     export_session_id: str | None
     export_updated_at: str | None
+    run_path: str | None = None
     issue: str | None = None
 
 

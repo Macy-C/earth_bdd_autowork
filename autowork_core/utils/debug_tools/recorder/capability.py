@@ -357,34 +357,24 @@ def validate_accepted_transaction_capability_source(
             or state.get("status") in {"completed", "failed"}
         )
     )
-    if terminal_job_result:
-        job_result = load_generation_job_result(
-            session_dir,
-            state.get("last_job_result") or {},
+    if not terminal_job_result:
+        raise ValueError(
+            "Accepted Capability 必须绑定 current terminal Generation Job Result"
         )
-        terminal_entry = retired_job_entry_for_result(
-            state,
-            state.get("last_job_result") or {},
-        )
-    if state.get("current_job") or terminal_entry is not None:
-        workflow_valid = _job_result_matches_transaction(
-            session_dir,
-            state,
-            report_path,
-            report,
-        )
-    else:
-        result = state.get("last_result") or {}
-        workflow_valid = not any((
-            state.get("status") != "completed",
-            result.get("transaction_id") != report.get("transaction_id"),
-            Path(result.get("report_path") or "").resolve() != report_path,
-            result.get("status") != report.get("status"),
-            result.get("completion_fingerprint")
-            != report.get("completion_fingerprint"),
-            result.get("result_fingerprint")
-            != report.get("result_fingerprint"),
-        ))
+    job_result = load_generation_job_result(
+        session_dir,
+        state.get("last_job_result") or {},
+    )
+    terminal_entry = retired_job_entry_for_result(
+        state,
+        state.get("last_job_result") or {},
+    )
+    workflow_valid = _job_result_matches_transaction(
+        session_dir,
+        state,
+        report_path,
+        report,
+    )
     if job_result is not None:
         runtime_verification = _runtime_verification_from_job_result(
             job_result
@@ -474,6 +464,8 @@ def validate_completed_transaction_artifact_source(
     report_path = Path(report_path).resolve()
     if report.get("status") not in {"completed", "completed_no_changes"}:
         raise ValueError("Transaction artifact source尚未完成")
+    if report.get("unresolved_issues"):
+        raise ValueError("Transaction artifact包含未解决生成问题")
     for audit_name in (
         "plan_conformance_audit",
         "evidence_audit",
@@ -594,7 +586,6 @@ def load_capability_catalog(output_root):
 
 
 def _load_capability_catalog_unlocked(output_root):
-    _migrate_legacy_capabilities(output_root)
     path = _capability_catalog_path(output_root)
     if not path.exists():
         return {
@@ -765,51 +756,6 @@ def _capability_catalog_path(output_root):
         / "capabilities"
         / "catalog.json"
     )
-
-
-def _migrate_legacy_capabilities(output_root):
-    output_root = Path(output_root).resolve()
-    knowledge_root = ensure_knowledge_store(output_root)
-    catalog_path = knowledge_root / "capabilities" / "catalog.json"
-    if catalog_path.exists():
-        return
-    legacy_catalog_path = output_root / "capabilities.json"
-    if not legacy_catalog_path.is_file():
-        return
-    try:
-        legacy = json.loads(legacy_catalog_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    migrated = []
-    for entry in legacy.get("capabilities") or ():
-        capability_id = str(entry.get("capability_id") or "")
-        relative = entry.get("path")
-        if not capability_id or not relative:
-            continue
-        source = (output_root / str(relative)).resolve()
-        try:
-            source.relative_to(output_root)
-        except ValueError:
-            continue
-        try:
-            capability = json.loads(source.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        target = knowledge_root / "capabilities" / f"{capability_id}.json"
-        write_json_atomic(target, capability)
-        migrated.append({
-            **entry,
-            "path": target.relative_to(knowledge_root).as_posix(),
-        })
-    write_json_atomic(catalog_path, {
-        "schema_version": legacy.get("schema_version") or SCHEMA_VERSION,
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
-        "capabilities": migrated,
-        "migration": {
-            "source": "recording_sessions/capabilities.json",
-            "migrated_count": len(migrated),
-        },
-    })
 
 
 def _find_output_root(session_dir):

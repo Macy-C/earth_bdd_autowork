@@ -190,19 +190,13 @@ class SessionProjectionBuilder:
                 take_dir = self.session_dir / take_entry["path"]
                 projection_store = ProjectionStore(take_dir)
                 projection = projection_store.current()
-                if projection is not None and not projection.is_current_version:
-                    from autowork_core.utils.debug_tools.recorder.timeline import (
-                        TimelineStore,
+                if projection is None:
+                    raise ValueError(
+                        f"Take 缺少有效 Projection 5.7: {take_entry['path']}；"
+                        "旧 Run 需要使用旧版本或独立离线迁移工具"
                     )
-
-                    TimelineStore(take_dir).materialize()
-                    projection = projection_store.current()
-                    if projection is None or not projection.is_current_version:
-                        raise RuntimeError("Take 投影版本升级失败")
-                locator_path = (
-                    projection.path("locator_candidates_effective")
-                    if projection is not None
-                    else take_dir / "locator-candidates.effective.yaml"
+                locator_path = projection.path(
+                    "locator_candidates_effective"
                 )
                 if locator_path.exists():
                     bundle = yaml.safe_load(
@@ -231,8 +225,7 @@ class SessionProjectionBuilder:
                 for key, relative_path in raw_artifact_paths.items():
                     if (take_dir / relative_path).exists():
                         artifacts[key] = f"{take_entry['path']}/{relative_path}"
-                if projection is not None:
-                    projected_keys = {
+                projected_keys = {
                         "events_effective": "events_effective",
                         "actions": "actions_effective",
                         "actions_effective": "actions_effective",
@@ -250,44 +243,20 @@ class SessionProjectionBuilder:
                         "semantic_pack": "semantic_pack",
                         "pic_template_audit": "pic_template_audit",
                     }
-                    for key, projection_key in projected_keys.items():
-                        path = projection.path(projection_key)
-                        if path is not None and path.exists():
-                            artifacts[key] = path.relative_to(
-                                self.session_dir
-                            ).as_posix()
-                    for key in projection.artifacts:
-                        if not key.startswith("pic_template:"):
-                            continue
-                        path = projection.path(key)
-                        if path is not None and path.exists():
-                            artifacts[key] = path.relative_to(
-                                self.session_dir
-                            ).as_posix()
-                else:
-                    compatibility_paths = {
-                        "events_effective": "events.effective.jsonl",
-                        "actions": "actions.effective.json",
-                        "actions_effective": "actions.effective.json",
-                        "timeline_state": "timeline-state.json",
-                        "locator_candidates": (
-                            "locator-candidates.effective.yaml"
-                        ),
-                        "locator_candidates_effective": (
-                            "locator-candidates.effective.yaml"
-                        ),
-                        "media_index": "media-index.json",
-                        "action_media": "action-media.json",
-                        "action_contact_sheet": "action-contact-sheet.png",
-                        "evidence_graph": "evidence/graph.json",
-                        "semantic_pack": "semantic-pack.json",
-                        "pic_template_audit": "pic-template-audit.json",
-                    }
-                    for key, relative_path in compatibility_paths.items():
-                        if (take_dir / relative_path).exists():
-                            artifacts[key] = (
-                                f"{take_entry['path']}/{relative_path}"
-                            )
+                for key, projection_key in projected_keys.items():
+                    path = projection.path(projection_key)
+                    if path is not None and path.exists():
+                        artifacts[key] = path.relative_to(
+                            self.session_dir
+                        ).as_posix()
+                for key in projection.artifacts:
+                    if not key.startswith("pic_template:"):
+                        continue
+                    path = projection.path(key)
+                    if path is not None and path.exists():
+                        artifacts[key] = path.relative_to(
+                            self.session_dir
+                        ).as_posix()
                 context["artifacts"] = artifacts
                 semantic_path = artifacts.get("semantic_pack")
                 if semantic_path and (self.session_dir / semantic_path).is_file():

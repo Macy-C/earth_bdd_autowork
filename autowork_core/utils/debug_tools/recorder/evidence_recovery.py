@@ -97,6 +97,27 @@ def assess_review_recovery(take_dir, step_plan, review):
             "inventory": collect_evidence_inventory(take_dir),
         }
 
+    if code == "no_recorded_actions":
+        candidate = _confirmed_input_exclusion_candidate(
+            take_dir,
+            step_id=(step_plan or {}).get("id"),
+        )
+        if candidate is not None:
+            return {
+                "status": "ai_recoverable",
+                "confidence": "high",
+                "strategy": "confirmed_keyboard_input_exclusion",
+                "hard_blocker": False,
+                "reason": (
+                    "用户已明确排除整段键盘输入；"
+                    "系统将冻结现有目标证据，缺少唯一目标时生成"
+                    "明确失败占位而不猜测。"
+                ),
+                "inventory": collect_evidence_inventory(take_dir),
+                "candidate_id": candidate.get("candidate_id"),
+                "suggested_resolution": "confirmed_input_placeholder",
+            }
+
     inventory = collect_evidence_inventory(take_dir)
     if code not in EVIDENCE_RECOVERY_CODES:
         return {
@@ -167,6 +188,29 @@ def assess_review_recovery(take_dir, step_plan, review):
     }
 
 
+def _confirmed_input_exclusion_candidate(take_dir, *, step_id=None):
+    if take_dir is None:
+        return None
+    try:
+        state_path = resolve_take_artifact(
+            Path(take_dir).resolve(),
+            "timeline_state",
+        )
+        if state_path is None:
+            return None
+        state = _read_json(state_path)
+    except (OSError, TypeError, ValueError):
+        return None
+    for candidate in state.get("confirmed_keyboard_input_exclusions") or ():
+        if not isinstance(candidate, dict) or not candidate.get("candidate_id"):
+            continue
+        candidate_step_id = str(candidate.get("step_id") or "")
+        if step_id and candidate_step_id and candidate_step_id != str(step_id):
+            continue
+        return dict(candidate)
+    return None
+
+
 def collect_evidence_inventory(take_dir):
     result = {
         "take": str(take_dir) if take_dir else None,
@@ -199,17 +243,16 @@ def collect_evidence_inventory(take_dir):
         )
         result["sources"].append("events.jsonl")
 
+    effective_actions_path = resolve_take_artifact(
+        take_dir,
+        "actions_effective",
+    )
     for key, path in (
         ("automatic_action_count", take_dir / "actions.auto.json"),
-        (
-            "effective_action_count",
-            resolve_take_artifact(
-                take_dir,
-                "actions_effective",
-                "actions.effective.json",
-            ),
-        ),
+        ("effective_action_count", effective_actions_path),
     ):
+        if path is None:
+            continue
         value = _read_json(path)
         actions = value.get("actions") or []
         result[key] = len(actions)
@@ -221,14 +264,13 @@ def collect_evidence_inventory(take_dir):
     media_path = resolve_take_artifact(
         take_dir,
         "media_index",
-        "media-index.json",
     )
-    media = _read_json(media_path)
+    media = _read_json(media_path) if media_path is not None else {}
     for event in media.get("events") or []:
         screenshot = event.get("screenshot")
         if screenshot and (take_dir / screenshot).exists():
             result["event_screenshot_count"] += 1
-    if media:
+    if media and media_path is not None:
         result["sources"].append(media_path.relative_to(take_dir).as_posix())
 
     file_flags = {

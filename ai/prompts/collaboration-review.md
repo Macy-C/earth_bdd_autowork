@@ -26,7 +26,7 @@ the user explicitly asks for a cross-repository review.
    - `.github/copilot-instructions.md`
    - applicable `.github/instructions/*.instructions.md`
    - `ai/context/project.md`
-   - `ai/context/continuity.md`
+  - `docs/维护/5.资产迁移与知识维护.md`
    - relevant canonical prompts under `ai/prompts/`
 2. Use the Copilot session store read-only. Match the current repository by
    normalized `repository`, `cwd`, and `session_files`; do not rely on only one

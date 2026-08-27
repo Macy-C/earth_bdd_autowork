@@ -12,9 +12,9 @@ from config.paths import Paths
 
 
 RUN_RESULT_VERSION = "1.3"
-SUPPORTED_RUN_RESULT_VERSIONS = {"1.1", "1.2", RUN_RESULT_VERSION}
-RUN_RESULT_PROVENANCE_VERSION = "1.0"
-CURRENT_RUN_RESULT_PROVENANCE_VERSION = "1.1"
+SUPPORTED_RUN_RESULT_VERSIONS = {RUN_RESULT_VERSION}
+RUN_RESULT_PROVENANCE_VERSION = "1.1"
+CURRENT_RUN_RESULT_PROVENANCE_VERSION = RUN_RESULT_PROVENANCE_VERSION
 GENERATION_TRANSACTION_ENV = "AUTOWORK_GENERATION_TRANSACTION_REPORT"
 GENERATION_PROVENANCE_FIELDS = {
     "provenance_version",
@@ -32,11 +32,6 @@ GENERATION_PROVENANCE_FIELDS = {
     "implementation_snapshot",
     "runtime_risk_policy_fingerprint",
 }
-LEGACY_GENERATION_PROVENANCE_FIELDS = (
-    GENERATION_PROVENANCE_FIELDS - {"runtime_risk_policy_fingerprint"}
-)
-
-
 def generation_provenance_matches(run_result, expected):
     if not isinstance(run_result, dict) or not isinstance(expected, dict):
         return False
@@ -140,12 +135,12 @@ def generation_provenance_from_artifacts(request, plan, report):
     policy_fingerprint = (
         report.get("runtime_risk_policy") or {}
     ).get("fingerprint")
+    if not policy_fingerprint:
+        raise ValueError(
+            "Current Run Result provenance 缺少 runtime risk policy fingerprint"
+        )
     provenance = {
-        "provenance_version": (
-            CURRENT_RUN_RESULT_PROVENANCE_VERSION
-            if policy_fingerprint
-            else RUN_RESULT_PROVENANCE_VERSION
-        ),
+        "provenance_version": CURRENT_RUN_RESULT_PROVENANCE_VERSION,
         "request_id": request.get("request_id"),
         "request_fingerprint": request.get("request_fingerprint"),
         "evidence_fingerprint": request.get("evidence_fingerprint"),
@@ -167,23 +162,18 @@ def generation_provenance_from_artifacts(request, plan, report):
             report.get("implementation_snapshot") or [],
             ensure_ascii=False,
         )),
+        "runtime_risk_policy_fingerprint": policy_fingerprint,
     }
-    if policy_fingerprint:
-        provenance["runtime_risk_policy_fingerprint"] = policy_fingerprint
     return provenance
 
 
 def _generation_provenance_is_valid(value):
     if not isinstance(value, dict):
         return False
-    version = value.get("provenance_version")
-    fields = set(value)
-    if version == CURRENT_RUN_RESULT_PROVENANCE_VERSION:
-        expected_fields = GENERATION_PROVENANCE_FIELDS
-    elif version == RUN_RESULT_PROVENANCE_VERSION:
-        expected_fields = LEGACY_GENERATION_PROVENANCE_FIELDS
-    else:
+    if value.get("provenance_version") != CURRENT_RUN_RESULT_PROVENANCE_VERSION:
         return False
+    expected_fields = GENERATION_PROVENANCE_FIELDS
+    fields = set(value)
     if fields != expected_fields or not isinstance(
             value.get("implementation_snapshot"), list):
         return False

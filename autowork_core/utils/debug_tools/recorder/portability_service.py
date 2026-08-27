@@ -71,6 +71,21 @@ class RecordingPortabilityService:
             package_path,
         )
 
+    def export_feature_scenarios(
+            self,
+            feature_path,
+            scenario_ids,
+            package_path,
+    ):
+        return self._run(
+            "feature_export",
+            package_path,
+            self._export_feature_scenarios,
+            feature_path,
+            scenario_ids,
+            package_path,
+        )
+
     def export_features(self, feature_paths, output_dir):
         return self._run(
             "feature_export",
@@ -99,6 +114,20 @@ class RecordingPortabilityService:
             record_feature_delivery(self.recording_root, "export", result)
         except Exception as error:
             return _with_warning(result, _delivery_index_warning(error))
+        return result
+
+    def _export_feature_scenarios(
+            self,
+            feature_path,
+            scenario_ids,
+            package_path,
+    ):
+        result = export_feature_delivery(
+            feature_path,
+            self.recording_root,
+            package_path,
+            scenario_ids=scenario_ids,
+        )
         return result
 
     def _export_features(self, feature_paths, output_dir):

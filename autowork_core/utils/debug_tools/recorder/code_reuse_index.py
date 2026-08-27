@@ -18,7 +18,7 @@ from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-CODE_REUSE_INDEX_VERSION = "2.2"
+CODE_REUSE_INDEX_VERSION = "2.5"
 MAX_WINDOW_METHOD_CANDIDATES = 6
 _INDEX_LOCK = threading.RLock()
 _INDEX_ROOTS = (
@@ -133,10 +133,10 @@ def build_code_reuse_index(project_root, cache_path):
 
 def find_reuse_candidates(index, request, semantics=None, *, limit=12):
     query = _query_context(request, semantics or {})
-    target_step_texts = [
-        str(step.get("text") or "")
+    target_steps = [
+        step
         for step in (request.get("target") or {}).get("steps") or ()
-        if step.get("text")
+        if isinstance(step, dict) and str(step.get("text") or "").strip()
     ]
     query_tokens = set(query["tokens"])
     query_operations = set(query["operations"])
@@ -157,13 +157,10 @@ def find_reuse_candidates(index, request, semantics=None, *, limit=12):
             shared_operations = sorted(query_operations & operations)
             shared_locators = sorted(query_locators & references)
             matched_step_texts = [
-                step_text
-                for step_text in target_step_texts
+                str(target_step.get("text") or "")
+                for target_step in target_steps
                 if entry.get("kind") == "step_definition"
-                and any(
-                    step_pattern_matches(pattern, step_text)
-                    for pattern in entry.get("step_patterns") or ()
-                )
+                and _step_entry_matches_target(entry, target_step)
             ]
             exact_step_pattern = bool(matched_step_texts)
             if exact_step_pattern:
@@ -219,6 +216,57 @@ def step_pattern_matches(pattern, value):
     return bool(re.fullmatch(expression, value, flags=re.IGNORECASE))
 
 
+def step_pattern_contract_matches(contract, target_step):
+    contract = dict(contract or {})
+    decorator = str(contract.get("decorator") or "").strip().casefold()
+    target_type = _target_step_type(target_step)
+    return bool(
+        step_pattern_matches(
+            contract.get("pattern"),
+            (target_step or {}).get("text"),
+        )
+        and (
+            decorator == "step"
+            or decorator == target_type
+        )
+    )
+
+
+def _target_step_type(target_step):
+    for field in ("semantic_type", "keyword"):
+        value = str((target_step or {}).get(field) or "").strip().casefold()
+        if value in {"given", "when", "then"}:
+            return value
+    return ""
+
+
+def _step_entry_matches_target(entry, target_step):
+    return any(
+        step_pattern_contract_matches(contract, target_step)
+        for contract in candidate_step_pattern_contracts(entry)
+    )
+
+
+def candidate_step_pattern_contracts(candidate):
+    value = dict(candidate or {})
+    raw_contracts = (
+        value.get("step_pattern_contracts")
+        or value.get("step_parameter_contracts")
+        or ()
+    )
+    return [
+        {
+            "decorator": str(contract.get("decorator") or "").casefold(),
+            "pattern": str(contract.get("pattern") or ""),
+        }
+        for contract in raw_contracts
+        if isinstance(contract, dict)
+        and str(contract.get("decorator") or "").casefold()
+        in {"given", "when", "then", "step"}
+        and str(contract.get("pattern") or "")
+    ]
+
+
 def _reuse_candidate(entry):
     return {
         "candidate_id": "reuse-" + _stable_hash({
@@ -237,8 +285,15 @@ def _reuse_candidate(entry):
         "definition_fingerprint": entry.get("definition_fingerprint"),
         "file_sha256": entry.get("file_sha256"),
         "step_patterns": entry.get("step_patterns") or [],
+        "step_pattern_contracts": (
+            entry.get("step_pattern_contracts") or []
+        ),
         "operations": entry.get("operations") or [],
         "call_sequence": entry.get("call_sequence") or [],
+        "step_parameters": entry.get("step_parameters") or [],
+        "step_parameter_contracts": (
+            entry.get("step_parameter_contracts") or []
+        ),
         "references": entry.get("references") or [],
         "table_usage_hint": entry.get("table_usage_hint"),
         "quality": entry.get("quality") or {},
@@ -543,6 +598,7 @@ def _index_python(path, relative, digest):
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    step_matchers = _step_matchers_by_function(tree)
     direct_quality = {
         name: _function_quality(
             node,
@@ -593,6 +649,11 @@ def _index_python(path, relative, digest):
             "file_sha256": digest,
             "operations": sorted(set(calls) & _OPERATION_NAMES),
             "call_sequence": _operation_call_sequence(node),
+            "step_parameters": _step_parameter_names(node),
+            "step_parameter_contracts": _step_parameter_contracts(
+                node,
+                matcher=step_matchers.get(id(node)),
+            ),
             "delegated_calls": calls,
             "references": references,
             "table_usage_hint": _python_table_usage_hint(node),
@@ -604,6 +665,7 @@ def _index_python(path, relative, digest):
             ),
             "executable": not _function_is_placeholder(node),
             "step_patterns": _gherkin_patterns(node),
+            "step_pattern_contracts": _step_pattern_contracts(node),
             "tokens": _tokens(" ".join((
                 symbol,
                 decorator_text,
@@ -650,6 +712,8 @@ def _operation_call_sequence(node):
             and isinstance(statement.value.value, str)
         ):
             continue
+        if _is_get_page_binding(statement):
+            continue
         if not (
             isinstance(statement, ast.Expr)
             and isinstance(statement.value, ast.Call)
@@ -684,8 +748,123 @@ def _operation_call_sequence(node):
             )
             if isinstance(value, ast.Name):
                 record["value_parameter"] = value.id
+            elif isinstance(value, ast.Constant) and isinstance(
+                    value.value,
+                    (str, int, float, bool),
+            ):
+                record["value"] = value.value
         result.append(record)
     return result
+
+
+def _step_parameter_names(node):
+    parameters = [
+        argument.arg
+        for argument in (
+            list(node.args.posonlyargs)
+            + list(node.args.args)
+            + list(node.args.kwonlyargs)
+        )
+        if argument.arg != "context"
+    ]
+    return sorted(set(parameters))
+
+
+def _step_parameter_contracts(node, *, matcher=None):
+    parameters = set(_step_parameter_names(node))
+    contracts = []
+    for step_contract in _step_pattern_contracts(node):
+        step_type = step_contract["decorator"]
+        pattern = step_contract["pattern"]
+        supported = matcher in {"parse", "cfparse"}
+        contracts.append({
+            "decorator": step_type,
+            "matcher": matcher or "unknown",
+            "pattern": pattern,
+            "parameter_bindings": [
+                {
+                    "parameter": name,
+                    "capture_kind": "named",
+                    "capture": name,
+                }
+                for name in _parse_named_step_parameters(pattern)
+                if supported and name in parameters
+            ],
+        })
+    return contracts
+
+
+def _step_pattern_contracts(node):
+    contracts = []
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        step_type = _call_name(decorator.func)
+        if step_type not in {"given", "when", "then", "step"}:
+            continue
+        if not decorator.args or not isinstance(
+                decorator.args[0], ast.Constant
+        ) or not isinstance(decorator.args[0].value, str):
+            continue
+        contracts.append({
+            "decorator": step_type,
+            "pattern": decorator.args[0].value,
+        })
+    return contracts
+
+
+def _parse_named_step_parameters(pattern):
+    return list(dict.fromkeys(
+        match.group(1)
+        for match in re.finditer(
+            r"\{([A-Za-z_][A-Za-z0-9_]*)(?::[^{}]+)?\}",
+            str(pattern or ""),
+        )
+    ))
+
+
+def _step_matchers_by_function(tree):
+    matcher = "parse"
+    result = {}
+    for node in getattr(tree, "body", ()):
+        selected = _selected_step_matcher(node)
+        if selected is not None:
+            matcher = selected
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            result[id(node)] = matcher
+    return result
+
+
+def _selected_step_matcher(node):
+    if not (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and _call_name(node.value.func) == "use_step_matcher"
+            and node.value.args
+    ):
+        return None
+    value = node.value.args[0]
+    if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+        return None
+    return value.value
+
+
+def _is_get_page_binding(statement):
+    if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and isinstance(statement.value, ast.Call)
+    ):
+        return False
+    call = statement.value
+    return bool(
+        _call_name(call.func) == "get_page"
+        and len(call.args) == 2
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "context"
+    )
 
 
 def _call_argument_node(call, index, keywords):
@@ -818,6 +997,14 @@ def _function_is_placeholder(node):
     ):
         body = body[1:]
     if not body:
+        return True
+    if all(
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and _call_name(statement.value.func)
+        == "unresolved_generation_issue"
+        for statement in body
+    ):
         return True
     return all(
         isinstance(statement, ast.Pass)
@@ -1135,17 +1322,10 @@ def _python_table_usage_hint(node):
 
 
 def _gherkin_patterns(node):
-    patterns = []
-    for decorator in node.decorator_list:
-        if not isinstance(decorator, ast.Call):
-            continue
-        if _call_name(decorator.func) not in {"given", "when", "then", "step"}:
-            continue
-        if not decorator.args or not isinstance(decorator.args[0], ast.Constant):
-            continue
-        if isinstance(decorator.args[0].value, str):
-            patterns.append(decorator.args[0].value)
-    return patterns
+    return [
+        contract["pattern"]
+        for contract in _step_pattern_contracts(node)
+    ]
 
 
 def _link_table_step_patterns(files):

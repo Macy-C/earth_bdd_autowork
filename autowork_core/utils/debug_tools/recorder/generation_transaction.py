@@ -1730,7 +1730,7 @@ def _finish_generation_transaction_locked(
         not validate_only
         and (report.get("implementation_manifest") or {}).get(
             "implementation_manifest_version"
-        ) in {"1.6", "1.7"}
+        ) in {"1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12"}
     ):
         ledger_pointer = report.get("implementation_validation_ledger") or {}
         ledger, ledger_errors = verify_validation_ledger(
@@ -1841,10 +1841,16 @@ def _finish_generation_transaction_locked(
     )
     completed_at = datetime.now()
     transaction_finished_at = completed_at.isoformat(timespec="milliseconds")
+    unresolved_issues = _plan_unresolved_issues(plan)
     report.update({
         "status": status,
         "completed_at": completed_at.isoformat(timespec="seconds"),
-        "execution_outcome": _execution_outcome(request, status),
+        "unresolved_issues": unresolved_issues,
+        "execution_outcome": _execution_outcome(
+            request,
+            status,
+            unresolved_issues=unresolved_issues,
+        ),
         "changed_files": changed,
         "reported_changed_files": reported,
         "change_set_audit": change_audit,
@@ -3204,9 +3210,24 @@ def _required_validations(changed_files):
     return sorted(required)
 
 
-def _execution_outcome(request, transaction_status):
+def _execution_outcome(
+        request,
+        transaction_status,
+        *,
+        unresolved_issues=(),
+    ):
     execution = dict(request.get("execution") or {})
     completed = transaction_status in {"completed", "completed_no_changes"}
+    if completed and unresolved_issues:
+        return {
+            "execution_outcome_version": "1.0",
+            "static_status": "generated_with_issues",
+            "runtime_status": "runtime_blocked",
+            "status": "generated_with_issues/runtime_blocked",
+            "execution_mode": execution.get("mode") or "not_configured",
+            "runtime_policy": execution.get("runtime_policy") or "static_only",
+            "unresolved_issue_count": len(unresolved_issues),
+        }
     runtime_allowed = execution.get("runtime_policy") == "allowed"
     static_status = "static_validated" if completed else "static_validation_failed"
     runtime_status = "runtime_pending" if completed and runtime_allowed else "runtime_not_run"
@@ -3218,6 +3239,17 @@ def _execution_outcome(request, transaction_status):
         "execution_mode": execution.get("mode") or "not_configured",
         "runtime_policy": execution.get("runtime_policy") or "static_only",
     }
+
+
+def _plan_unresolved_issues(plan_artifact):
+    plan = (plan_artifact or {}).get("plan") or {}
+    return [
+        dict(issue)
+        for step in (plan.get("steps") or {}).values()
+        if isinstance(step, dict)
+        for issue in step.get("unresolved_issues") or ()
+        if isinstance(issue, dict)
+    ]
 
 
 def _report_requires_generation_contract_lease(report):

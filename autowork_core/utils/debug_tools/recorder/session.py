@@ -77,6 +77,7 @@ from autowork_core.utils.debug_tools.recorder.run_lock import RunWriteLock
 from autowork_core.utils.debug_tools.recorder.video import StepVideoRecorder
 from autowork_core.utils.debug_tools.recorder.writer import RecordingSessionWriter
 from autowork_core.utils.debug_tools.recorder.window_identity import (
+    is_recordable_window_handle,
     list_top_level_windows,
     restore_window_handles,
     window_identity_for_handle,
@@ -240,6 +241,17 @@ class FeatureRecordingSession:
         if not manifest_path.exists():
             raise FileNotFoundError(f"录制会话 manifest.json 不存在: {manifest_path}")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError(
+                f"当前 Recorder 只支持 schema {SCHEMA_VERSION}；旧 Run "
+                "需要使用旧版本或独立离线迁移工具"
+            )
+        if manifest.get("annotation_model_version") != ANNOTATION_MODEL_VERSION:
+            raise ValueError(
+                f"当前 Recorder 只支持 Annotation Model "
+                f"{ANNOTATION_MODEL_VERSION}；旧 Run 需要使用旧版本或"
+                "独立离线迁移工具"
+            )
         scenario_data = manifest.get("scenario") or {}
         manifest_steps = manifest.get("steps") or []
         step_data = [entry.get("plan") or {} for entry in manifest_steps]
@@ -314,27 +326,11 @@ class FeatureRecordingSession:
                 for key in ("status", "takes", "selected_take")
             }
             state["take_summary"] = str(
-                entry.get("take_summary")
-                or (
-                    entry.get("note")
-                    if entry.get("status") == "completed"
-                    else ""
-                )
-                or ""
+                entry.get("take_summary") or ""
             )
             state["skip_reason"] = str(
-                entry.get("skip_reason")
-                or (
-                    entry.get("note")
-                    if entry.get("status") == "skipped"
-                    else ""
-                )
-                or ""
+                entry.get("skip_reason") or ""
             )
-            state["takes"] = [
-                _with_legacy_take_review_fields(session_dir, take)
-                for take in state.get("takes") or ()
-            ]
             self.step_states[entry["plan"]["id"]] = state
         self.active = None
         self.latest_readiness = None
@@ -1915,6 +1911,11 @@ class FeatureRecordingSession:
                 raise ValueError(
                     "目标窗口已重建，但无法按冻结身份唯一恢复；请刷新并重新选择目标窗口"
                 ) from original_error
+            if not all(is_recordable_window_handle(handle) for handle in restored):
+                raise ValueError(
+                    "恢复的目标窗口没有可录制的可视区域；"
+                    "请刷新并重新选择实际业务窗口"
+                ) from original_error
             handles = list(restored)
 
         recorded_to_current = dict(zip(
@@ -1932,6 +1933,11 @@ class FeatureRecordingSession:
         if not handle or not win32gui.IsWindow(handle):
             raise ValueError(
                 f"目标窗口不存在，请刷新并重新选择目标窗口: {handle}"
+            )
+        if not is_recordable_window_handle(handle):
+            raise ValueError(
+                "目标窗口没有可录制的可视区域；"
+                "请在“限制窗口”中选择实际业务窗口"
             )
         _, process_id = win32process.GetWindowThreadProcessId(handle)
         class_name = str(win32gui.GetClassName(handle) or "")
@@ -2122,31 +2128,6 @@ def _bounded_review_text(value, label):
     if len(text) > MAX_REVIEW_TEXT_LENGTH:
         raise ValueError(f"{label}超过{MAX_REVIEW_TEXT_LENGTH}字符")
     return text
-
-
-def _with_legacy_take_review_fields(session_dir, take):
-    take = deepcopy(take)
-    if take.get("take_summary") or take.get("discard_reason"):
-        return take
-    relative = str(take.get("path") or "")
-    if not relative:
-        return take
-    path = (Path(session_dir).resolve() / relative / "take.json").resolve()
-    try:
-        path.relative_to(Path(session_dir).resolve())
-        metadata = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return take
-    legacy_note = str(metadata.get("note") or "")
-    if take.get("status") == "completed":
-        take["take_summary"] = str(
-            metadata.get("take_summary") or legacy_note
-        )
-    elif take.get("status") == "discarded":
-        take["discard_reason"] = str(
-            metadata.get("discard_reason") or legacy_note
-        )
-    return take
 
 
 def _pause_state_diff_summary(window_evidence):

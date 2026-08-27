@@ -18,18 +18,8 @@ from autowork_core.utils.debug_tools.recorder.writer import (
 
 
 PROJECTION_VERSION = "5.7"
-SUPPORTED_PROJECTION_VERSIONS = {
-    "5.0",
-    "5.1",
-    "5.2",
-    "5.3",
-    "5.4",
-    "5.5",
-    "5.6",
-    PROJECTION_VERSION,
-}
+SUPPORTED_PROJECTION_VERSIONS = {PROJECTION_VERSION}
 PROJECTION_ROOT_NAME = "p"
-LEGACY_PROJECTION_ROOT_NAME = "projections"
 PROJECTION_TEMP_PREFIX = ".tmp-"
 PROJECTION_TEMP_TOKEN_LENGTH = 8
 _LOAD_CURRENT = object()
@@ -89,7 +79,6 @@ class ProjectionStore:
     def __init__(self, owner_dir):
         self.owner_dir = Path(owner_dir).resolve()
         self.root = self.owner_dir / PROJECTION_ROOT_NAME
-        self.legacy_root = self.owner_dir / LEGACY_PROJECTION_ROOT_NAME
         self.pointer_path = self.owner_dir / "current-projection.json"
         with _LOCKS_GUARD:
             self._lock = _OWNER_LOCKS.setdefault(
@@ -192,10 +181,7 @@ class ProjectionStore:
         if not relative:
             return None
         directory = (self.owner_dir / relative).resolve()
-        if not any(
-                _is_relative_to(directory, root)
-                for root in (self.root, self.legacy_root)
-        ):
+        if not _is_relative_to(directory, self.root):
             return None
         if not directory.exists():
             return None
@@ -205,33 +191,20 @@ class ProjectionStore:
             return None
 
     def artifact_path(self, key, *, legacy=None, snapshot=_LOAD_CURRENT):
-        loading_current = snapshot is _LOAD_CURRENT
         if snapshot is _LOAD_CURRENT:
             snapshot = self.current()
         if snapshot is not None:
             path = snapshot.path(key)
             if path is not None:
                 return path
-        if loading_current and self.pointer_path.exists():
-            return None
-        legacy_names = (
-            (legacy,)
-            if isinstance(legacy, (str, Path))
-            else tuple(legacy or ())
-        )
-        legacy_paths = [self.owner_dir / name for name in legacy_names]
-        return next(
-            (path for path in legacy_paths if path.exists()),
-            legacy_paths[0] if legacy_paths else None,
-        )
+        return None
 
     def cleanup_temporary(self):
-        for root in (self.root, self.legacy_root):
-            if not root.exists():
-                continue
-            for path in root.glob(".tmp-*"):
-                if path.is_dir():
-                    shutil.rmtree(path, ignore_errors=True)
+        if not self.root.exists():
+            return
+        for path in self.root.glob(".tmp-*"):
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
 
     def _load_snapshot(self, directory, *, verify_hashes):
         manifest = json.loads(
@@ -263,8 +236,8 @@ class ProjectionStore:
         )
 
 
-def resolve_take_artifact(take_dir, key, legacy):
-    return ProjectionStore(take_dir).artifact_path(key, legacy=legacy)
+def resolve_take_artifact(take_dir, key):
+    return ProjectionStore(Path(take_dir).resolve()).artifact_path(key)
 
 
 def _is_relative_to(path, root):
