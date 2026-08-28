@@ -1086,15 +1086,9 @@ def _step_context_conflict_ambiguities(request):
         context = step.get("step_user_context") or {}
         if not context.get("active"):
             continue
-        if context.get("annotation_version") == "2.0":
-            context_claims = [
-                str(context.get("business_context") or ""),
-            ]
-        else:
-            context_claims = [
-                str(context.get("purpose") or ""),
-                str(context.get("constraints") or ""),
-            ]
+        context_claims = [
+            str(context.get("business_context") or ""),
+        ]
         conflict = None
         feature_reference = None
         context_claim = None
@@ -1869,15 +1863,9 @@ def _compact_step_user_context(value):
         "revision": value.get("revision"),
         "active": bool(value.get("active")),
     }
-    if value.get("annotation_version") == "2.0":
-        result["business_context"] = str(
-            value.get("business_context") or ""
-        )[:1200]
-    else:
-        result["purpose"] = str(value.get("purpose") or "")[:600]
-        result["constraints"] = str(
-            value.get("constraints") or ""
-        )[:600]
+    result["business_context"] = str(
+        value.get("business_context") or ""
+    )[:1200]
     return result
 
 

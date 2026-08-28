@@ -389,8 +389,6 @@ def compile_generation_design(design, brief):
                 "action_relationships": [],
                 "locators": [],
                 "ignored_action_ids": [],
-                "role_overrides": {},
-                "binding_decisions": {},
                 "table_usage": table_usage,
                 "unresolved_issues": unresolved,
             }
@@ -444,8 +442,6 @@ def compile_generation_design(design, brief):
                 owners,
             ),
             "ignored_action_ids": [],
-            "role_overrides": {},
-            "binding_decisions": {},
             "table_usage": table_usage,
         }
 
@@ -2475,8 +2471,6 @@ def _compile_step_behavior(
                 "operations": [],
                 "locators": [],
                 "ignored_action_ids": [],
-                "role_overrides": {},
-                "binding_decisions": {},
             },
         }
     matched_contract = _matched_step_pattern_contract(candidate, target_step)

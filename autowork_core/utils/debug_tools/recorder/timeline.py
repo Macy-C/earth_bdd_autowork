@@ -46,25 +46,11 @@ from autowork_core.utils.debug_tools.recorder.writer import (
 
 TIMELINE_PROTOCOL_VERSION = "1.1"
 LOCATOR_PROJECTION_VERSION = "2.0"
-EDIT_OPERATIONS = {
-    "exclude",
-    "include",
-    "change_type",
-    "set_role",
-    "set_binding",
-    "annotate",
-    "update",
-    "merge",
-    "insert_supplement",
-    "target_binding_repair",
-    "keyboard_event_fragment",
-}
 USER_EDIT_OPERATIONS = {
     "exclude",
     "include",
     "keyboard_event_fragment",
 }
-ACTION_ROLES = ("business", "setup", "assertion", "noise", "transport")
 
 
 class TimelineRevisionConflict(RuntimeError):
@@ -85,19 +71,6 @@ class TimelineStore:
         self.edits_path = self.take_dir / "timeline-edits.jsonl"
         self.projections = ProjectionStore(self.take_dir)
         self.supplements = SupplementRepository(self.take_dir)
-        self._reject_legacy_artifacts()
-
-    def _reject_legacy_artifacts(self):
-        legacy = [
-            name
-            for name in ("actions.json", "locator-candidates.yaml")
-            if (self.take_dir / name).exists()
-        ]
-        if legacy and not self.auto_path.exists():
-            raise ValueError(
-                "当前 Recorder 只支持 schema 2.1；旧 Run 需要使用旧版本"
-                "或独立离线迁移工具: " + ", ".join(legacy)
-            )
 
     @property
     def effective_path(self):
@@ -142,15 +115,46 @@ class TimelineStore:
 
     def apply_edit(self, operation, action_ids, payload=None, reason=""):
         if operation not in USER_EDIT_OPERATIONS:
-            raise ValueError(
-                "Timeline技术写操作已退役；用户只能忽略或恢复录制动作"
-            )
-        return self._append_legacy_edit(
-            operation,
-            action_ids,
-            payload,
-            reason,
-        )
+            raise ValueError(f"不支持的时间线操作: {operation}")
+        action_ids = _normalize_action_ids(action_ids)
+        current_actions = self.review_actions()
+        current_ids = {action["id"] for action in current_actions}
+        missing = [
+            action_id for action_id in action_ids
+            if action_id not in current_ids
+        ]
+        if missing:
+            raise KeyError(f"时间线中不存在动作: {missing}")
+        payload = dict(payload or {})
+        if operation == "exclude":
+            selected = [
+                action for action in current_actions
+                if action.get("id") in set(action_ids)
+            ]
+            if any(action.get("type") == "keyboard" for action in selected):
+                if any((
+                    len(action_ids) != 1,
+                    payload.get("confirmed_keyboard_exclusion") is not True,
+                )):
+                    raise ValueError("忽略整段键盘输入需要明确确认")
+        if operation == "keyboard_event_fragment":
+            if len(action_ids) != 1:
+                raise ValueError("键盘事件编辑一次只能作用于一个动作")
+            if not isinstance(payload.get("included"), bool):
+                raise ValueError("键盘事件编辑必须提供included布尔值")
+            action = self._keyboard_review_action(action_ids[0])
+            if action is None or action.get("type") != "keyboard":
+                raise ValueError("键盘事件只能属于当前键盘动作")
+            source_ids = {
+                str(event.get("id") or "")
+                for event in self._keyboard_source_events(action)
+            }
+            event_ids = _keyboard_edit_event_ids(payload)
+            if not event_ids or not set(event_ids) <= source_ids:
+                raise ValueError("键盘事件不属于当前动作")
+        record = self._edit_record(operation, action_ids, payload, reason)
+        self._append_record(record)
+        return self.materialize()
 
     def keyboard_events(self, action_id):
         action = self._keyboard_review_action(action_id)
@@ -285,7 +289,7 @@ class TimelineStore:
         auto = self._load_auto()
         actions = [
             {**copy.deepcopy(action), "included": True}
-            for action in _normalize_actions(auto.get("actions", []))
+            for action in auto.get("actions", [])
         ]
         edits = self.load_edits()
         active = _active_edit_map(edits)
@@ -379,116 +383,6 @@ class TimelineStore:
         self._append_record(record)
         return self.materialize()
 
-    def _append_legacy_edit(
-            self,
-            operation,
-            action_ids,
-            payload=None,
-            reason="",
-        ):
-        if operation not in EDIT_OPERATIONS:
-            raise ValueError(f"不支持的时间线操作: {operation}")
-        action_ids = _normalize_action_ids(action_ids)
-        current_actions = self.review_actions()
-        current_ids = {action["id"] for action in current_actions}
-        missing = [action_id for action_id in action_ids if action_id not in current_ids]
-        if missing:
-            raise KeyError(f"时间线中不存在动作: {missing}")
-        if operation == "merge" and len(action_ids) < 2:
-            raise ValueError("合并至少需要两个动作")
-        if operation == "merge":
-            selected_ids = set(action_ids)
-            selected = [
-                action
-                for action in current_actions
-                if action.get("id") in selected_ids
-            ]
-            if any(
-                not action.get("included", True) for action in selected
-            ):
-                raise ValueError("已忽略的动作不能合并；请先恢复动作")
-            selected_indexes = [
-                index
-                for index, action in enumerate(current_actions)
-                if action.get("id") in selected_ids
-            ]
-            if selected_indexes != list(range(
-                selected_indexes[0],
-                selected_indexes[-1] + 1,
-            )):
-                raise ValueError("只能合并时间线中连续的动作")
-            source_keys = {_action_source_key(action) for action in selected}
-            if len(source_keys) > 1:
-                raise ValueError("不同录制片段的动作不能合并")
-            if any(action.get("source_action_ids") for action in selected):
-                raise ValueError("已合并的动作不能再次合并；请先解除合并")
-        payload = dict(payload or {})
-        if operation == "change_type" and not payload.get("type"):
-            raise ValueError("change_type 必须提供 payload.type")
-        if operation == "set_role" and payload.get("role") not in ACTION_ROLES:
-            raise ValueError(f"未知动作角色: {payload.get('role')}")
-        if operation == "update":
-            if payload.get("role") not in ACTION_ROLES:
-                raise ValueError(f"未知动作角色: {payload.get('role')}")
-            if not payload.get("type"):
-                raise ValueError("update 必须提供 payload.type")
-        if operation == "exclude":
-            selected = [
-                action for action in current_actions
-                if action.get("id") in set(action_ids)
-            ]
-            if any(action.get("type") == "keyboard" for action in selected):
-                if any((
-                    len(action_ids) != 1,
-                    payload.get("confirmed_keyboard_exclusion") is not True,
-                )):
-                    raise ValueError("忽略整段键盘输入需要明确确认")
-        if operation == "keyboard_event_fragment":
-            if len(action_ids) != 1:
-                raise ValueError("键盘事件编辑一次只能作用于一个动作")
-            if not isinstance(payload.get("included"), bool):
-                raise ValueError("键盘事件编辑必须提供included布尔值")
-            action = self._keyboard_review_action(action_ids[0])
-            if action is None or action.get("type") != "keyboard":
-                raise ValueError("键盘事件只能属于当前键盘动作")
-            source_ids = {
-                str(event.get("id") or "")
-                for event in self._keyboard_source_events(action)
-            }
-            event_ids = _keyboard_edit_event_ids(payload)
-            if not event_ids or not set(event_ids) <= source_ids:
-                raise ValueError("键盘事件不属于当前动作")
-
-        record = self._edit_record(operation, action_ids, payload, reason)
-        self._append_record(record)
-        return self.materialize()
-
-    def restore_legacy_noise(self, action_id):
-        action_ids = _normalize_action_ids(action_id)
-        if len(action_ids) != 1:
-            raise ValueError("恢复历史noise编辑时只能选择一个动作")
-        action = next((
-            item
-            for item in self.review_actions()
-            if item.get("id") == action_ids[0]
-        ), None)
-        if action is None:
-            raise KeyError(f"时间线中不存在动作: {action_ids[0]}")
-        if (action.get("role") or "business") != "noise":
-            raise ValueError("只有历史noise动作需要兼容恢复")
-        return self._append_legacy_edit(
-            "update",
-            action_ids,
-            {
-                "included": True,
-                "type": action.get("type") or "click",
-                "role": action.get("previous_role") or "business",
-                "binding": action.get("value_binding"),
-                "note": action.get("note") or "",
-            },
-            reason="compatibility_noise_restore",
-        )
-
     def insert_supplement(
             self,
             supplement_id,
@@ -575,14 +469,7 @@ class TimelineStore:
 
     def materialize(self):
         auto = self._load_auto()
-        auto_actions = _normalize_actions(auto.get("actions", []))
-        if not self.auto_path.exists() or auto_actions != auto.get("actions", []):
-            auto = {
-                **auto,
-                "source": "migrated_legacy",
-                "actions": auto_actions,
-            }
-            write_json_atomic(self.auto_path, auto)
+        auto_actions = copy.deepcopy(auto.get("actions", []))
         edits = self.load_edits()
         active = _active_edit_map(edits)
         actions = [
@@ -622,7 +509,6 @@ class TimelineStore:
             {key: value for key, value in action.items() if key != "included"}
             for action in review_actions
             if action.get("included", True)
-            and action.get("role", "business") != "noise"
         ]
         revision = _timeline_revision(edits)
         effective = {
@@ -1146,47 +1032,11 @@ class TimelineStore:
     def load_edits(self):
         if not self.edits_path.exists():
             return []
-        edits = [
+        return [
             json.loads(line)
             for line in self.edits_path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        active = _active_edit_map(edits)
-        if any(
-                record.get("operation") == "keyboard_fragment"
-                and active.get(record.get("edit_id"), True)
-                for record in edits
-        ):
-            raise ValueError(
-                "keyboard_fragment 编辑已退役；"
-                "请重新检查当前录制内容"
-            )
-        if self.auto_path.is_file():
-            keyboard_action_ids = {
-                str(action.get("id") or "")
-                for action in _normalize_actions(
-                    self._load_auto().get("actions") or ()
-                )
-                if action.get("type") == "keyboard"
-            }
-            if any(
-                    record.get("kind") == "edit"
-                    and active.get(record.get("edit_id"), True)
-                    and record.get("operation") == "exclude"
-                    and keyboard_action_ids & {
-                        str(item)
-                        for item in record.get("action_ids") or ()
-                    }
-                    and (record.get("payload") or {}).get(
-                        "confirmed_keyboard_exclusion"
-                    ) is not True
-                    for record in edits
-            ):
-                raise ValueError(
-                    "未确认的整段键盘输入排除已退役；"
-                    "请重新检查当前录制内容"
-                )
-        return edits
 
     def current_revision(self):
         return _timeline_revision(self.load_edits())
@@ -1291,33 +1141,6 @@ def _normalize_action_ids(action_ids):
             result.append(action_id)
     if not result:
         raise ValueError("至少选择一个动作")
-    return result
-
-
-def _normalize_actions(actions):
-    result = []
-    used_ids = set()
-    for ordinal, original in enumerate(actions or (), start=1):
-        action = dict(original)
-        action_id = action.get("id")
-        if not action_id:
-            action_id = "action-" + stable_digest(
-                "legacy-action",
-                action.get("type"),
-                *(action.get("event_ids") or ()),
-                ordinal,
-                length=12,
-            )
-        candidate = action_id
-        suffix = 2
-        while candidate in used_ids:
-            candidate = f"{action_id}-{suffix}"
-            suffix += 1
-        action["id"] = candidate
-        action["ordinal"] = ordinal
-        action.setdefault("role", "business")
-        used_ids.add(candidate)
-        result.append(action)
     return result
 
 
@@ -1484,8 +1307,6 @@ def _apply_record(actions, record):
     operation = record["operation"]
     action_ids = set(record.get("action_ids") or ())
     payload = record.get("payload") or {}
-    if operation == "merge":
-        return _merge_actions(actions, record)
     for action in actions:
         if action.get("id") not in action_ids:
             continue
@@ -1493,30 +1314,6 @@ def _apply_record(actions, record):
             action["included"] = False
         elif operation == "include":
             action["included"] = True
-        elif operation == "change_type":
-            action["type"] = payload["type"]
-        elif operation == "set_role":
-            role = payload["role"]
-            if role == "noise" and action.get("role") != "noise":
-                action["previous_role"] = action.get("role") or "business"
-            elif role != "noise":
-                action.pop("previous_role", None)
-            action["role"] = role
-        elif operation == "set_binding":
-            action["value_binding"] = payload.get("binding")
-        elif operation == "annotate":
-            action["note"] = payload.get("note", "")
-        elif operation == "update":
-            action["included"] = bool(payload.get("included", True))
-            action["type"] = payload["type"]
-            role = payload["role"]
-            if role == "noise" and action.get("role") != "noise":
-                action["previous_role"] = action.get("role") or "business"
-            elif role != "noise":
-                action.pop("previous_role", None)
-            action["role"] = role
-            action["value_binding"] = payload.get("binding")
-            action["note"] = payload.get("note", "")
         elif operation == "target_binding_repair":
             action["target"] = copy.deepcopy(payload["action_target"])
         elif operation == "keyboard_event_fragment":
@@ -1575,63 +1372,6 @@ def _apply_target_repair_to_event(event, repair):
     return event
 
 
-def _merge_actions(actions, record):
-    action_ids = list(record.get("action_ids") or ())
-    indexes = [
-        index
-        for index, action in enumerate(actions)
-        if action.get("id") in action_ids and action.get("included", True)
-    ]
-    if len(indexes) < 2:
-        return actions
-    selected = [actions[index] for index in indexes]
-    payload = record.get("payload") or {}
-    event_ids = [
-        event_id
-        for action in selected
-        for event_id in action.get("event_ids") or ()
-    ]
-    merged = {
-        "id": _merged_action_id(record["edit_id"]),
-        "type": payload.get("type") or selected[-1].get("type") or "compound",
-        "event_ids": event_ids,
-        "source_action_ids": [action["id"] for action in selected],
-        "start_ms": min(
-            (action.get("start_ms") for action in selected if action.get("start_ms") is not None),
-            default=None,
-        ),
-        "end_ms": max(
-            (action.get("end_ms") for action in selected if action.get("end_ms") is not None),
-            default=None,
-        ),
-        "target": payload.get("target") or selected[-1].get("target"),
-        "role": payload.get("role") or selected[-1].get("role") or "business",
-        "included": True,
-        "note": payload.get("note", ""),
-        "merge_sources": [
-            {
-                "id": action.get("id"),
-                "ordinal": action.get("ordinal"),
-                "type": action.get("type"),
-                "target": copy.deepcopy(action.get("target") or {}),
-            }
-            for action in selected
-        ],
-    }
-    if selected[-1].get("source"):
-        merged["source"] = copy.deepcopy(selected[-1]["source"])
-    if payload.get("binding"):
-        merged["value_binding"] = payload["binding"]
-    first_index = min(indexes)
-    result = []
-    for index, action in enumerate(actions):
-        if index == first_index:
-            result.append(merged)
-        if index not in indexes:
-            result.append(action)
-    return result
-
-
 def _reindex_actions(actions):
     result = []
     for ordinal, action in enumerate(actions, start=1):
@@ -1649,21 +1389,6 @@ def _timeline_revision(edits):
         ),
         length=16,
     )
-
-
-def _merged_action_id(edit_id):
-    return "action-merge-" + stable_digest(edit_id, length=12)
-
-
-def _action_source_key(action):
-    source = action.get("source") or {}
-    if source.get("kind") == "supplement":
-        return (
-            "supplement",
-            source.get("supplement_id"),
-            source.get("path"),
-        )
-    return ("take",)
 
 
 def _materialize_locator_bundle(bundle, effective_path, actions):

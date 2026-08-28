@@ -35,7 +35,6 @@ _EXCLUDED_SOURCE_PARTS = {
 }
 _EXCLUDED_SOURCE_ROOTS = {
     PROJECTION_ROOT_NAME,
-    "projections",
 }
 _EXCLUDED_SOURCE_NAMES = {
     "current-projection.json",
@@ -74,7 +73,9 @@ def build_evidence_graph(
         f"{projection_prefix}/{name}" if projection_prefix else name
     )
     take = _read_json(take_dir / "take.json")
-    capture_integrity = take.get("capture_integrity") or {}
+    capture_integrity = take.get("capture_integrity") or {
+        "status": "unsealed",
+    }
     if requires_capture_integrity(take_dir, take):
         base_events = _read_jsonl(take_dir / "events.jsonl")
         capture_integrity = validate_capture_integrity(
@@ -86,10 +87,6 @@ def build_evidence_graph(
                 "Take 原始事件完整性校验失败: "
                 + "; ".join(capture_integrity.get("errors") or ())
             )
-    else:
-        capture_integrity = {
-            "status": capture_integrity.get("status") or "legacy_unavailable",
-        }
     effective_events_path = effective_root / "events.effective.jsonl"
     event_artifact = (
         logical("events.effective.jsonl")
@@ -225,12 +222,6 @@ def load_evidence_graph(take_dir, *, rebuild_if_stale=True):
     projection_store = ProjectionStore(take_dir)
     projection = projection_store.current()
     if projection is None:
-        pointer = _read_json(projection_store.pointer_path)
-        if pointer.get("projection_version") != PROJECTION_VERSION:
-            raise ValueError(
-                "当前 Recorder 只接受 Projection 5.7；旧 Run 需要使用"
-                "旧版本或独立离线迁移工具"
-            )
         from autowork_core.utils.debug_tools.recorder.timeline import (
             TimelineStore,
         )
@@ -880,8 +871,7 @@ def _read_actions(take_dir):
     )
     if path is None:
         raise ValueError(
-            "Take 缺少有效 Projection 5.7 actions_effective；"
-            "旧 Run 需要使用旧版本或独立离线迁移工具"
+            "Take 缺少有效 Projection 5.7 actions_effective"
         )
     return list((_read_json(path).get("actions") or []))
 

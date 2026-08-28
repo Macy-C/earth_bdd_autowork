@@ -53,7 +53,7 @@ def build_ai_context_envelope(
         brief_path,
         job_value,
         job_path=None,
-        workflow_version="4.0",
+        workflow_version="5.0",
         workflow_context=None,
         ai_capabilities=None,
         plan_context=None,

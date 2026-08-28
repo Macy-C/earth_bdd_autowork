@@ -743,31 +743,12 @@ def _brief_fingerprint(value):
         "adjustment",
         "coverage",
         "generation",
+        "scenario_intelligence",
+        "agent_tasks",
+        "semantics",
+        "memory_digest",
+        "window_ownership",
     ]
-    if value.get("brief_version") in {
-        "3.4",
-        "3.5",
-        "3.6",
-        "3.7",
-        "3.8",
-        "3.9",
-        "4.0",
-        "4.1",
-        "4.2",
-        "4.3",
-        "4.4",
-    }:
-        keys.append("scenario_intelligence")
-    if "agent_tasks" in value:
-        keys.append("agent_tasks")
-    if "draft_plan" in value:
-        keys.append("draft_plan")
-    if "semantics" in value:
-        keys.append("semantics")
-    if "memory_digest" in value:
-        keys.append("memory_digest")
-    if "window_ownership" in value:
-        keys.append("window_ownership")
     if "annotation_snapshot" in value:
         keys.append("annotation_snapshot")
     normalized = {

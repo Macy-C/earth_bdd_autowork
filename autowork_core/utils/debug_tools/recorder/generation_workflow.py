@@ -34,7 +34,6 @@ from autowork_core.utils.debug_tools.recorder.generation_contract import (
     generation_contract_lease,
 )
 from autowork_core.utils.debug_tools.recorder.generation_plan import (
-    compact_generation_intent_contract,
     load_generation_plan,
 )
 from autowork_core.utils.debug_tools.recorder.generation_profile import (
@@ -86,7 +85,7 @@ from autowork_core.utils.debug_tools.recorder.workflow_state import (
 )
 
 
-WORKFLOW_VERSION = "4.0"
+WORKFLOW_VERSION = "5.0"
 AI_WORKFLOW_CONTEXT_VERSION = "1.0"
 AI_CONTEXT_BUDGET_VERSION = "1.3"
 AI_CONTEXT_TARGET_BYTES = 50 * 1024
@@ -201,22 +200,6 @@ def query_generation_profile_contract():
         "workflow_version": WORKFLOW_VERSION,
         "status": "projected",
         "generation_profile_registry": generation_profile_registry(),
-    }
-
-
-def query_generation_intent_contract():
-    contract = compact_generation_intent_contract()
-    fingerprint = hashlib.sha256(json.dumps(
-        contract,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")).hexdigest()
-    return {
-        "workflow_version": WORKFLOW_VERSION,
-        "status": "projected",
-        "generation_intent_contract": contract,
-        "generation_intent_contract_fingerprint": fingerprint,
     }
 
 
@@ -847,7 +830,7 @@ def main(argv=None):
     visible_commands = (
         "inspect,evidence,compare-takes,plan,action-knowledge,"
         "decision-media,technical-repair-pack,technical-repair-apply,"
-        "intent-contract,design-contract,profile-contract,admit,"
+        "design-contract,profile-contract,admit,"
         "start-job,inspect-job,retry-job,retire-job,design-job,prepare-job,"
         "validate-job-implementation,finish-job,abort-job,"
         "reconcile-job-runtime,job-evidence,job-compare-takes,"
@@ -906,7 +889,6 @@ def main(argv=None):
     )
     technical_repair_input.add_argument("--proposal-json")
     technical_repair_input.add_argument("--proposal-file")
-    commands.add_parser("intent-contract")
     commands.add_parser("design-contract")
     commands.add_parser("profile-contract")
     admit = commands.add_parser("admit")
@@ -1057,8 +1039,6 @@ def main(argv=None):
             args.request_path,
             proposal,
         )
-    elif args.command == "intent-contract":
-        result = query_generation_intent_contract()
     elif args.command == "design-contract":
         result = query_generation_design_contract()
     elif args.command == "profile-contract":
@@ -1255,8 +1235,6 @@ def _project_cli_result(result, *, full=False):
             "action_knowledge",
             "decision_media",
             "decision_pack_id",
-            "generation_intent_contract",
-            "generation_intent_contract_fingerprint",
             "generation_design_contract",
             "generation_design_contract_fingerprint",
             "generation_design_validation_version",

@@ -46,18 +46,11 @@ from autowork_core.utils.bus import normalize
 
 PLAN_VERSION = "4.2"
 SUPPORTED_PLAN_VERSIONS = {PLAN_VERSION}
-BRIEF_BOUND_PLAN_VERSIONS = {PLAN_VERSION}
-STRUCTURED_PLAN_VERSIONS = {PLAN_VERSION}
-VALIDATED_PLAN_VERSIONS = {PLAN_VERSION}
-ORIGIN_BOUND_PLAN_VERSIONS = {PLAN_VERSION}
-CONTRACT_LEASE_PLAN_VERSIONS = {PLAN_VERSION}
 PLAN_ORIGINS = {
     "external_ai",
     "deterministic_surrogate",
     "human_authored",
-    "legacy_import",
 }
-GENERATION_INTENT_CONTRACT_VERSION = "1.2"
 MAX_MEMORY_TRACE_ITEMS = 6
 MAX_MEMORY_TRACE_REASON = 96
 ALLOWED_OPERATIONS = plan_operation_names()
@@ -68,260 +61,6 @@ IMPLEMENTATION_LOCATIONS = {
 _RUNTIME_BINDING_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _RUNTIME_SOURCE_PREFIX = "runtime."
 _RUNTIME_PRODUCER_OPERATIONS = frozenset({"save_text", "save_attr"})
-
-
-def compact_generation_intent_contract():
-    return {
-        "intent_contract_version": GENERATION_INTENT_CONTRACT_VERSION,
-        "top_level": {
-            "required": [
-                "summary",
-                "scenario_model",
-                "window_owners",
-                "steps",
-            ],
-            "conditional": [
-                "ambiguity_resolutions",
-                "memory_trace",
-                "global_changes",
-            ],
-            "forbidden_system_proof": [
-                "annotation_trace",
-                "annotation_references",
-                "annotation_snapshot",
-            ],
-        },
-        "runtime_binding": {
-            "producer_operations": ["save_attr", "save_text"],
-            "producer_field": "result_binding",
-            "consumer_source": "runtime.<binding>",
-            "implementation_reader": "get_variable",
-            "forbidden_generated_api": "set_variable",
-            "constraints": [
-                "one prior F9-backed producer",
-                "at least one same-Scenario consumer",
-                "producer text or attr must be frozen as readable",
-                "Steps with Examples arguments explicitly use parameters.argument=null; a name reports a declared-source conflict",
-                "no equal-value or Step-adjacency inference",
-                "no silent replacement of declared sources",
-            ],
-        },
-        "scenario_model": {
-            "model_version": "1.0",
-            "modes": ["state_model", "single_step_intent"],
-            "required": ["model_version", "summary", "steps"],
-            "roles_by_gherkin": {
-                "Given": "precondition",
-                "When": "business_action",
-                "Then": "business_assertion",
-            },
-            "states": "array; referenced state_ids must be declared here",
-            "state_fields": [
-                "state_id",
-                "name",
-                "kind",
-                "support",
-            ],
-            "step_fields": [
-                "step_id",
-                "role",
-                "consumes",
-                "produces",
-                "observes",
-                "reason",
-                "support",
-            ],
-            "transition_fields": [
-                "from_step_id",
-                "to_step_id",
-                "state_ids",
-                "reason",
-                "support",
-            ],
-            "support": (
-                "array of {authority,references}; authority is one of "
-                "feature_declared/runtime_observed/code_verified/"
-                "user_confirmed/ai_hypothesis"
-            ),
-            "support_reference_formats": {
-                "feature_declared": [
-                    "step:<step_id>",
-                    "feature:<feature_id>",
-                    "scenario:<scenario_id>",
-                ],
-                "runtime_observed": [
-                    "exact Brief action id",
-                    "exact Brief evidence id",
-                ],
-                "code_verified": ["exact Brief candidate/dependency id"],
-                "user_confirmed": ["exact compiled Decision question id"],
-                "ai_hypothesis": [
-                    "only ids already present in another authority set or "
-                    "a frozen ambiguity_id"
-                ],
-            },
-        },
-        "window_owners": {
-            "container": "object keyed by AI-chosen owner id",
-            "fields": [
-                "evidence_root",
-                "public_name",
-                "root_locator",
-                "page_object",
-                "root_locator_file",
-                "resolution",
-                "ownership_decision",
-                "views",
-            ],
-            "resolution_strategies": [
-                "reuse_existing",
-                "create_new",
-            ],
-            "resolution_fields": [
-                "strategy",
-                "candidate_id",
-                "reason",
-            ],
-            "field_types": {
-                "evidence_root": "frozen recorded Root name",
-                "public_name": "stable ASCII business slug",
-                "root_locator": "string",
-                "page_object": "workspace-relative Bdd/page_obj path string",
-                "root_locator_file": (
-                    "workspace-relative Bdd/locators path string"
-                ),
-                "views": (
-                    "object keyed by view id; each view may preserve a "
-                    "recorded evidence_root owned by the WindowPage"
-                ),
-            },
-            "view_fields": [
-                "evidence_root",
-                "ownership_candidate_id",
-                "locator_file",
-                "view_object",
-                "active_locator",
-                "root_locator",
-            ],
-            "view_root_rule": (
-                "root_locator is null for a same-window WindowView. It is "
-                "the active locator for an isolated child-window View and "
-                "requires the exact frozen child_view ownership candidate."
-            ),
-            "candidate_rule": (
-                "candidate_id is null for create_new unless the Brief names "
-                "an eligible legacy_root candidate"
-            ),
-        },
-        "steps": {
-            "container": "object keyed by every exact target step_id",
-            "fields": [
-                "behavior_owner",
-                "behavior_file",
-                "behavior_resolution",
-                "covered_action_ids",
-                "action_relationships",
-                "page_object",
-                "locator_file",
-                "data_file",
-                "operations",
-                "locators",
-                "ignored_action_ids",
-                "role_overrides",
-                "binding_decisions",
-                "table_usage",
-            ],
-            "behavior_resolution_strategies": [
-                "reuse",
-                "modify",
-                "create",
-            ],
-            "rules": [
-                "behavior_resolution is an object, not a strategy string",
-                "omit covered_action_ids unless reusing an existing behavior",
-                "action_relationships preserve physical Action coverage and order",
-                "omit table_usage when the Step has no Data Table",
-                "page_object/locator_file/data_file are path strings or null",
-                "binding_decisions and role_overrides are objects",
-            ],
-        },
-        "operation": {
-            "required": [
-                "op",
-                "window_owner",
-                "implementation_location",
-                "target_action_id",
-                "value_action_ids",
-                "reason",
-            ],
-            "optional": [
-                "target",
-                "value",
-                "source",
-                "parameters",
-                "result_binding",
-                "view_owner",
-                "implementation_method",
-                "implementation_resolution",
-                "effect_ids",
-                "decision_ids",
-                "rejected_alternatives",
-                "confidence",
-                "uncertainty",
-                "reuse_reference",
-            ],
-            "implementation_locations": sorted(
-                IMPLEMENTATION_LOCATIONS
-            ),
-            "implementation_resolution_strategies": [
-                "reuse",
-                "modify",
-                "create",
-            ],
-            "rules": [
-                "implementation_resolution is an object with strategy/candidate_id/reason",
-                "page_method requires Class.method and implementation_resolution",
-                "step_inline_base_api omits implementation_method and implementation_resolution",
-                "target/source are strings or null; parameters is an object",
-                "value_action_ids contains exact same-Step frozen Action ids when the operation requires one",
-                "when one Action proves both target and value, value_action_ids repeats target_action_id",
-            ],
-            "system_derived_omit": [
-                "action_ids",
-                "evidence_ids",
-                "target_fingerprint",
-                "annotation_*",
-            ],
-            "rejected_alternatives": "array of operation-name strings",
-        },
-        "locator": {
-            "required": ["name", "kind"],
-            "optional": ["evidence_name"],
-            "rule": (
-                "kind=top_level for a Root; evidence_name must equal a "
-                "frozen Brief root/locator name"
-            ),
-        },
-        "ambiguity_resolution": {
-            "required": [
-                "ambiguity_id",
-                "outcome",
-                "action_ids",
-                "evidence_ids",
-                "reason",
-            ],
-            "conditional": ["candidate_id", "decision_ids"],
-            "rules": [
-                "Use only an outcome frozen in the Brief.",
-                "Copy action_ids and evidence_ids exactly from the ambiguity.",
-                "The selected operations and parameters must satisfy the chosen outcome and frozen facts.",
-            ],
-        },
-        "annotation_rule": (
-            "Include every target Step in steps; omit annotation_ids and "
-            "all annotation proof because the compiler derives the exact set."
-        ),
-    }
 
 
 def _is_qualified_implementation_method(value):
@@ -344,48 +83,12 @@ def load_generation_plan(session_dir, state, request):
     ).resolve()
     try:
         path.relative_to(expected)
-    except ValueError:
-        return None
-    try:
         artifact = _read_json(path)
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     source = artifact.get("source") or {}
-    if (
-        artifact.get("plan_version") in CONTRACT_LEASE_PLAN_VERSIONS
-        and not _generation_contract_lease_is_valid(
-            source.get("generation_contract_lease")
-        )
-    ):
-        return None
-    actual_fingerprint = _plan_fingerprint(
-        artifact.get("request_id"),
-        source.get("revision_seal"),
-        source.get("confirmation_source"),
-        artifact.get("plan") or {},
-        plan_version=artifact.get("plan_version"),
-        decision_answer_fingerprint=source.get(
-            "decision_answer_fingerprint"
-        ),
-        brief_basis_fingerprint=source.get(
-            "brief_basis_fingerprint"
-        ),
-        plan_origin=source.get("plan_origin"),
-        intent_fingerprint=source.get("intent_fingerprint"),
-        generation_contract_lease_fingerprint=(
-            (source.get("generation_contract_lease") or {}).get(
-                "lease_fingerprint"
-            )
-        ),
-        generation_job_lease_fingerprint=(
-            (source.get("generation_job_lease") or {}).get(
-                "lease_fingerprint"
-            )
-        ),
-    )
     decision = (state or {}).get("decision") or {}
-    decision_status = decision.get("status")
-    if decision_status == "awaiting_answers":
+    if decision.get("status") == "awaiting_answers":
         return None
     expected_answer_fingerprint = (
         ((decision.get("answers") or {}).get("answer_fingerprint"))
@@ -393,29 +96,17 @@ def load_generation_plan(session_dir, state, request):
         else None
     )
     if any((
-        artifact.get("plan_version") not in SUPPORTED_PLAN_VERSIONS,
-        not _plan_status_is_valid(
-            artifact.get("plan_version"),
-            artifact.get("status"),
-        ),
+        not plan_artifact_identity_is_valid(artifact),
         artifact.get("request_id") != request.get("request_id"),
         artifact.get("plan_fingerprint") != pointer.get("plan_fingerprint"),
-        artifact.get("plan_fingerprint") != actual_fingerprint,
-        artifact.get("plan_id") != f"plan-{actual_fingerprint[:16]}",
         source.get("revision_seal")
         != (request.get("revision_snapshot") or {}).get("seal"),
         source.get("decision_answer_fingerprint")
         != expected_answer_fingerprint,
-        not _generation_intent_identity_is_valid(artifact),
-                bool(source.get("generation_job_lease"))
-                and not _generation_job_lease_is_valid(
-                    source.get("generation_job_lease")
-                ),
-                bool(source.get("generation_job_lease"))
-                and not _generation_job_lease_matches_state(
-                    source.get("generation_job_lease"),
-                    state,
-                ),
+        not _generation_job_lease_matches_state(
+            source.get("generation_job_lease"),
+            state,
+        ),
         (
             source.get("intent_fingerprint")
             != pointer.get("intent_fingerprint")
@@ -440,40 +131,27 @@ def load_generation_plan(session_dir, state, request):
         )
 
         brief = load_generation_brief(brief_path)
-        user_confirmed_references = (
-            _trusted_decision_references(
-                session_dir,
-                state,
-                request,
-                brief,
-            )
-            if artifact.get("plan_version") in STRUCTURED_PLAN_VERSIONS
-            else set()
+        user_confirmed_references = _trusted_decision_references(
+            session_dir,
+            state,
+            request,
+            brief,
         )
     except (OSError, json.JSONDecodeError, ValueError):
         return None
-    brief_fingerprint = brief.get("brief_fingerprint")
     if any((
-        brief_fingerprint != brief_pointer.get("brief_fingerprint"),
+        brief.get("brief_fingerprint")
+        != brief_pointer.get("brief_fingerprint"),
         not brief_matches_request(brief, request),
-        (
-            artifact.get("plan_version") in BRIEF_BOUND_PLAN_VERSIONS
-            and source.get("brief_basis_fingerprint")
-            != _plan_brief_basis_fingerprint(brief)
-        ),
+        source.get("brief_basis_fingerprint")
+        != _plan_brief_basis_fingerprint(brief),
         bool(validate_generation_plan(
             artifact.get("plan") or {},
             brief,
-            require_window_ownership=(
-                artifact.get("plan_version") in STRUCTURED_PLAN_VERSIONS
-            ),
-            require_scenario_model=(
-                artifact.get("plan_version") in STRUCTURED_PLAN_VERSIONS
-            ),
+            require_window_ownership=True,
+            require_scenario_model=True,
             user_confirmed_references=user_confirmed_references,
-            require_action_roles=(
-                artifact.get("plan_version") == PLAN_VERSION
-            ),
+            require_action_roles=True,
         )),
     )):
         return None
@@ -758,43 +436,20 @@ def bind_generation_annotation_trace(plan, brief):
     return plan
 
 
-def _generation_intent_content(intent):
-    content = json.loads(json.dumps(intent or {}, ensure_ascii=False))
+def _generation_input_content(value, *, input_kind):
+    if input_kind != "generation_design":
+        raise ValueError(f"未知generation input kind: {input_kind}")
+    content = json.loads(json.dumps(value or {}, ensure_ascii=False))
     for key in (
         "annotation_trace",
         "annotation_references",
         "annotation_snapshot",
+        "action_ids",
+        "evidence_ids",
+        "target_fingerprint",
     ):
         content.pop(key, None)
-    for step in (content.get("steps") or {}).values():
-        for operation in (step or {}).get("operations") or ():
-            if not isinstance(operation, dict):
-                continue
-            for key in (
-                "action_ids",
-                "evidence_ids",
-                "target_fingerprint",
-            ):
-                operation.pop(key, None)
     return content
-
-
-def _generation_input_content(value, *, input_kind):
-    if input_kind == "generation_intent":
-        return _generation_intent_content(value)
-    if input_kind == "generation_design":
-        content = json.loads(json.dumps(value or {}, ensure_ascii=False))
-        for key in (
-            "annotation_trace",
-            "annotation_references",
-            "annotation_snapshot",
-            "action_ids",
-            "evidence_ids",
-            "target_fingerprint",
-        ):
-            content.pop(key, None)
-        return content
-    raise ValueError(f"未知generation input kind: {input_kind}")
 
 
 def _generation_intent_fingerprint(
@@ -803,9 +458,8 @@ def _generation_intent_fingerprint(
         brief_basis_fingerprint,
         content,
         *,
-        input_kind="generation_intent",
-        input_version="1.0",
-        bind_input_identity=True,
+        input_kind,
+        input_version,
 ):
     value = {
         "intent_version": "1.0",
@@ -814,9 +468,8 @@ def _generation_intent_fingerprint(
         "brief_basis_fingerprint": brief_basis_fingerprint,
         "content": content,
     }
-    if bind_input_identity:
-        value["input_kind"] = input_kind
-        value["input_version"] = input_version
+    value["input_kind"] = input_kind
+    value["input_version"] = input_version
     return _stable_hash(value)
 
 
@@ -824,8 +477,6 @@ def _generation_intent_identity_is_valid(artifact):
     source = artifact.get("source") or {}
     expected = source.get("intent_fingerprint")
     intent = artifact.get("intent")
-    if expected is None and intent is None:
-        return True
     if not expected or not isinstance(intent, dict):
         return False
     if intent.get("intent_version") != "1.0":
@@ -833,10 +484,10 @@ def _generation_intent_identity_is_valid(artifact):
     content = intent.get("content")
     if not isinstance(content, dict):
         return False
-    input_kind = str(
-        intent.get("input_kind") or "generation_intent"
-    )
-    input_version = str(intent.get("input_version") or "1.0")
+    input_kind = str(intent.get("input_kind") or "")
+    input_version = str(intent.get("input_version") or "")
+    if input_kind != "generation_design" or not input_version:
+        return False
     actual = _generation_intent_fingerprint(
         artifact.get("request_id"),
         source.get("revision_seal"),
@@ -844,7 +495,6 @@ def _generation_intent_identity_is_valid(artifact):
         content,
         input_kind=input_kind,
         input_version=input_version,
-        bind_input_identity=("input_kind" in intent),
     )
     return all((
         intent.get("intent_fingerprint") == expected,
@@ -860,8 +510,6 @@ def normalize_generation_plan(request, plan):
         if step.get("id")
     ]
     steps = plan.get("steps") or {}
-    if len(target_step_ids) == 1 and target_step_ids[0] not in steps:
-        steps = {target_step_ids[0]: steps or plan.get("step") or {}}
     normalized_steps = {}
     for step_id, value in dict(steps).items():
         value = dict(value or {})
@@ -877,24 +525,17 @@ def normalize_generation_plan(request, plan):
                 if isinstance(operation.get("parameters"), dict)
                 else {}
             )
-            legacy_value = operation.get("value")
-            if legacy_value is None and "expected" in parameters:
-                legacy_value = parameters.get("expected")
-            legacy_source = str(operation.get("source") or "").strip() or None
-            if legacy_source is None:
-                legacy_source = str(
-                    parameters.get("expected_source")
-                    or parameters.get("value_source")
-                    or ""
-                ).strip() or None
+            value_source = str(
+                operation.get("source") or ""
+            ).strip() or None
             operations.append({
                 "op": str(operation.get("op") or "").strip(),
                 "target": str(operation.get("target") or "").strip() or None,
-                "value": legacy_value,
-                "source": legacy_source,
+                "value": operation.get("value"),
+                "source": value_source,
                 "value_provenance": _normalize_value_provenance(
                     operation.get("value_provenance"),
-                    source=legacy_source,
+                    source=value_source,
                     value_action_ids=operation.get("value_action_ids"),
                 ),
                 "result_binding": str(
@@ -974,18 +615,6 @@ def normalize_generation_plan(request, plan):
             "ignored_action_ids": _unique_strings(
                 value.get("ignored_action_ids")
             ),
-            "role_overrides": {
-                str(key): str(role)
-                for key, role in dict(
-                    value.get("role_overrides") or {}
-                ).items()
-            },
-            "binding_decisions": {
-                str(key): item
-                for key, item in dict(
-                    value.get("binding_decisions") or {}
-                ).items()
-            },
             "table_usage": normalize_table_usage(
                 value.get("table_usage"),
             ),
@@ -1086,85 +715,10 @@ def apply_decision_constraints(plan, compiled_patch):
             compiled_patch.get("steps") or {}
     ).items():
         step = steps.setdefault(str(step_id), {})
-        operations = [
-            dict(item)
-            for item in step.get("operations") or []
-            if isinstance(item, dict)
-        ]
-        for required in constraints.get("operations") or []:
-            required = dict(required)
-            required_actions = set(required.get("action_ids") or [])
-            matching = [
-                index
-                for index, operation in enumerate(operations)
-                if required_actions
-                and required_actions & set(operation.get("action_ids") or [])
-            ]
-            if len(matching) > 1:
-                raise ValueError(
-                    "一个 Decision action 不能映射到多个 Plan operation: "
-                    f"{sorted(required_actions)}"
-                )
-            if matching:
-                existing = operations[matching[0]]
-                operations[matching[0]] = {
-                    **existing,
-                    **required,
-                    "reuse_reference": existing.get("reuse_reference"),
-                }
-            else:
-                operations.append(required)
-        binding_decisions = {
-            str(key): dict(value)
-            for key, value in (
-                constraints.get("binding_decisions") or {}
-            ).items()
-        }
-        for action_id, binding in binding_decisions.items():
-            matching = [
-                operation
-                for operation in operations
-                if action_id in (operation.get("action_ids") or [])
-            ]
-            if len(matching) != 1:
-                raise ValueError(
-                    "Input Decision 必须映射到一个 Plan operation: "
-                    f"{action_id}"
-                )
-            operation = matching[0]
-            operation["source"] = binding.get("source")
-            operation["value"] = binding.get("value")
-            decision_id = str(binding.get("decision_id") or "").strip()
-            operation["value_action_ids"] = []
-            operation["value_provenance"] = {
-                "kind": "decision",
-                "decision_id": decision_id,
-                "step_id": str(step_id),
-            }
-            parameters = dict(operation.get("parameters") or {})
-            parameters["value"] = binding.get("value")
-            parameters["value_source"] = binding.get("source")
-            operation["parameters"] = parameters
-            operation["decision_ids"] = _unique_strings([
-                *(operation.get("decision_ids") or []),
-                decision_id,
-            ])
-            operation["confidence"] = binding.get("confidence")
-        step["operations"] = operations
-        step["role_overrides"] = {
-            **dict(step.get("role_overrides") or {}),
-            **dict(constraints.get("role_overrides") or {}),
-        }
-        step["binding_decisions"] = {
-            **dict(step.get("binding_decisions") or {}),
-            **binding_decisions,
-        }
         step["ignored_action_ids"] = _unique_strings([
             *(step.get("ignored_action_ids") or []),
             *(constraints.get("ignored_action_ids") or []),
         ])
-        if constraints.get("table_usage") is not None:
-            step["table_usage"] = dict(constraints["table_usage"])
     plan["decision_trace"] = _merge_by_key(
         plan.get("decision_trace") or [],
         compiled_patch.get("decision_trace") or [],
@@ -1204,50 +758,6 @@ def validate_decision_conformance(plan, compiled_patch):
             compiled_patch.get("steps") or {}
     ).items():
         step = (plan.get("steps") or {}).get(str(step_id)) or {}
-        operations = step.get("operations") or []
-        for required in constraints.get("operations") or []:
-            matches = _operations_for_actions(
-                operations,
-                required.get("action_ids") or [],
-            )
-            if len(matches) != 1 or not _operation_constraint_matches(
-                    matches[0],
-                    required,
-            ):
-                errors.append(
-                    "Plan 未遵循 assertion Decision: "
-                    f"step={step_id} actions={required.get('action_ids') or []}"
-                )
-        for action_id, binding in (
-                constraints.get("binding_decisions") or {}
-        ).items():
-            matches = _operations_for_actions(operations, [action_id])
-            if len(matches) != 1 or any((
-                matches[0].get("source") != binding.get("source"),
-                matches[0].get("value") != binding.get("value"),
-                binding.get("decision_id")
-                not in (matches[0].get("decision_ids") or []),
-            )):
-                errors.append(
-                    "Plan 未遵循 input binding Decision: "
-                    f"step={step_id} action={action_id}"
-                )
-        expected_roles = constraints.get("role_overrides") or {}
-        actual_roles = step.get("role_overrides") or {}
-        for action_id, role in expected_roles.items():
-            if actual_roles.get(str(action_id)) != role:
-                errors.append(
-                    "Plan 未遵循 role Decision: "
-                    f"step={step_id} action={action_id}"
-                )
-        expected_table_usage = constraints.get("table_usage")
-        if (
-                expected_table_usage is not None
-                and step.get("table_usage") != expected_table_usage
-        ):
-            errors.append(
-                f"Plan 未遵循 Table Usage Decision: step={step_id}"
-            )
         expected_business_outcome = constraints.get(
             "table_business_outcome"
         )
@@ -4465,7 +3975,7 @@ def plan_artifact_identity_is_valid(artifact):
     source = artifact.get("source") or {}
     if any((
         version not in SUPPORTED_PLAN_VERSIONS,
-        not _plan_status_is_valid(version, artifact.get("status")),
+        artifact.get("status") != "validated",
         not artifact.get("request_id"),
         not source.get("revision_seal"),
     )):
@@ -4475,7 +3985,6 @@ def plan_artifact_identity_is_valid(artifact):
         source.get("revision_seal"),
         source.get("confirmation_source"),
         artifact.get("plan") or {},
-        plan_version=version,
         decision_answer_fingerprint=source.get(
             "decision_answer_fingerprint"
         ),
@@ -4497,22 +4006,15 @@ def plan_artifact_identity_is_valid(artifact):
     )
     return all((
         _plan_origin_is_valid(
-            version,
             source.get("confirmation_source"),
             source.get("plan_origin"),
         ),
         _generation_intent_identity_is_valid(artifact),
-                (
-                    not source.get("generation_job_lease")
-                    or _generation_job_lease_is_valid(
-                        source.get("generation_job_lease")
-                    )
-                ),
-        (
-            version not in CONTRACT_LEASE_PLAN_VERSIONS
-            or _generation_contract_lease_is_valid(
-                source.get("generation_contract_lease")
-            )
+        _generation_job_lease_is_valid(
+            source.get("generation_job_lease")
+        ),
+        _generation_contract_lease_is_valid(
+            source.get("generation_contract_lease")
         ),
         artifact.get("plan_fingerprint") == actual,
         artifact.get("plan_id") == f"plan-{actual[:16]}",
@@ -4527,14 +4029,6 @@ def _generation_contract_lease_is_valid(value):
     return generation_contract_lease_is_valid(value)
 
 
-def _plan_status_is_valid(version, status):
-    return (
-        status == "validated"
-        if version in VALIDATED_PLAN_VERSIONS
-        else status == "confirmed"
-    )
-
-
 def persist_generation_plan(
         session_dir,
         request_path,
@@ -4544,14 +4038,25 @@ def persist_generation_plan(
         normalized,
         *,
         intent,
-        input_kind="generation_intent",
-        input_version="1.0",
+        input_kind,
+        input_version,
         confirmation_source,
         plan_origin,
         note,
         generation_contract_lease,
-    generation_job_lease=None,
+        generation_job_lease,
 ):
+    from autowork_core.utils.debug_tools.recorder.generation_design import (
+        GENERATION_DESIGN_VERSION,
+    )
+
+    if any((
+        input_kind != "generation_design",
+        input_version != GENERATION_DESIGN_VERSION,
+        not _generation_contract_lease_is_valid(generation_contract_lease),
+        not _generation_job_lease_is_valid(generation_job_lease),
+    )):
+        raise ValueError("Generation Plan输入身份无效")
     revision_seal = (state.get("revision") or {}).get("seal")
     decision_answer_fingerprint = (
         ((state.get("decision") or {}).get("answers") or {}).get(
@@ -4576,7 +4081,6 @@ def persist_generation_plan(
         revision_seal,
         confirmation_source,
         normalized,
-        plan_version=PLAN_VERSION,
         decision_answer_fingerprint=decision_answer_fingerprint,
         brief_basis_fingerprint=brief_basis_fingerprint,
         plan_origin=plan_origin,
@@ -4777,7 +4281,6 @@ def _plan_fingerprint(
         confirmation_source,
         plan,
         *,
-        plan_version,
         decision_answer_fingerprint,
         brief_basis_fingerprint=None,
         plan_origin=None,
@@ -4790,26 +4293,17 @@ def _plan_fingerprint(
         "revision_seal": revision_seal,
         "confirmation_source": confirmation_source,
         "plan": plan,
-    }
-    if plan_version != "3.0":
-        value["decision_answer_fingerprint"] = decision_answer_fingerprint
-    if plan_version in BRIEF_BOUND_PLAN_VERSIONS:
-        value["brief_basis_fingerprint"] = brief_basis_fingerprint
-    if plan_version in ORIGIN_BOUND_PLAN_VERSIONS:
-        value["plan_origin"] = plan_origin
-    if intent_fingerprint:
-        value["intent_fingerprint"] = intent_fingerprint
-    if (
-        plan_version in CONTRACT_LEASE_PLAN_VERSIONS
-        and generation_contract_lease_fingerprint
-    ):
-        value["generation_contract_lease_fingerprint"] = (
+        "decision_answer_fingerprint": decision_answer_fingerprint,
+        "brief_basis_fingerprint": brief_basis_fingerprint,
+        "plan_origin": plan_origin,
+        "intent_fingerprint": intent_fingerprint,
+        "generation_contract_lease_fingerprint": (
             generation_contract_lease_fingerprint
-        )
-    if generation_job_lease_fingerprint:
-        value["generation_job_lease_fingerprint"] = (
+        ),
+        "generation_job_lease_fingerprint": (
             generation_job_lease_fingerprint
-        )
+        ),
+    }
     return _stable_hash(value)
 
 
@@ -4833,15 +4327,12 @@ def _generation_job_lease_matches_state(lease, state):
     )
 
 
-def _plan_origin_is_valid(version, confirmation_source, plan_origin):
-    if version not in ORIGIN_BOUND_PLAN_VERSIONS:
-        return True
+def _plan_origin_is_valid(confirmation_source, plan_origin):
     if plan_origin not in PLAN_ORIGINS:
         return False
     allowed = {
         "ai_generated": {"external_ai", "deterministic_surrogate"},
         "user_adjustment": {"human_authored"},
-        "legacy_import": {"legacy_import"},
     }
     return plan_origin in allowed.get(str(confirmation_source or ""), set())
 
@@ -4891,22 +4382,8 @@ def _plan_brief_basis_fingerprint(brief):
     }
     if "annotation_snapshot" in brief:
         basis["annotation_snapshot"] = brief.get("annotation_snapshot") or {}
-    if str(brief.get("brief_version") or "") in {
-        "3.4",
-        "3.5",
-        "3.6",
-        "3.7",
-        "3.8",
-        "3.9",
-        "4.0",
-        "4.1",
-        "4.2",
-        "4.3",
-        "4.4",
-    }:
-        basis["scenario_intelligence"] = (
-            brief.get("scenario_intelligence") or {}
-        )
-    if "window_ownership" in brief:
-        basis["window_ownership"] = brief.get("window_ownership") or {}
+    basis["scenario_intelligence"] = (
+        brief.get("scenario_intelligence") or {}
+    )
+    basis["window_ownership"] = brief.get("window_ownership") or {}
     return _stable_hash(basis)

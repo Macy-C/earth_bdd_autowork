@@ -26,8 +26,7 @@ def extract_video_frame(
     )
     if media_index_path is None:
         raise ValueError(
-            "Take 缺少有效 Projection 5.7 media_index；"
-            "旧 Run 需要使用旧版本或独立离线迁移工具"
+            "Take 缺少有效 Projection 5.7 media_index"
         )
     if not media_index_path.exists():
         raise FileNotFoundError(f"media-index.json 不存在: {media_index_path}")

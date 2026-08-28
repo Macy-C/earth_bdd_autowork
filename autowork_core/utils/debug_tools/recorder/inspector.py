@@ -614,37 +614,6 @@ def _xpath_for_element(element, element_info):
     return f"//*[{predicate}]" if predicate else xpath
 
 
-def _contextual_xpath(element_info, local_context):
-    """Build the historical same-row value XPath for legacy readers."""
-    target_type = str(element_info.get("control_type") or "")
-    target_name = str(element_info.get("name") or "")
-    parent_type = str(
-        ((local_context or {}).get("parent") or {}).get("control_type") or ""
-    )
-    if not target_type or not target_name or not parent_type:
-        return None
-    anchor = next((
-        item
-        for item in (local_context or {}).get("siblings") or ()
-        if item.get("relative_index") != 0
-        and item.get("control_type")
-        and item.get("value") not in (None, "")
-    ), None)
-    if anchor is None:
-        return None
-    anchor_predicate = make_xpath_predicate(
-        "Value.Value",
-        anchor["value"],
-    )
-    target_predicate = make_xpath_predicate("name", target_name)
-    if not anchor_predicate or not target_predicate:
-        return None
-    return (
-        f"//{anchor['control_type']}[{anchor_predicate}]/"
-        f"parent::{parent_type}/{target_type}[{target_predicate}]"
-    )
-
-
 def _structural_xpath_candidates(element, element_info, window):
     values = []
     for context in _target_container_contexts(

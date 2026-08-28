@@ -126,18 +126,12 @@ class RecordingAnnotationRepository:
             step_id,
             *,
             business_context=None,
-            purpose=None,
-            constraints=None,
             expected_revision,
         ):
         step_id = str(step_id or "").strip()
         if not step_id:
             raise ValueError("Step业务说明必须绑定step_id")
-        business_context = _normalize_business_context_input(
-            business_context,
-            purpose=purpose,
-            constraints=constraints,
-        )
+        business_context = str(business_context or "").strip()
         if len(business_context) > MAX_STEP_CONTEXT_TEXT_LENGTH:
             raise ValueError("Step业务补充超过2000字符")
         records = self.load()
@@ -674,28 +668,6 @@ def _annotation_id(created_at, step_id, revision, business_context):
     )
 
 
-def _normalize_business_context_input(
-        business_context,
-        *,
-        purpose=None,
-        constraints=None,
-    ):
-    if business_context is not None and (
-        str(purpose or "").strip()
-        or str(constraints or "").strip()
-    ):
-        raise ValueError(
-            "business_context不能与旧purpose/constraints同时提交"
-        )
-    if business_context is not None:
-        return str(business_context or "").strip()
-    purpose = str(purpose or "").strip()
-    constraints = str(constraints or "").strip()
-    if purpose and constraints:
-        return f"{purpose}；{constraints}"
-    return purpose or constraints
-
-
 def step_business_context_text(context):
     if not isinstance(context, dict):
         return ""
@@ -856,10 +828,6 @@ def _validate_step_context_record(record, index, step_id, previous_by_step):
         if len(business_context) > MAX_STEP_CONTEXT_TEXT_LENGTH:
             raise ValueError(
                 f"annotation内容超过2000字符: index={index}"
-            )
-        if "purpose" in record or "constraints" in record:
-            raise ValueError(
-                f"新annotation不能包含旧业务字段: index={index}"
             )
         active = bool(business_context)
         expected_id = _annotation_id(

@@ -193,11 +193,6 @@ def _catalog_next_action(entry):
     readiness = entry.get("readiness") or {}
     if readiness.get("capture_generation_candidate"):
         return "待 AI 理解"
-    if (
-        "capture_generation_candidate" not in readiness
-        and readiness.get("generation_ready")
-    ):
-        return "待 AI 理解"
     if not readiness.get("bundle_valid"):
         return "证据损坏"
     if readiness.get("recording_complete") is False:

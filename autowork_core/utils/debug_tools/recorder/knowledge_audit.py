@@ -1024,10 +1024,10 @@ def _inspect_quarantine_catalog_snapshot(directory, receipt, findings):
     if expected_hash is None:
         _finding(
             findings,
-            "warning",
-            "knowledge_quarantine_catalog_snapshot_legacy",
+            "invalid",
+            "knowledge_quarantine_catalog_snapshot_hash_missing",
             snapshot,
-            "旧回执未记录原 catalog SHA-256",
+            "原 catalog 快照缺少 SHA-256",
             directory.name,
         )
     elif (

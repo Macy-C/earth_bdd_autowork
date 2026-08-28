@@ -37,6 +37,7 @@ from autowork_core.utils.debug_tools.recorder.request_repository import (
     evidence_fingerprint,
     generation_request_id,
     index_generation_request,
+    request_identity_is_valid,
     request_matches_current_evidence,
     request_scenario_scope,
     request_scope_key,
@@ -253,16 +254,11 @@ def build_generation_request(
         evidence,
         scenario_scope=scenario_scope,
         evidence_context_version=EVIDENCE_CONTEXT_VERSION,
-        contract_hash=generation_contract.get("contract_hash"),
-        api_signature_hash=(
-            generation_contract.get("framework_contract") or {}
-        ).get("api_signature_hash"),
         reviews=target_reviews,
         memory_revision=memory_revision,
         specification_fingerprint=specification_fingerprint,
         annotation_fingerprint=annotation_fingerprint,
         execution_profile_fingerprint=execution_fingerprint,
-        identity_profile="business-v1",
     )
     target_readiness = _target_readiness(target_reviews)
     target_capture_generation_candidate = target_readiness[
@@ -301,8 +297,7 @@ def build_generation_request(
             "bundle_valid": readiness["bundle_valid"],
             "target_capture_generation_candidate": target_capture_generation_candidate,
             "session_capture_generation_candidate": readiness.get(
-                "capture_generation_candidate",
-                readiness.get("generation_ready", False),
+                "capture_generation_candidate", False
             ),
             "target_reconciliation_required": bool(target_reviews),
             "target_hard_blocker_count": target_readiness[
@@ -682,18 +677,8 @@ def _reuse_immutable_request(
         memory_revision,
         request_path,
 ):
-    forbidden = {
-        "interview",
-        "understanding",
-        "adjustment",
-        "generation_brief",
-        "stale",
-    } & set(existing)
-    if existing.get("request_version") != "3.0" or forbidden:
-        raise ValueError(
-            f"不可变 RequestV3 路径已被旧运行态占用: "
-            f"{request_path}, fields={sorted(forbidden)}"
-        )
+    if not request_identity_is_valid(existing, selected_step_ids):
+        raise ValueError(f"不可变 RequestV3 身份无效: {request_path}")
     declared_memory_revision = (
         existing.get("memory_context") or {}
     ).get("revision")

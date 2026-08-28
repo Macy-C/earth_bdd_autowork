@@ -1,55 +1,81 @@
 """项目侧最终报告合并入口。
 
-右键运行本文件时，先改 ACTION，再只看对应的配置块：
+右键运行本文件时：
 
-- ACTION = "create": 只看 CREATE。
-- ACTION = "merge": 只看 MERGE。
-- ACTION = "delete": 只看 DELETE。
-- ACTION = "render": 只看 RENDER。
+1. 只在顶部改默认输入/输出路径。
+2. 在下面对应方法里填写本次操作的参数。
+3. 在文件底部选择要执行的方法。
 
-配置键：
-
-- report_json: create / merge 的操作依据报告 JSON。
-- feature_file / feature_name: 可选；报告里有多个 Feature 时用于指定 Feature。
-- scenario_name: 可选；只合并或删除这个 Scenario/Outline；merge 不填时由报告内容推断。
-- example_id: 可选；Scenario Outline 的 Example 行，例如 1.1。
-- allow_add: 仅 merge 使用；目标报告没有对应项时是否允许新增，默认 True。
-- target_report: delete / render 可用；自定义最终报告 JSON 路径，通常不用填。
-- html_report / merge_log: 可选；自定义最终 HTML 或内部操作日志路径，通常不用填。
-
-也可以在 Python 里直接调用 create(...) / merge(...) / delete(...) / render(...)，第一个参数都是报告 JSON。
 需要命令行参数时，仍可使用 python -m Bdd.final_report merge ...。
 """
 
+import sys
+
 from autowork_core.runtime.reporting.final_report import (
-    DEFAULT_SOURCE_REPORT_TEXT,create,delete,main,merge,render,run_entrypoint,)
+    DEFAULT_FINAL_REPORT_TEXT,
+    DEFAULT_SOURCE_REPORT_TEXT,
+    create as _create,
+    delete as _delete,
+    main,
+    merge as _merge,
+    render as _render,
+)
 
 
-DEFAULT_SOURCE_REPORT = DEFAULT_SOURCE_REPORT_TEXT
-ACTION = "create"
+DEFAULT_INPUT_REPORT_JSON = DEFAULT_SOURCE_REPORT_TEXT
+DEFAULT_FINAL_REPORT_JSON = DEFAULT_FINAL_REPORT_TEXT
 
-CREATE = {
-    "report_json": DEFAULT_SOURCE_REPORT,
-}
 
-MERGE = {
-    "report_json": DEFAULT_SOURCE_REPORT,
-    "allow_add": False,
-}
+def create_final_report():
+    return _create(
+        DEFAULT_INPUT_REPORT_JSON,
+           final_report_json=DEFAULT_FINAL_REPORT_JSON,
+    )
 
-DELETE = {
-    # 默认从 artifacts/final-reports/autowork-final-report.json 删除。
-    # 删除整个 Feature 时填 feature_file 或 feature_name。
-    # 删除单个 Scenario/Example 时再填 scenario_name / example_id。
-    # "feature_file": r"Bdd\test_features\calc\calc.feature",
-    # "scenario_name": "计算相加",
-}
 
-RENDER = {
-    # 默认渲染 artifacts/final-reports/autowork-final-report.json。
-    # "target_report": r"C:\Users\320321651\Messy\projects\bdd_autowork\artifacts\final-reports\autowork-final-report.json",
-}
+def merge_final_report():
+    return _merge(
+        DEFAULT_INPUT_REPORT_JSON,
+            final_report_json=DEFAULT_FINAL_REPORT_JSON,
+        allow_add=False,
+        # 目标不唯一时再填写：
+        # feature_file=r"Bdd\test_features\calc\calc.feature",
+        # scenario_name="计算相加",
+        # example_id="1.1",
+    )
+
+
+def delete_from_final_report():
+    return _delete(
+           final_report_json=DEFAULT_FINAL_REPORT_JSON,
+        # 删除整个 Feature 时填 feature_file 或 feature_name。
+        # 删除单个 Scenario/Example 时再填 scenario_name / example_id。
+        # feature_file=r"Bdd\test_features\calc\calc.feature",
+        # scenario_name="计算相加",
+        # example_id="1.1",
+    )
+
+
+def render_final_report():
+    # 通常不需要手动调用；create/merge/delete 会自动刷新 HTML。
+    # 仅在手动修改最终 JSON 或 HTML 丢失时使用。
+    return _render(
+           final_report_json=DEFAULT_FINAL_REPORT_JSON,
+    )
+
+
+def _print_result(result):
+    target, html = result
+    print(f"Final report JSON: {target}")
+    print(f"Final report HTML: {html}")
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_entrypoint(globals()))
+    if len(sys.argv) > 1:
+        raise SystemExit(main())
+
+    raise SystemExit(_print_result(create_final_report()))
+    # raise SystemExit(_print_result(merge_final_report()))
+    # raise SystemExit(_print_result(delete_from_final_report()))
+    # raise SystemExit(_print_result(render_final_report()))

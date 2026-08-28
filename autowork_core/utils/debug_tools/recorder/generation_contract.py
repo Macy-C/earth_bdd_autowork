@@ -166,7 +166,7 @@ def build_generation_contract(manifest):
                 "AI reads content-addressed Plan Context 1.1 by default; the full immutable GenerationPlan remains backend identity and expands only through the plan query.",
                 "Completed regeneration may reuse its bound Request and Plan; its own prior transaction result does not stale the Request, while newer feedback or other relevant memory still requires rematerialization.",
                 "Semantic Reconciler must classify all default evidence before fast generation.",
-                "AI submits GenerationDesignV1 semantic and implementation choices; the deterministic compiler creates one revision-bound GenerationPlanV4.2 with Scenario Model, target/value provenance, typed ambiguity, window, method resolution, runtime bindings, and a Generation Contract lease.",
+                "AI submits GenerationDesignV1 semantic and implementation choices; the deterministic compiler creates one revision-bound GenerationPlanV4.2 with Scenario Model, target/value provenance, typed ambiguity, window, method resolution, runtime bindings, and Generation Contract and Job leases.",
                 "Generation Contract binds the exact GenerationDesign and Implementation Manifest contract versions and fingerprints; either schema change requires Request rematerialization.",
                 "Inspect is side-effect-free for transaction state; prepare opens the running transaction lease.",
                 "Successful Job commands return the authoritative job_transition for the next claim/epoch CAS operation; callers never infer an epoch increment.",
@@ -181,7 +181,6 @@ def build_generation_contract(manifest):
                 "Finish runs revision, Annotation lease, Python, locator, Step scope, policy, controlled-PIC, evidence, and Plan-to-Code validation automatically.",
                 "Every newly created nested Bdd/page_obj package contains an import-free __init__.py marker; it may be empty or docstring-only and never contains imports or re-exports.",
                 "The default Brief exposes frozen facts and evidence-bound constraints, not semantic operation recommendations. AI forms operation candidates before querying Action Knowledge; only objectively incompatible target/runtime combinations are rejected, while unknown requires investigation or runtime validation.",
-                "Historical artifacts are only read and validated; they cannot enter the current write chain or reactivate an old state machine.",
             ],
         },
         "read_order": [
@@ -637,14 +636,6 @@ def build_generation_contract(manifest):
                 "the selected options constrain one GenerationDesignV1 compiled into GenerationPlanV4.2."
             ),
         },
-        "schema_support": {
-            "policy": "current_only",
-            "legacy_run_handling": (
-                "Use the matching old Recorder version or an independent "
-                "offline migration tool."
-            ),
-            "runtime_migration": False,
-        },
         "media_contract": {
             "index": "<take>/media-index.json",
             "action_index": "<take>/action-media.json",
@@ -663,7 +654,7 @@ def build_generation_contract(manifest):
             ),
             "multi_window_rule": (
                 "Read take.json target_windows and window_evidence. The primary window owns the "
-                "compatibility screenshots/ui tree; additional windows use windows/window-XXX/."
+                "screenshots/ui tree; additional windows use windows/window-XXX/."
             ),
             "window_lifecycle_rule": (
                 "Use window_lifecycle first_seen/last_seen/opened/closed and admission. "
@@ -702,12 +693,12 @@ def build_generation_contract(manifest):
                 "python -m autowork_core.runtime.step_validation Bdd/steps "
                 "--feature-path <source-feature>"
             ),
-            "focused_execution": (
+            "runtime_execution": (
                 "python -B -m Bdd.runner <source-feature> "
                 "--generation-transaction-report <report-path> "
                 "--execution-request <request-path>"
             ),
-            "focused_execution_policy": (
+            "runtime_execution_policy": (
                 "Run only when Request ExecutionProfileV1 has runtime_policy=allowed; "
                 "not_configured and external_manual stop as static_validated/runtime_not_run. "
                 "Never infer launch or attach behavior from project defaults."

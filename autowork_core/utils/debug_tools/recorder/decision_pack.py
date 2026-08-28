@@ -19,7 +19,7 @@ DECISION_PACK_VERSION = "5.8"
 SUPPORTED_DECISION_PACK_VERSIONS = {DECISION_PACK_VERSION}
 ANSWER_VERSION = "5.1"
 SUPPORTED_ANSWER_VERSIONS = {ANSWER_VERSION}
-LEGACY_TECHNICAL_PATCH_KINDS = {
+TECHNICAL_PATCH_KINDS = {
     "binding",
     "operation",
     "role",
@@ -241,43 +241,17 @@ def compile_answers_to_plan_patch(pack, answers, *, request=None):
         patch = dict(option.get("plan_patch") or {})
         step_id = str(question.get("step_id") or "")
         empty_step_patch = {
-            "operations": [],
-            "role_overrides": {},
-            "binding_decisions": {},
             "ignored_action_ids": [],
-            "table_usage": None,
+            "table_business_outcome": None,
         }
-        if pack.get("decision_pack_version") != "5.7":
-            empty_step_patch["table_business_outcome"] = None
         step_patch = steps.setdefault(step_id, empty_step_patch)
         kind = patch.get("kind")
-        if (
-            pack.get("decision_pack_version") != "5.7"
-            and kind in LEGACY_TECHNICAL_PATCH_KINDS
-        ):
+        if kind in TECHNICAL_PATCH_KINDS:
             raise ValueError(
                 "Decision Pack 5.8不能修改技术实现字段: "
                 f"kind={kind}"
             )
-        if kind == "operation":
-            operation = dict(patch.get("operation") or {})
-            operation["decision_ids"] = [question_id]
-            operation["confidence"] = option.get("confidence")
-            step_patch["operations"].append(operation)
-        elif kind == "role":
-            step_patch["role_overrides"][str(patch["action_id"])] = patch["role"]
-        elif kind == "binding":
-            step_patch["binding_decisions"][str(patch["action_id"])] = {
-                "source": patch["source"],
-                "value": patch.get("value"),
-                "decision_id": question_id,
-                "confidence": option.get("confidence"),
-            }
-        elif kind == "table_usage":
-            step_patch["table_usage"] = dict(
-                patch.get("table_usage") or {}
-            )
-        elif kind == "table_business_outcome":
+        if kind == "table_business_outcome":
             step_patch["table_business_outcome"] = str(
                 patch.get("outcome") or ""
             )

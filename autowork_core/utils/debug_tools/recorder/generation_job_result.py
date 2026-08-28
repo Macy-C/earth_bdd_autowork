@@ -25,7 +25,6 @@ from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
 GENERATION_JOB_RESULT_VERSION = "1.2"
-READABLE_GENERATION_JOB_RESULT_VERSIONS = {GENERATION_JOB_RESULT_VERSION}
 JOB_STAGE_NAMES = (
     "semantic_selection",
     "design",
@@ -473,18 +472,17 @@ def generation_job_result_identity_is_valid(value):
         return False
     stages = value.get("stages") or {}
     actual = generation_job_result_fingerprint(value)
-    lifecycle_valid = generation_job_lifecycle_timing_is_valid(
-        value.get("job_lifecycle_timing")
-    )
     return bool(
         value.get("generation_job_result_version")
-        in READABLE_GENERATION_JOB_RESULT_VERSIONS
+        == GENERATION_JOB_RESULT_VERSION
         and value.get("status") in {"completed", "failed"}
         and value.get("category")
         and value.get("next_action")
         and (value.get("job") or {}).get("job_id")
         and set(stages) == set(JOB_STAGE_NAMES)
-        and lifecycle_valid
+        and generation_job_lifecycle_timing_is_valid(
+            value.get("job_lifecycle_timing")
+        )
         and value.get("result_fingerprint") == actual
         and value.get("result_id") == f"job-result-{actual[:16]}"
     )

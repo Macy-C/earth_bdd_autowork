@@ -85,7 +85,7 @@ from autowork_core.utils.debug_tools.recorder.window_identity import (
 from config.paths import Paths
 
 
-WINDOWS_LEGACY_PATH_LIMIT = 259
+WINDOWS_CLASSIC_PATH_LIMIT = 259
 MAX_REVIEW_TEXT_LENGTH = 2000
 
 
@@ -243,14 +243,12 @@ class FeatureRecordingSession:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("schema_version") != SCHEMA_VERSION:
             raise ValueError(
-                f"当前 Recorder 只支持 schema {SCHEMA_VERSION}；旧 Run "
-                "需要使用旧版本或独立离线迁移工具"
+                f"Recorder Session schema身份无效: {SCHEMA_VERSION}"
             )
         if manifest.get("annotation_model_version") != ANNOTATION_MODEL_VERSION:
             raise ValueError(
-                f"当前 Recorder 只支持 Annotation Model "
-                f"{ANNOTATION_MODEL_VERSION}；旧 Run 需要使用旧版本或"
-                "独立离线迁移工具"
+                "Recorder Annotation Model身份无效: "
+                f"{ANNOTATION_MODEL_VERSION}"
             )
         scenario_data = manifest.get("scenario") or {}
         manifest_steps = manifest.get("steps") or []
@@ -555,8 +553,6 @@ class FeatureRecordingSession:
             step_id,
             *,
             business_context=None,
-            purpose=None,
-            constraints=None,
             expected_revision,
         ):
         if self.active is not None:
@@ -580,8 +576,6 @@ class FeatureRecordingSession:
             ).append_step_user_context(
                 step_id,
                 business_context=business_context,
-                purpose=purpose,
-                constraints=constraints,
                 expected_revision=expected_revision,
             )
             self._mark_step_generation_requests_stale(
@@ -1215,8 +1209,7 @@ class FeatureRecordingSession:
                 "capture_error": take.error,
                 **(
                     {"capture_integrity": capture_result.capture_integrity}
-                    if capture_result.capture_integrity.get("status")
-                    == "complete"
+                    if capture_result.capture_integrity
                     else {}
                 ),
                 "target_window": active["target_window"],
@@ -2217,7 +2210,7 @@ def _validate_take_path(take_dir):
     if os.name != "nt":
         return
     longest = ProjectionStore.longest_write_path(take_dir)
-    if len(str(longest)) > WINDOWS_LEGACY_PATH_LIMIT:
+    if len(str(longest)) > WINDOWS_CLASSIC_PATH_LIMIT:
         raise ValueError(
             "当前录制会话路径过长，无法安全保存投影；请新建录制会话并选择"
             "更短的输出目录（例如 D:\\rec）: "
@@ -2229,7 +2222,7 @@ def _session_paths_too_long(session_dir, steps, mode="readable"):
     return (
         os.name == "nt"
         and len(str(_longest_session_path(session_dir, steps, mode=mode)))
-        > WINDOWS_LEGACY_PATH_LIMIT
+        > WINDOWS_CLASSIC_PATH_LIMIT
     )
 
 

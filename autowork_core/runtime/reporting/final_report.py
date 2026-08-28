@@ -23,6 +23,7 @@ FINAL_MERGE_LOG = FINAL_REPORT_DIR / "autowork-final-merge.json"
 DEFAULT_SOURCE_REPORT = Path("artifacts/reports/autowork-report.json")
 DEFAULT_SOURCE_REPORT_TEXT = DEFAULT_SOURCE_REPORT.as_posix()
 DEFAULT_TARGET_REPORT_TEXT = FINAL_REPORT_JSON.as_posix()
+DEFAULT_FINAL_REPORT_TEXT = DEFAULT_TARGET_REPORT_TEXT
 
 
 class FinalReportMergeError(ValueError):
@@ -102,6 +103,7 @@ def delete_result(
 def create_final_report(
         source_path=None,
         *,
+    final_report_json=None,
         target_path=None,
         html_path=None,
         log_path=None,
@@ -112,7 +114,8 @@ def create_final_report(
         source_path or DEFAULT_SOURCE_REPORT,
         project_root=project_root,
     )
-    target_path, html_path, log_path = _default_output_paths(
+    target_path, html_path, log_path = final_report_paths(
+        final_report_json=final_report_json,
         target_path=target_path,
         html_path=html_path,
         log_path=log_path,
@@ -142,6 +145,7 @@ def create_final_report(
 def merge_report_file(
         source_path=None,
         *,
+    final_report_json=None,
         target_path=None,
         html_path=None,
         log_path=None,
@@ -157,7 +161,8 @@ def merge_report_file(
         source_path or DEFAULT_SOURCE_REPORT,
         project_root=project_root,
     )
-    target_path, html_path, log_path = _default_output_paths(
+    target_path, html_path, log_path = final_report_paths(
+        final_report_json=final_report_json,
         target_path=target_path,
         html_path=html_path,
         log_path=log_path,
@@ -201,6 +206,7 @@ def merge_report_file(
 
 def delete_result_file(
         *,
+    final_report_json=None,
         target_path=None,
         html_path=None,
         log_path=None,
@@ -211,7 +217,8 @@ def delete_result_file(
         project_root=None,
 ):
     project_root = Path(project_root or Paths.BASE_DIR).resolve()
-    target_path, html_path, log_path = _default_output_paths(
+    target_path, html_path, log_path = final_report_paths(
+        final_report_json=final_report_json,
         target_path=target_path,
         html_path=html_path,
         log_path=log_path,
@@ -242,9 +249,10 @@ def delete_result_file(
     return target_path, html_path
 
 
-def render_final_report(report_or_path=None, *, html_path=None, project_root=None):
+def render_final_report(report_or_path=None, *, final_report_json=None, html_path=None, project_root=None):
     project_root = Path(project_root or Paths.BASE_DIR).resolve()
-    target_path, html_path, _log_path = _default_output_paths(
+    target_path, html_path, _log_path = final_report_paths(
+        final_report_json=final_report_json,
         target_path=report_or_path if report_or_path is not None and not isinstance(report_or_path, dict) else None,
         html_path=html_path,
         log_path=None,
@@ -259,6 +267,7 @@ def render_final_report(report_or_path=None, *, html_path=None, project_root=Non
 def create(
         report_json=DEFAULT_SOURCE_REPORT_TEXT,
         *,
+    final_report_json=None,
         target_report=None,
         html_report=None,
         merge_log=None,
@@ -266,6 +275,7 @@ def create(
 ):
     return create_final_report(
         report_json,
+        final_report_json=final_report_json,
         target_path=target_report,
         html_path=html_report,
         log_path=merge_log,
@@ -276,6 +286,7 @@ def create(
 def merge(
         report_json=DEFAULT_SOURCE_REPORT_TEXT,
         *,
+    final_report_json=None,
         feature_file=None,
         feature_name=None,
         scenario_name=None,
@@ -288,7 +299,8 @@ def merge(
 ):
     project_root = Path(project_root or Paths.BASE_DIR).resolve()
     source_path = _resolve_path(report_json or DEFAULT_SOURCE_REPORT, project_root=project_root)
-    target_path, html_path, log_path = _default_output_paths(
+    target_path, html_path, log_path = final_report_paths(
+        final_report_json=final_report_json,
         target_path=target_report,
         html_path=html_report,
         log_path=merge_log,
@@ -326,7 +338,8 @@ def merge(
 
 
 def delete(
-    *,
+        *,
+        final_report_json=None,
         feature_file=None,
         feature_name=None,
         scenario_name=None,
@@ -337,7 +350,8 @@ def delete(
         project_root=None,
 ):
     project_root = Path(project_root or Paths.BASE_DIR).resolve()
-    target_path, html_path, log_path = _default_output_paths(
+    target_path, html_path, log_path = final_report_paths(
+        final_report_json=final_report_json,
         target_path=target_report,
         html_path=html_report,
         log_path=merge_log,
@@ -364,14 +378,19 @@ def delete(
     return target_path, html_path
 
 
-def render(*, target_report=None, html_report=None, project_root=None):
-    target = target_report or DEFAULT_TARGET_REPORT_TEXT
-    html = render_final_report(
-        target,
+def render(*, final_report_json=None, target_report=None, html_report=None, project_root=None):
+    target_path, html_path, _log_path = final_report_paths(
+        final_report_json=final_report_json,
+        target_path=target_report,
         html_path=html_report,
         project_root=project_root,
     )
-    return target, html
+    html = render_final_report(
+        target_path,
+        html_path=html_path,
+        project_root=project_root,
+    )
+    return target_path, html
 
 
 def run_configured(
@@ -391,6 +410,7 @@ def run_configured(
 ):
     return run_action(action, {
         "report_json": source_report or report_json,
+        "final_report_json": target_report,
         "feature_file": feature_file,
         "feature_name": feature_name,
         "scenario_name": scenario_name,
@@ -409,6 +429,7 @@ def run_action(action, config=None):
     if action == "create":
         return create(
             config.get("report_json", DEFAULT_SOURCE_REPORT_TEXT),
+            final_report_json=config.get("final_report_json"),
             target_report=config.get("target_report"),
             html_report=config.get("html_report"),
             merge_log=config.get("merge_log"),
@@ -417,6 +438,7 @@ def run_action(action, config=None):
     if action == "merge":
         return merge(
             config.get("report_json", DEFAULT_SOURCE_REPORT_TEXT),
+            final_report_json=config.get("final_report_json"),
             feature_file=config.get("feature_file"),
             feature_name=config.get("feature_name"),
             scenario_name=config.get("scenario_name"),
@@ -429,6 +451,7 @@ def run_action(action, config=None):
         )
     if action == "delete":
         return delete(
+            final_report_json=config.get("final_report_json"),
             feature_file=config.get("feature_file"),
             feature_name=config.get("feature_name"),
             scenario_name=config.get("scenario_name"),
@@ -440,6 +463,7 @@ def run_action(action, config=None):
         )
     if action == "render":
         return render(
+            final_report_json=config.get("final_report_json"),
             target_report=config.get("target_report"),
             html_report=config.get("html_report"),
             project_root=config.get("project_root"),
@@ -494,27 +518,42 @@ def run_entrypoint(config=None, argv=None):
 
 def _entrypoint_action_config(config, action):
     key = str(action or "create").upper()
+    final_report = config.get("FINAL_REPORT_JSON", config.get("TARGET_REPORT"))
+    input_report = config.get("INPUT_REPORT_JSON", config.get("REPORT_JSON", config.get("SOURCE_REPORT", DEFAULT_SOURCE_REPORT_TEXT)))
     value = config.get(key)
     if isinstance(value, dict):
-        return dict(value)
+        return _with_default_report_paths(value, action, input_report, final_report)
 
     actions = config.get("ACTIONS")
     if isinstance(actions, dict) and isinstance(actions.get(key), dict):
-        return dict(actions[key])
+        return _with_default_report_paths(actions[key], action, input_report, final_report)
 
     scope = config.get("SCOPE") if isinstance(config.get("SCOPE"), dict) else {}
     return {
-        "report_json": config.get("REPORT_JSON", config.get("SOURCE_REPORT", DEFAULT_SOURCE_REPORT_TEXT)),
+        "report_json": input_report,
         "feature_file": config.get("FEATURE_FILE", scope.get("feature_file")),
         "feature_name": config.get("FEATURE_NAME", scope.get("feature_name")),
         "scenario_name": config.get("SCENARIO_NAME", scope.get("scenario_name")),
         "example_id": config.get("EXAMPLE_ID", scope.get("example_id")),
         "allow_add": config.get("ALLOW_ADD", scope.get("allow_add", True)),
+        "final_report_json": final_report,
         "target_report": config.get("TARGET_REPORT", scope.get("target_report")),
         "html_report": config.get("HTML_REPORT", scope.get("html_report")),
         "merge_log": config.get("MERGE_LOG", scope.get("merge_log")),
         "project_root": config.get("PROJECT_ROOT", scope.get("project_root")),
     }
+
+
+def _with_default_report_paths(config, action, input_report, final_report):
+    result = dict(config)
+    uses_input = str(action or "").lower() in {"create", "merge"}
+    if uses_input and input_report and "report_json" not in result and "input_report" not in result:
+        result["report_json"] = input_report
+    if uses_input and "input_report" in result and "report_json" not in result:
+        result["report_json"] = result.pop("input_report")
+    if final_report and "final_report_json" not in result and "target_report" not in result:
+        result["final_report_json"] = final_report
+    return result
 
 
 def render_report_html(report_data):
@@ -1034,6 +1073,30 @@ def _log_value(value, *, project_root):
 
 def _scope_payload(**values):
     return {key: value for key, value in values.items() if value is not None}
+
+
+def final_report_paths(
+        *,
+        final_report_json=None,
+        target_path=None,
+        html_path=None,
+        log_path=None,
+        project_root=None,
+):
+    project_root = Path(project_root or Paths.BASE_DIR).resolve()
+    target = _resolve_path(
+        target_path or final_report_json or FINAL_REPORT_JSON,
+        project_root=project_root,
+    )
+    html = _resolve_path(
+        html_path or target.with_suffix(".html"),
+        project_root=project_root,
+    )
+    log = _resolve_path(
+        log_path or target.with_name(f"{target.stem}-merge.json"),
+        project_root=project_root,
+    )
+    return target, html, log
 
 
 def _default_output_paths(

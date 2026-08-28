@@ -9,8 +9,7 @@ from pathlib import Path
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-WORKFLOW_STATE_VERSION = "3.0"
-JOB_WORKFLOW_STATE_VERSION = "5.0"
+WORKFLOW_STATE_VERSION = "5.0"
 JOB_LIFECYCLE_TIMING_LEDGER_VERSION = "1.0"
 JOB_LIFECYCLE_TIMING_STATUSES = {
     "active",
@@ -358,7 +357,7 @@ def transition_workflow(
         raise FileNotFoundError(f"workflow state 不存在: {request_id}")
     transitioned_at = datetime.now().isoformat(timespec="milliseconds")
     if (
-        state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION
+        state.get("workflow_state_version") == WORKFLOW_STATE_VERSION
         and state.get("current_job")
     ):
         phase = (state.get("job_execution") or {}).get("phase")
@@ -412,7 +411,7 @@ def publish_generation_job(
     published_at = datetime.now().isoformat(timespec="milliseconds")
     next_epoch = current_epoch + 1
     state.update({
-        "workflow_state_version": JOB_WORKFLOW_STATE_VERSION,
+        "workflow_state_version": WORKFLOW_STATE_VERSION,
         "status": "ready",
         "next_action": "start_generation_job",
         "updated_at": published_at,
@@ -453,7 +452,7 @@ def replace_generation_job(
     state = load_workflow_state(session_dir, request_id)
     execution = state.get("job_execution") or {}
     if any((
-        state.get("workflow_state_version") != JOB_WORKFLOW_STATE_VERSION,
+        state.get("workflow_state_version") != WORKFLOW_STATE_VERSION,
         state.get("status") == "running",
         execution.get("phase") in {"design", "implementation", "runtime", "oracle"},
         execution.get("epoch") != expected_epoch,
@@ -559,7 +558,7 @@ def fail_generation_job_integrity(
     state = load_workflow_state(session_dir, request_id)
     execution = state.get("job_execution") or {}
     if any((
-        state.get("workflow_state_version") != JOB_WORKFLOW_STATE_VERSION,
+        state.get("workflow_state_version") != WORKFLOW_STATE_VERSION,
         not state.get("current_job"),
         state.get("status") != "ready",
         execution.get("phase") != "ready",
@@ -825,26 +824,30 @@ def _assert_state(state):
         raise ValueError(f"workflow state 无效: {status}")
     if not state.get("request_id"):
         raise ValueError("workflow state 缺少 request_id")
-    if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
-        pointer = state.get("current_job")
-        execution = state.get("job_execution")
-        if pointer is not None:
-            _assert_job_pointer(pointer, request_id=state.get("request_id"))
-            if any((
-                not isinstance(execution, dict),
-                execution.get("phase") not in {
-                    "ready", "design", "implementation", "runtime", "oracle",
-                },
-                not isinstance(execution.get("epoch"), int),
-                execution.get("epoch", 0) < 1,
-            )):
-                raise ValueError("WorkflowStateV5 active Job execution无效")
-        elif execution is not None:
-            raise ValueError("WorkflowStateV5 terminal state不能保留job_execution")
-        for entry in state.get("retired_jobs") or []:
-            if not isinstance(entry, dict):
-                raise ValueError("WorkflowStateV5 retired_jobs无效")
-            _assert_job_pointer(entry.get("job") or {}, request_id=state.get("request_id"))
+    if state.get("workflow_state_version") != WORKFLOW_STATE_VERSION:
+        raise ValueError("WorkflowState身份无效")
+    pointer = state.get("current_job")
+    execution = state.get("job_execution")
+    if pointer is not None:
+        _assert_job_pointer(pointer, request_id=state.get("request_id"))
+        if any((
+            not isinstance(execution, dict),
+            execution.get("phase") not in {
+                "ready", "design", "implementation", "runtime", "oracle",
+            },
+            not isinstance(execution.get("epoch"), int),
+            execution.get("epoch", 0) < 1,
+        )):
+            raise ValueError("WorkflowStateV5 active Job execution无效")
+    elif execution is not None:
+        raise ValueError("WorkflowStateV5无活动Job时不能保留job_execution")
+    for entry in state.get("retired_jobs") or []:
+        if not isinstance(entry, dict):
+            raise ValueError("WorkflowStateV5 retired_jobs无效")
+        _assert_job_pointer(
+            entry.get("job") or {},
+            request_id=state.get("request_id"),
+        )
 
 
 def _assert_job_cas(
@@ -856,8 +859,8 @@ def _assert_job_cas(
         claim_id,
         expected_phase,
     ):
-    if state.get("workflow_state_version") != JOB_WORKFLOW_STATE_VERSION:
-        raise ValueError("Workflow尚未进入Generation Job协议")
+    if state.get("workflow_state_version") != WORKFLOW_STATE_VERSION:
+        raise ValueError("WorkflowState身份无效")
     pointer = state.get("current_job") or {}
     execution = state.get("job_execution") or {}
     mismatches = []

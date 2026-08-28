@@ -10,6 +10,9 @@ from autowork_core.utils.debug_tools.recorder.generation_plan import (
     PLAN_ORIGINS,
     plan_artifact_identity_is_valid,
 )
+from autowork_core.utils.debug_tools.recorder.generation_job import (
+    generation_job_lease_is_valid,
+)
 from autowork_core.utils.debug_tools.recorder.request_repository import (
     request_identity_is_valid,
 )
@@ -113,11 +116,8 @@ def evaluate_generation_quality(
     reasons.extend(matrix_reasons)
     risk_policy = transaction_report.get("runtime_risk_policy") or {}
     risk_policy_present = bool(risk_policy)
-    risk_policy_required = _runtime_risk_policy_required(
-        transaction_report
-    )
     risk_policy_matches_source = True
-    if risk_policy_required and not risk_policy_present:
+    if not risk_policy_present:
         risk_policy_matches_source = False
         reasons.append(
             "Current GenerationTransaction requires a runtime risk policy"
@@ -137,11 +137,8 @@ def evaluate_generation_quality(
                 "source and Oracle registry"
             )
     risk_policy_valid = bool(
-        (not risk_policy_present and not risk_policy_required)
-        or (
-            runtime_risk_policy_identity_is_valid(risk_policy)
-            and risk_policy_matches_source
-        )
+        runtime_risk_policy_identity_is_valid(risk_policy)
+        and risk_policy_matches_source
     )
     high_risk = bool(
         risk_policy_valid
@@ -151,11 +148,10 @@ def evaluate_generation_quality(
     runtime_quality_passed = bool(
         single_run_passed
         and risk_policy_valid
-        and (matrix_passed if risk_policy_present else True)
+        and matrix_passed
     )
     if (
-        risk_policy_required
-        and isinstance(run_result, dict)
+        isinstance(run_result, dict)
         and (run_result.get("generation_provenance") or {}).get(
             "provenance_version"
         ) != CURRENT_RUN_RESULT_PROVENANCE_VERSION
@@ -195,39 +191,18 @@ def evaluate_generation_quality(
     }
 
 
-def _runtime_risk_policy_required(report):
-    manifest_version = str(
-        (report.get("implementation_manifest") or {}).get(
-            "implementation_manifest_version"
-        ) or ""
-    )
-    contract_version = str(
-        (report.get("generation_contract_lease") or {}).get(
-            "generation_contract_version"
-        )
-        or (report.get("framework_contract") or {}).get(
-            "generation_contract_version"
-        )
-        or ""
-    )
-    return bool(
-        _version_at_least(manifest_version, (1, 6))
-        or _version_at_least(contract_version, (6, 15))
-    )
-
-
-def _version_at_least(value, minimum):
-    if not value:
-        return False
-    try:
-        parts = tuple(int(item) for item in value.split("."))
-    except ValueError:
-        return True
-    return parts >= tuple(minimum)
-
-
 def _transaction_passed(report, request, plan_artifact):
     reasons = []
+    plan_job_lease = (plan_artifact.get("source") or {}).get(
+        "generation_job_lease"
+    )
+    report_job_lease = report.get("generation_job_lease")
+    if any((
+        not generation_job_lease_is_valid(plan_job_lease),
+        report_job_lease != plan_job_lease,
+        not report.get("generation_job_claim_id"),
+    )):
+        reasons.append("GenerationTransaction Job lease无效或绑定不一致")
     if report.get("status") not in {"completed", "completed_no_changes"}:
         reasons.append("GenerationTransaction 未完成")
     if report.get("unresolved_issues"):
@@ -273,7 +248,7 @@ def _transaction_passed(report, request, plan_artifact):
     if (
         (report.get("implementation_manifest") or {}).get(
             "implementation_manifest_version"
-        ) in {"1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12"}
+        ) == "1.12"
         and (report.get("terminal_snapshot_audit") or {}).get("status")
         != "passed"
     ):

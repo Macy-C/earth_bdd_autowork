@@ -27,7 +27,8 @@ from autowork_core.utils.debug_tools.recorder.transaction_integrity import (
     transaction_result_fingerprint,
 )
 from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
-    implementation_manifest_identity_is_readable,
+    IMPLEMENTATION_MANIFEST_VERSION,
+    implementation_manifest_identity_is_valid,
 )
 from autowork_core.utils.debug_tools.recorder.implementation_validation_ledger import (
     verify_validation_ledger,
@@ -261,13 +262,7 @@ class RecorderQueryService:
                 return None
             report_path, _report = bound
         else:
-            latest = latest_transaction(
-                self.session_dir,
-                request_id=request.get("request_id"),
-            )
-            if latest is None:
-                return None
-            report_path, _report = latest
+            return None
         if _report.get("status") not in {
             "completed",
             "completed_no_changes",
@@ -279,9 +274,9 @@ class RecorderQueryService:
                 validate_accepted_transaction_capability_source,
             )
             validator = (
-                validate_completed_transaction_artifact_source
+                validate_accepted_transaction_capability_source
                 if terminal_job_result
-                else validate_accepted_transaction_capability_source
+                else validate_completed_transaction_artifact_source
             )
             _session, loaded_request, plan, _runtime = validator(
                     report_path,
@@ -2692,7 +2687,7 @@ def _generation_stages(report, *, report_path=None):
         design=StageOutcomeDTO(
             status=(
                 "passed"
-                if implementation_manifest_identity_is_readable(manifest)
+                if implementation_manifest_identity_is_valid(manifest)
                 and manifest.get("status") == "ready"
                 else "not_evaluated"
                 if not manifest
@@ -2868,7 +2863,7 @@ def _stage_transaction_status(report):
     if (
         (report.get("implementation_manifest") or {}).get(
             "implementation_manifest_version"
-        ) in {"1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12"}
+        ) == IMPLEMENTATION_MANIFEST_VERSION
         and (report.get("terminal_snapshot_audit") or {}).get("status")
         != "passed"
     ):
@@ -2941,17 +2936,13 @@ def _with_runtime_stages(result, runtime_result, *, quality=None):
 def _single_run_passed(quality):
     if not isinstance(quality, dict):
         return None
-    if "single_run_passed" in quality:
-        return quality.get("single_run_passed")
-    return quality.get("runtime_passed")
+    return quality.get("single_run_passed")
 
 
 def _oracle_passed(quality):
     if not isinstance(quality, dict):
         return None
-    if "oracle_passed" in quality:
-        return quality.get("oracle_passed")
-    return quality.get("independent_oracle_passed")
+    return quality.get("oracle_passed")
 
 
 def _result_recovery(status, failed_checks):

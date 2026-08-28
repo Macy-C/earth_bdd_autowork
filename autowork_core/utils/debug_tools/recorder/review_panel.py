@@ -766,9 +766,6 @@ class RecorderReviewWindow:
             )
         )
 
-    def _scenario_generation_ready(self):
-        return self._capture_generation_candidate()
-
     def selected_take_entry(self):
         step = self._selected_step_workspace()
         if step is None:

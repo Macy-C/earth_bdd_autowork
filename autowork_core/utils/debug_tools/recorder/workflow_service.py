@@ -22,7 +22,6 @@ from autowork_core.utils.debug_tools.recorder.generation_plan import (
     load_generation_plan,
     normalize_generation_plan,
     persist_generation_plan,
-    plan_pointer,
     validate_generation_plan,
     validate_decision_conformance,
 )
@@ -40,7 +39,6 @@ from autowork_core.utils.debug_tools.recorder.generation_job import (
 )
 from autowork_core.utils.debug_tools.recorder.generation_profile import (
     profile_lease_is_recognized,
-    resolve_generation_profile,
 )
 from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION
 from autowork_core.utils.debug_tools.recorder.project_memory import (
@@ -64,7 +62,7 @@ from autowork_core.utils.debug_tools.recorder.semantic_pack import (
     SUPPORTED_SEMANTIC_PACK_VERSIONS,
 )
 from autowork_core.utils.debug_tools.recorder.workflow_state import (
-    JOB_WORKFLOW_STATE_VERSION,
+    WORKFLOW_STATE_VERSION,
     load_workflow_state,
     next_workflow_action,
     write_workflow_state,
@@ -86,14 +84,10 @@ def inspect_workflow(
     session_dir = session_dir_for_request_path(request_path, request)
     existing = load_workflow_state(session_dir, request.get("request_id"))
     terminal_job_workflow = bool(
-        existing.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION
-        and not existing.get("current_job")
+        not existing.get("current_job")
         and existing.get("last_job_result")
     )
-    if (
-        existing.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION
-        and existing.get("current_job")
-    ):
+    if existing.get("current_job"):
         return _inspect_job_workflow(
             session_dir,
             request,
@@ -112,15 +106,7 @@ def inspect_workflow(
         else False
     )
 
-    if request.get("request_version") != "3.0":
-        status = "blocked"
-        errors.append(
-            "旧版 Request 不再支持；请从原始录制证据重新物化当前 RequestV3，"
-            "或通过 recording_portability 导入完整录制包"
-        )
-        brief = None
-        current_revision = {}
-    elif not request_integrity_valid:
+    if not request_integrity_valid:
         status = "stale"
         errors.append("RequestV3 完整性校验失败，请重新物化请求")
         brief = None
@@ -243,12 +229,7 @@ def inspect_workflow(
 
     state = {
         "schema_version": SCHEMA_VERSION,
-        "workflow_state_version": (
-            JOB_WORKFLOW_STATE_VERSION
-            if existing.get("workflow_state_version")
-            == JOB_WORKFLOW_STATE_VERSION
-            else "3.0"
-        ),
+        "workflow_state_version": WORKFLOW_STATE_VERSION,
         "request_id": request.get("request_id"),
         "request_path": str(request_path),
         "session_dir": str(session_dir),
@@ -272,15 +253,12 @@ def inspect_workflow(
             plan_artifact if brief is not None else None,
         ),
         "active_transaction": None,
+        "current_job": existing.get("current_job"),
+        "job_execution": existing.get("job_execution"),
+        "retired_jobs": list(existing.get("retired_jobs") or []),
+        "last_job_result": existing.get("last_job_result"),
+        "attempt_history": list(existing.get("attempt_history") or []),
     }
-    if state["workflow_state_version"] == JOB_WORKFLOW_STATE_VERSION:
-        state.update({
-            "current_job": existing.get("current_job"),
-            "job_execution": existing.get("job_execution"),
-            "retired_jobs": list(existing.get("retired_jobs") or []),
-            "last_job_result": existing.get("last_job_result"),
-            "attempt_history": list(existing.get("attempt_history") or []),
-        })
     if (
         status == "ready"
         and existing.get("status") == "ready"
@@ -381,41 +359,9 @@ def submit_generation_design(
         generation_job_claim_id=None,
         generation_job_expected_epoch=None,
     ):
-    return _submit_generation_input(
+    prepared = _prepare_generation_design(
         request_path,
         design,
-        input_kind="generation_design",
-        input_version=GENERATION_DESIGN_VERSION,
-        compiler=compile_generation_design,
-        note=note,
-        confirmation_source=confirmation_source,
-        plan_origin=plan_origin,
-        generation_job_lease=generation_job_lease,
-        generation_job_claim_id=generation_job_claim_id,
-        generation_job_expected_epoch=generation_job_expected_epoch,
-    )
-
-
-def _submit_generation_input(
-        request_path,
-        submitted_input,
-        *,
-        input_kind,
-        input_version,
-        compiler,
-        note,
-        confirmation_source,
-        plan_origin,
-        generation_job_lease=None,
-        generation_job_claim_id=None,
-        generation_job_expected_epoch=None,
-    ):
-    prepared = _prepare_generation_input(
-        request_path,
-        submitted_input,
-        input_kind=input_kind,
-        input_version=input_version,
-        compiler=compiler,
         confirmation_source=confirmation_source,
         plan_origin=plan_origin,
         write=True,
@@ -438,9 +384,9 @@ def _submit_generation_input(
         state,
         brief,
         normalized,
-        intent=submitted_input,
-        input_kind=input_kind,
-        input_version=input_version,
+        intent=design,
+        input_kind="generation_design",
+        input_version=GENERATION_DESIGN_VERSION,
         confirmation_source=confirmation_source,
         plan_origin=plan_origin,
         note=note,
@@ -449,22 +395,6 @@ def _submit_generation_input(
         ],
         generation_job_lease=prepared["generation_job_lease"],
     )
-    if prepared["generation_job_lease"]:
-        artifact["plan_path"] = str(output)
-        artifact["workflow_status"] = state["status"]
-        artifact["brief"] = state.get("brief") or {}
-        artifact["learning"] = {
-            "status": "deferred_until_accepted_feedback",
-            "memory_ids": [],
-            "capability_paths": [],
-            "warnings": [],
-        }
-        return artifact
-    state["plan"] = plan_pointer(session_dir, artifact, output)
-    state["status"] = "ready"
-    state["next_action"] = next_workflow_action("ready")
-    state["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    write_workflow_state(session_dir, state)
     artifact["plan_path"] = str(output)
     artifact["workflow_status"] = state["status"]
     artifact["brief"] = state.get("brief") or {}
@@ -477,13 +407,10 @@ def _submit_generation_input(
     return artifact
 
 
-def _prepare_generation_input(
+def _prepare_generation_design(
         request_path,
-        submitted_input,
+        design,
         *,
-        input_kind,
-        input_version,
-        compiler,
         confirmation_source,
         plan_origin,
         write,
@@ -513,7 +440,6 @@ def _prepare_generation_input(
         _plan_origin_is_valid,
     )
     if not _plan_origin_is_valid(
-        PLAN_VERSION,
         confirmation_source,
         plan_origin,
     ):
@@ -531,28 +457,27 @@ def _prepare_generation_input(
             write=False,
             return_brief=True,
         )
-    if generation_job_lease:
-        if not generation_job_lease_is_valid(generation_job_lease):
-            raise ValueError("Generation Job lease无效")
-        pointer = state.get("current_job") or {}
-        execution = state.get("job_execution") or {}
-        if any((
-            state.get("workflow_state_version") != JOB_WORKFLOW_STATE_VERSION,
-            state.get("status") != "running",
-            execution.get("phase") != "design",
-            execution.get("claim_id") != generation_job_claim_id,
-            int(execution.get("epoch") or 0)
-            != int(generation_job_expected_epoch or -1),
-            pointer.get("job_id") != generation_job_lease.get("job_id"),
-            pointer.get("job_fingerprint")
-            != generation_job_lease.get("job_fingerprint"),
-            pointer.get("nonce") != generation_job_lease.get("job_nonce"),
-            pointer.get("profile_lease_fingerprint")
-            != generation_job_lease.get("profile_fingerprint"),
-        )):
-            raise ValueError("Generation Job claim、epoch或lease与Workflow不一致")
-    elif state.get("current_job"):
+    if not generation_job_lease:
         raise ValueError("当前Workflow必须使用Generation Job Design入口")
+    if not generation_job_lease_is_valid(generation_job_lease):
+        raise ValueError("Generation Job lease无效")
+    pointer = state.get("current_job") or {}
+    execution = state.get("job_execution") or {}
+    if any((
+        state.get("workflow_state_version") != WORKFLOW_STATE_VERSION,
+        state.get("status") != "running",
+        execution.get("phase") != "design",
+        execution.get("claim_id") != generation_job_claim_id,
+        int(execution.get("epoch") or 0)
+        != int(generation_job_expected_epoch or -1),
+        pointer.get("job_id") != generation_job_lease.get("job_id"),
+        pointer.get("job_fingerprint")
+        != generation_job_lease.get("job_fingerprint"),
+        pointer.get("nonce") != generation_job_lease.get("job_nonce"),
+        pointer.get("profile_lease_fingerprint")
+        != generation_job_lease.get("profile_fingerprint"),
+    )):
+        raise ValueError("Generation Job claim、epoch或lease与Workflow不一致")
     if state.get("status") in {"completed", "failed"}:
         memory_freshness = inspect_request_memory_freshness(
             session_dir,
@@ -566,9 +491,7 @@ def _prepare_generation_input(
                     or "目标相关项目经验已变化，请重新物化 RequestV3"
                 )
             )
-    if state.get("status") in {"blocked", "stale"} or (
-        state.get("status") == "running" and not generation_job_lease
-    ):
+    if state.get("status") in {"blocked", "stale"}:
         raise ValueError(
             f"当前 workflow 不能提交计划: status={state.get('status')}"
         )
@@ -590,9 +513,8 @@ def _prepare_generation_input(
         request,
         state,
     )
-    plan = compiler(submitted_input, brief)
-    if input_kind == "generation_design":
-        plan = compile_generation_intent(plan, brief)
+    plan = compile_generation_design(design, brief)
+    plan = compile_generation_intent(plan, brief)
     if compiled_patch:
         plan = apply_decision_constraints(plan, compiled_patch)
         plan = compile_generation_intent(plan, brief)

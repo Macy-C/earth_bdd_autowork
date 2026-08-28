@@ -229,7 +229,8 @@ def validate_capture_integrity(directory, canonical_event_ids=None):
 def requires_capture_integrity(directory, take=None):
     directory = Path(directory).resolve()
     return bool(
-        "capture_integrity" in (take or {})
+        ((take or {}).get("capture_integrity") or {}).get("status")
+        == "complete"
         or any((directory / name).exists() for name in RAW_CAPTURE_ARTIFACTS)
     )
 

@@ -3623,11 +3623,7 @@ def _find_ordered_call(records, start, operation):
     expected_target = _normalize_target(operation.get("target"))
     expected_value = _expected_value(operation)
     parameters = operation.get("parameters") or {}
-    source = (
-        operation.get("source")
-        or parameters.get("expected_source")
-        or parameters.get("value_source")
-    )
+    source = operation.get("source")
     runtime_binding = (
         str(source).split(".", 1)[1]
         if str(source or "").startswith("runtime.")
@@ -4002,11 +3998,6 @@ def _call_runtime_bindings(record, *, index, keyword):
 
 
 def _expected_value(operation):
-    parameters = operation.get("parameters") or {}
-    if "expected" in parameters:
-        return parameters.get("expected")
-    if "value" in parameters:
-        return parameters.get("value")
     return operation.get("value")
 
 

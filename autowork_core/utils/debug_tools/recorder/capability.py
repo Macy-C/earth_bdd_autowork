@@ -181,11 +181,7 @@ def publish_plan_capabilities(
 def _plan_is_publishable(plan_artifact, *, accepted_transaction):
     source = plan_artifact.get("source") or {}
     if accepted_transaction is not None:
-        return all((
-            plan_artifact.get("status") in {"confirmed", "validated"},
-            source.get("plan_origin") != "legacy_import",
-            source.get("confirmation_source") != "legacy_import",
-        ))
+        return plan_artifact.get("status") == "validated"
     return all((
         plan_artifact.get("status") == "confirmed",
         source.get("confirmation_source") == "user_adjustment",
@@ -385,12 +381,6 @@ def validate_accepted_transaction_capability_source(
         != (state.get("plan") or {}).get("plan_fingerprint"),
     )):
         raise ValueError("Completed transaction report fingerprint 无效")
-    plan_source = plan.get("source") or {}
-    if (
-        plan_source.get("plan_origin") == "legacy_import"
-        or plan_source.get("confirmation_source") == "legacy_import"
-    ):
-        raise ValueError("legacy_import Plan 不能提升为当前 confirmed Capability")
     return session_dir, request, plan, runtime_verification
 
 
@@ -543,13 +533,7 @@ def validate_completed_transaction_artifact_source(
         effective_project_root,
     ):
         raise ValueError("Transaction runtime code snapshot 已变化")
-    focused = (
-        (report.get("validations") or {}).get("focused_execution") or {}
-    )
-    runtime_verification = (
-        "passed" if focused.get("status") == "passed" else "not_run"
-    )
-    return session_dir, request, plan, runtime_verification
+    return session_dir, request, plan, "not_run"
 
 
 def _transaction_artifact_path(session_dir, value, directory):

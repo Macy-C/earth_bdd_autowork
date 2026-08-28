@@ -18,9 +18,6 @@ from autowork_core.utils.debug_tools.recorder.identity import (
 
 IMPLEMENTATION_MANIFEST_VERSION = "1.12"
 IMPLEMENTATION_PACKET_VERSION = "1.2"
-READABLE_IMPLEMENTATION_MANIFEST_VERSIONS = {
-    IMPLEMENTATION_MANIFEST_VERSION,
-}
 
 
 def compact_implementation_manifest_contract():
@@ -851,21 +848,12 @@ def implementation_manifest_fingerprint(manifest):
 
 
 def implementation_manifest_identity_is_valid(manifest):
-    return bool(
-        isinstance(manifest, dict)
-        and manifest.get("implementation_manifest_version")
-        == IMPLEMENTATION_MANIFEST_VERSION
-        and implementation_manifest_identity_is_readable(manifest)
-    )
-
-
-def implementation_manifest_identity_is_readable(manifest):
     if not isinstance(manifest, dict):
         return False
     fingerprint = implementation_manifest_fingerprint(manifest)
     return all((
         manifest.get("implementation_manifest_version")
-        in READABLE_IMPLEMENTATION_MANIFEST_VERSIONS,
+        == IMPLEMENTATION_MANIFEST_VERSION,
         bool(manifest.get("request_id")),
         bool(manifest.get("plan_id")),
         bool(manifest.get("plan_fingerprint")),
@@ -1677,12 +1665,10 @@ def _fingerprint(value):
 __all__ = [
     "IMPLEMENTATION_MANIFEST_VERSION",
     "IMPLEMENTATION_PACKET_VERSION",
-    "READABLE_IMPLEMENTATION_MANIFEST_VERSIONS",
     "build_implementation_packet",
     "build_implementation_manifest",
     "compact_implementation_manifest_contract",
     "implementation_manifest_fingerprint",
     "implementation_manifest_identity_is_valid",
-    "implementation_manifest_identity_is_readable",
     "implementation_manifest_matches_transaction",
 ]

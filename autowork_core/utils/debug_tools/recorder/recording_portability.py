@@ -274,7 +274,7 @@ def import_recording_package(
                 )
                 manifest["feature"] = feature
                 write_json_atomic(manifest_path, manifest)
-                _rebase_compatibility_metadata(
+                _rebase_import_metadata(
                     destination,
                     recording_root,
                     manifest,
@@ -431,7 +431,7 @@ def _running_transactions(run):
     return sorted(set(result))
 
 
-def _rebase_compatibility_metadata(run, recording_root, manifest):
+def _rebase_import_metadata(run, recording_root, manifest):
     feature_plan_path = run / "feature-plan.json"
     if feature_plan_path.is_file():
         feature_plan = _read_json(feature_plan_path)

@@ -74,7 +74,7 @@ from autowork_core.utils.debug_tools.recorder.request_repository import (
 )
 from autowork_core.utils.debug_tools.recorder.run_lock import RunWriteLock
 from autowork_core.utils.debug_tools.recorder.workflow_state import (
-    JOB_WORKFLOW_STATE_VERSION,
+    WORKFLOW_STATE_VERSION,
     claim_generation_job,
     fail_generation_job_integrity,
     load_workflow_state,
@@ -108,7 +108,7 @@ def admit_generation_job(request_path, *, profile_id=None):
         )
         replacement = None
         if existing.get("workflow_state_version") == (
-                JOB_WORKFLOW_STATE_VERSION
+            WORKFLOW_STATE_VERSION
         ) and existing.get("current_job"):
             job = load_generation_job(
                 session_dir,
@@ -978,17 +978,13 @@ def _reconcile_generation_job_runtime_locked(
 def _quality_passed(quality):
     if not isinstance(quality, dict):
         return None
-    if "quality_passed" in quality:
-        return quality.get("quality_passed")
-    return quality.get("runtime_passed")
+    return quality.get("quality_passed")
 
 
 def _oracle_passed(quality):
     if not isinstance(quality, dict):
         return None
-    if "oracle_passed" in quality:
-        return quality.get("oracle_passed")
-    return quality.get("independent_oracle_passed")
+    return quality.get("oracle_passed")
 
 
 def _resolve_current_job(job_path):

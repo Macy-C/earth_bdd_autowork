@@ -55,16 +55,17 @@ def find_latest_request(session_dir, step_ids):
 
 def index_generation_request(session_dir, request):
     session_dir = Path(session_dir).resolve()
+    if request.get("request_version") != "3.0":
+        raise ValueError("Generation Request身份无效")
     step_ids = request_step_ids(request)
     scope = request_scope_key(step_ids)
     fingerprint = evidence_fingerprint(request)
     request["request_scope"] = scope
     request["evidence_fingerprint"] = fingerprint
-    if request.get("request_version") == "3.0":
-        request["request_fingerprint"] = request_fingerprint(request)
+    request["request_fingerprint"] = request_fingerprint(request)
     request_path = resolve_request_path(session_dir, request["request_path"])
     existing = _read_json(request_path)
-    if request.get("request_version") == "3.0" and existing:
+    if existing:
         if existing != request:
             raise ValueError(f"禁止改写不可变 RequestV3: {request_path}")
     else:
@@ -252,7 +253,7 @@ def request_scenario_scope(session_dir, step_ids):
     ]
     return {
         "logical_template_id": (
-            scenario.get("logical_template_id") or scenario.get("id")
+            scenario.get("logical_template_id")
         ),
         "generation_scope": {
             "kind": "scenario",
@@ -318,17 +319,15 @@ def generation_request_id(
         *,
     scenario_scope=None,
     evidence_context_version=None,
-        contract_hash,
-        api_signature_hash,
         reviews,
         memory_revision,
         specification_fingerprint=None,
         annotation_fingerprint=None,
         execution_profile_fingerprint=None,
-        identity_profile=None,
 ):
     identity = {
         "request_version": "3.0",
+        "identity_profile": "business-v1",
         "feature_id": feature_id,
         "scenario_id": scenario_id,
         "evidence": [
@@ -353,11 +352,6 @@ def generation_request_id(
         ],
         "memory_revision": memory_revision,
     }
-    if identity_profile:
-        identity["identity_profile"] = str(identity_profile)
-    else:
-        identity["contract_hash"] = contract_hash
-        identity["api_signature_hash"] = api_signature_hash
     if specification_fingerprint:
         identity["specification_fingerprint"] = str(
             specification_fingerprint
@@ -450,8 +444,6 @@ def _seal_less_request_identity_is_valid(request):
                 "evidence_context_version"
             )
         ),
-        contract_hash=None,
-        api_signature_hash=None,
         reviews=(request.get("readiness") or {}).get(
             "target_review_required"
         ) or [],
@@ -473,7 +465,6 @@ def _seal_less_request_identity_is_valid(request):
                 "execution_profile_fingerprint"
             )
         ),
-        identity_profile=identity_basis.get("request_identity_profile"),
     )
     return request_id == expected
 
@@ -743,8 +734,6 @@ def request_scope_key(step_ids):
 
 
 def request_status(request, *, session_dir=None):
-    if request.get("request_version") != "3.0":
-        return "request_rematerialization_required"
     reviews = (request.get("readiness") or {}).get("target_review_required") or []
     if (request.get("readiness") or {}).get("bundle_valid") is False:
         return "blocked"
@@ -791,11 +780,11 @@ def resolve_request_path(session_dir, value):
         raise ValueError(f"AI 请求路径越界: {value}") from error
     if (
         path.parent != root
-        or not path.name.startswith(("request_", "request-"))
+        or not path.name.startswith("request_")
         or path.suffix != ".json"
     ):
         raise ValueError(
-            f"AI 请求必须是 ai/requests/request_*.json 或历史 request-*.json: {value}"
+            f"AI 请求必须是 ai/requests/request_*.json: {value}"
         )
     return path
 
@@ -881,7 +870,6 @@ def _scan_latest_request(session_dir, step_ids):
     request_dir = Path(session_dir) / "ai" / "requests"
     candidates = []
     paths = list(request_dir.glob("request_*.json"))
-    paths.extend(request_dir.glob("request-*.json"))
     for path in paths:
         request = _read_json(path)
         if request_step_ids(request) != step_ids or request.get("stale"):

@@ -364,8 +364,7 @@ def _review_step_semantics(
     projection = projection_store.current()
     if projection is None:
         errors.append(
-            f"Take 缺少有效 Projection 5.7: {take_path}；"
-            "旧 Run 需要使用旧版本或独立离线迁移工具"
+            f"Take 缺少有效 Projection 5.7: {take_path}"
         )
         return
     effective_actions_path = projection.path("actions_effective")

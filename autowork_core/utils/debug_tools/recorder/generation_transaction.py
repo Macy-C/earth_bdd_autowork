@@ -67,6 +67,7 @@ from autowork_core.utils.debug_tools.recorder.generation_validation import (
 )
 from autowork_core.utils.debug_tools.recorder.identity import stable_digest
 from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
+    IMPLEMENTATION_MANIFEST_VERSION,
     build_implementation_packet,
     build_implementation_manifest,
     implementation_manifest_identity_is_valid,
@@ -106,11 +107,8 @@ from autowork_core.utils.debug_tools.recorder.semantic_reconciler import (
     brief_matches_request,
 )
 from autowork_core.utils.debug_tools.recorder.workflow_state import (
-    JOB_WORKFLOW_STATE_VERSION,
     load_workflow_state,
     transition_generation_job,
-    transition_workflow,
-    write_workflow_state,
 )
 from autowork_core.utils.debug_tools.recorder.workflow_service import inspect_workflow
 from autowork_core.utils.debug_tools.recorder.transaction_integrity import (
@@ -203,23 +201,21 @@ def _prepare_generation_transaction_locked(
         project_root or Paths.BASE_DIR
     ).resolve()
     existing = load_workflow_state(session_dir, request.get("request_id"))
-    job_bound = bool(generation_job_lease)
-    if existing.get("current_job") and not job_bound:
+    if not generation_job_lease:
         raise ValueError("当前Workflow必须使用Generation Job prepare入口")
-    if job_bound:
-        job_errors = _generation_job_context_errors(
-            existing,
-            request,
-            generation_job_lease,
-            claim_id=generation_job_claim_id,
-            expected_epoch=generation_job_expected_epoch,
-            expected_phase="implementation",
+    job_errors = _generation_job_context_errors(
+        existing,
+        request,
+        generation_job_lease,
+        claim_id=generation_job_claim_id,
+        expected_epoch=generation_job_expected_epoch,
+        expected_phase="implementation",
+    )
+    if job_errors:
+        raise ValueError(
+            "Generation Job prepare context无效: "
+            + "; ".join(job_errors)
         )
-        if job_errors:
-            raise ValueError(
-                "Generation Job prepare context无效: "
-                + "; ".join(job_errors)
-            )
     if existing.get("status") == "running":
         active = existing.get("active_transaction") or {}
         path = _transaction_path(session_dir, active.get("path"))
@@ -292,7 +288,7 @@ def _prepare_generation_transaction_locked(
         state.get("status") == "running"
         and (state.get("job_execution") or {}).get("phase")
         == "implementation"
-    ) if job_bound else state.get("status") == "ready"
+    )
     if not expected_ready:
         return {
             "transaction_version": TRANSACTION_VERSION,
@@ -306,7 +302,7 @@ def _prepare_generation_transaction_locked(
     plan = load_generation_plan(session_dir, state, request)
     if plan is None:
         return _block_missing_plan(session_dir, request, state)
-    if job_bound and (plan.get("source") or {}).get(
+    if (plan.get("source") or {}).get(
             "generation_job_lease"
     ) != generation_job_lease:
         raise ValueError("Generation Plan与current Job lease不一致")
@@ -318,22 +314,6 @@ def _prepare_generation_transaction_locked(
         contract_lease,
     ):
         return _block_contract_changed(session_dir, request, state)
-    if plan.get("plan_version") != PLAN_VERSION:
-        state["status"] = "draft"
-        state["next_action"] = "submit_window_owned_plan"
-        state["errors"] = [
-            f"历史 Plan 可审阅，但新事务必须提交 validated PlanV{PLAN_VERSION}"
-        ]
-        write_workflow_state(session_dir, state)
-        return {
-            "transaction_version": TRANSACTION_VERSION,
-            "status": "draft",
-            "request_id": request.get("request_id"),
-            "request_path": str(request_path),
-            "workflow_state": state,
-            "errors": list(state["errors"]),
-            "warnings": [],
-        }
     brief_path = _resolve_session_artifact(
         session_dir,
         (state.get("brief") or {}).get("path"),
@@ -471,7 +451,6 @@ def _prepare_generation_transaction_locked(
         )
     report = {
         "schema_version": SCHEMA_VERSION,
-        "workflow_version": "3.0",
         "transaction_version": TRANSACTION_VERSION,
         "transaction_id": transaction_id,
         "transaction_nonce": secrets.token_hex(16),
@@ -603,26 +582,18 @@ def _prepare_generation_transaction_locked(
         output.relative_to(session_dir).as_posix(),
     )
     try:
-        if job_bound:
-            transition_generation_job(
-                session_dir,
-                request["request_id"],
-                job_id=generation_job_lease["job_id"],
-                job_fingerprint=generation_job_lease["job_fingerprint"],
-                claim_id=generation_job_claim_id,
-                expected_epoch=generation_job_expected_epoch,
-                expected_phase="implementation",
-                phase="implementation",
-                next_action="validate_generation_implementation",
-                transaction=pointer,
-            )
-        else:
-            transition_workflow(
-                session_dir,
-                request["request_id"],
-                status="running",
-                transaction=pointer,
-            )
+        transition_generation_job(
+            session_dir,
+            request["request_id"],
+            job_id=generation_job_lease["job_id"],
+            job_fingerprint=generation_job_lease["job_fingerprint"],
+            claim_id=generation_job_claim_id,
+            expected_epoch=generation_job_expected_epoch,
+            expected_phase="implementation",
+            phase="implementation",
+            next_action="validate_generation_implementation",
+            transaction=pointer,
+        )
     except Exception:
         try:
             rollback_implementation_scaffold(
@@ -667,7 +638,6 @@ def _resume_generation_transaction(
             errors.append(str(error))
         if (
             not errors
-            and _report_requires_generation_contract_lease(report)
             and not generation_contract_lease_matches(
                 session_dir,
                 report.get("generation_contract_lease"),
@@ -682,54 +652,17 @@ def _resume_generation_transaction(
                 project_root=project_root,
                 generation_job_claim_id=(
                     (state.get("job_execution") or {}).get("claim_id")
-                    if report.get("generation_job_lease")
-                    else None
                 ),
                 generation_job_expected_epoch=(
                     (state.get("job_execution") or {}).get("epoch")
-                    if report.get("generation_job_lease")
-                    else None
                 ),
             )
-            if report.get("generation_job_lease"):
-                return {
-                    **aborted,
-                    "workflow_state": load_workflow_state(
-                        session_dir,
-                        request.get("request_id"),
-                    ),
-                }
-            refreshed = load_workflow_state(
-                session_dir,
-                request.get("request_id"),
-            )
-            refreshed.update({
-                "status": "draft",
-                "next_action": "submit_generation_design",
-                "plan": {},
-                "active_transaction": None,
-                "errors": [],
-                "warnings": [
-                    "生成能力已更新；草稿已归档并恢复基线，"
-                    "业务Request和Decision保持有效，请重新提交Design"
-                ],
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
-            })
-            write_workflow_state(session_dir, refreshed)
             return {
-                "transaction_version": TRANSACTION_VERSION,
-                "status": "draft",
-                "request_id": request.get("request_id"),
-                "workflow_state": refreshed,
-                "aborted_transaction": {
-                    "transaction_id": aborted.get("transaction_id"),
-                    "report_path": aborted.get("report_path"),
-                    "draft_archive": (
-                        aborted.get("abort") or {}
-                    ).get("draft_archive"),
-                },
-                "errors": [],
-                "warnings": list(refreshed["warnings"]),
+                **aborted,
+                "workflow_state": load_workflow_state(
+                    session_dir,
+                    request.get("request_id"),
+                ),
             }
         try:
             report["generation_file_lease"] = commit_generation_file_lease(
@@ -771,20 +704,12 @@ def _resume_generation_transaction(
             report,
             report_path.relative_to(session_dir).as_posix(),
         )
-        if report.get("generation_job_lease"):
-            if (state.get("active_transaction") or {}) != pointer:
-                return _block_stale(
-                    session_dir,
-                    request,
-                    state,
-                    "Generation Job active Transaction pointer不一致",
-                )
-        else:
-            transition_workflow(
+        if (state.get("active_transaction") or {}) != pointer:
+            return _block_stale(
                 session_dir,
-                request["request_id"],
-                status="running",
-                transaction=pointer,
+                request,
+                state,
+                "Generation Job active Transaction pointer不一致",
             )
         report["report_path"] = str(report_path)
         return report
@@ -863,8 +788,7 @@ def _generation_job_context_errors(
     pointer = state.get("current_job") or {}
     execution = state.get("job_execution") or {}
     checks = {
-        "workflow_version": state.get("workflow_state_version")
-        == JOB_WORKFLOW_STATE_VERSION,
+        "workflow_version": state.get("workflow_state_version"),
         "request_id": lease.get("request_id") == request.get("request_id"),
         "job_id": lease.get("job_id") == pointer.get("job_id"),
         "job_fingerprint": lease.get("job_fingerprint")
@@ -1006,30 +930,11 @@ def _transition_terminal_workflow(
         report_path,
         report,
 ):
-    if report.get("generation_job_lease"):
-        return publish_static_job_outcome(
-            session_dir,
-            request_id,
-            report_path,
-            report,
-        )
-    status = str(report.get("status") or "")
-    transition_workflow(
+    return publish_static_job_outcome(
         session_dir,
         request_id,
-        status=(
-            "completed"
-            if status in {"completed", "completed_no_changes"}
-            else "failed"
-        ),
-        transaction=None,
-        result={
-            "transaction_id": report.get("transaction_id"),
-            "report_path": str(report_path),
-            "status": status,
-            "completion_fingerprint": report.get("completion_fingerprint"),
-            "result_fingerprint": report.get("result_fingerprint"),
-        },
+        report_path,
+        report,
     )
 
 
@@ -1142,25 +1047,21 @@ def _abort_generation_transaction_locked(
     if not request_identity_is_valid(request):
         raise ValueError("RequestV3 完整性校验失败")
     state = load_workflow_state(session_dir, request.get("request_id"))
-    if report.get("generation_job_lease"):
-        job_errors = _generation_job_context_errors(
-            state,
-            request,
-            report.get("generation_job_lease") or {},
-            claim_id=generation_job_claim_id,
-            expected_epoch=generation_job_expected_epoch,
-            expected_phase="implementation",
+    job_errors = _generation_job_context_errors(
+        state,
+        request,
+        report.get("generation_job_lease") or {},
+        claim_id=generation_job_claim_id,
+        expected_epoch=generation_job_expected_epoch,
+        expected_phase="implementation",
+    )
+    if generation_job_claim_id != report.get("generation_job_claim_id"):
+        job_errors.append("report_claim_id")
+    if job_errors:
+        raise ValueError(
+            "Generation Job abort context无效: "
+            + "; ".join(job_errors)
         )
-        if (
-            generation_job_claim_id
-            != report.get("generation_job_claim_id")
-        ):
-            job_errors.append("report_claim_id")
-        if job_errors:
-            raise ValueError(
-                "Generation Job abort context无效: "
-                + "; ".join(job_errors)
-            )
     active = state.get("active_transaction") or {}
     if any((
         state.get("status") != "running",
@@ -1381,26 +1282,12 @@ def _complete_aborted_generation_transaction(
         )
         report["result_fingerprint"] = transaction_result_fingerprint(report)
         write_json_atomic(report_path, report)
-    if report.get("generation_job_lease"):
-        publish_static_job_outcome(
-            session_dir,
-            request["request_id"],
-            report_path,
-            report,
-        )
-    else:
-        transition_workflow(
-            session_dir,
-            request["request_id"],
-            status="ready",
-            transaction=None,
-            result={
-                "transaction_id": report.get("transaction_id"),
-                "report_path": str(report_path),
-                "status": "aborted",
-                "result_fingerprint": report["result_fingerprint"],
-            },
-        )
+    publish_static_job_outcome(
+        session_dir,
+        request["request_id"],
+        report_path,
+        report,
+    )
     report["report_path"] = str(report_path)
     return report
 
@@ -1439,26 +1326,21 @@ def _finish_generation_transaction_locked(
         raise ValueError("RequestV3 完整性校验失败")
     session_dir = session_dir_for_request_path(request_path, request)
     state = load_workflow_state(session_dir, request.get("request_id"))
-    if report.get("generation_job_lease"):
-        job_errors = _generation_job_context_errors(
-            state,
-            request,
-            report.get("generation_job_lease") or {},
-            claim_id=generation_job_claim_id,
-            expected_epoch=generation_job_expected_epoch,
-            expected_phase="implementation",
+    job_errors = _generation_job_context_errors(
+        state,
+        request,
+        report.get("generation_job_lease") or {},
+        claim_id=generation_job_claim_id,
+        expected_epoch=generation_job_expected_epoch,
+        expected_phase="implementation",
+    )
+    if generation_job_claim_id != report.get("generation_job_claim_id"):
+        job_errors.append("report_claim_id")
+    if job_errors:
+        raise ValueError(
+            "Generation Job implementation context无效: "
+            + "; ".join(job_errors)
         )
-        if (
-            generation_job_claim_id != report.get(
-                "generation_job_claim_id"
-            )
-        ):
-            job_errors.append("report_claim_id")
-        if job_errors:
-            raise ValueError(
-                "Generation Job implementation context无效: "
-                + "; ".join(job_errors)
-            )
     active = state.get("active_transaction") or {}
     if any((
         state.get("status") != "running",
@@ -1588,12 +1470,9 @@ def _finish_generation_transaction_locked(
     lease_errors = [] if revision_matches else [
         "生成期间 selected Take、timeline、Evidence Graph 或Annotation已变化"
     ]
-    if (
-        _report_requires_generation_contract_lease(report)
-        and not generation_contract_lease_matches(
-            session_dir,
-            report.get("generation_contract_lease"),
-        )
+    if not generation_contract_lease_matches(
+        session_dir,
+        report.get("generation_contract_lease"),
     ):
         lease_errors.append("生成期间Generation Contract已变化")
     brief, plan, artifact_errors = _load_frozen_artifacts(
@@ -1730,7 +1609,7 @@ def _finish_generation_transaction_locked(
         not validate_only
         and (report.get("implementation_manifest") or {}).get(
             "implementation_manifest_version"
-        ) in {"1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12"}
+        ) == IMPLEMENTATION_MANIFEST_VERSION
     ):
         ledger_pointer = report.get("implementation_validation_ledger") or {}
         ledger, ledger_errors = verify_validation_ledger(
@@ -3252,18 +3131,6 @@ def _plan_unresolved_issues(plan_artifact):
     ]
 
 
-def _report_requires_generation_contract_lease(report):
-    pointer = report.get("generation_plan") or {}
-    if pointer.get("generation_contract_lease_fingerprint"):
-        return True
-    plan_path = Path(str(report.get("plan_path") or ""))
-    try:
-        plan = _read_json(plan_path)
-    except (OSError, TypeError, ValueError):
-        return False
-    return plan.get("plan_version") == PLAN_VERSION
-
-
 def _completion_status(
         changed,
         *,
@@ -3331,6 +3198,8 @@ def _validate_report_static_identity(report_path, report):
         "project_root",
         "lease",
         "implementation_manifest",
+        "generation_job_lease",
+        "generation_job_claim_id",
     )
     missing = [name for name in required if not report.get(name)]
     if report.get("transaction_version") != TRANSACTION_VERSION or missing:
@@ -3402,113 +3271,41 @@ def _transaction_path(session_dir, value):
 
 
 def _block_missing_plan(session_dir, request, state):
-    if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
-        return _job_block_result(
-            request,
-            state,
-            "missing_generation_plan",
-            [f"Workflow implementation阶段缺少有效GenerationPlanV{PLAN_VERSION}"],
-        )
-    state = transition_workflow(
-        session_dir,
-        request["request_id"],
-        status="blocked",
-        result={"status": "missing_generation_plan"},
+    return _job_block_result(
+        request,
+        state,
+        "missing_generation_plan",
+        [f"Workflow implementation阶段缺少有效GenerationPlanV{PLAN_VERSION}"],
     )
-    return {
-        "transaction_version": TRANSACTION_VERSION,
-        "status": "blocked",
-        "request_id": request.get("request_id"),
-        "workflow_state": state,
-        "errors": [f"Workflow ready 但缺少有效 GenerationPlanV{PLAN_VERSION}"],
-        "warnings": [],
-    }
 
 
 def _block_stale(session_dir, request, state, reason):
-    if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
-        return _job_block_result(
-            request,
-            state,
-            "stale_during_generation",
-            [reason],
-        )
-    state = transition_workflow(
-        session_dir,
-        request["request_id"],
-        status="stale",
-        result={"status": "stale", "reason": reason},
+    return _job_block_result(
+        request,
+        state,
+        "stale_during_generation",
+        [reason],
     )
-    return {
-        "transaction_version": TRANSACTION_VERSION,
-        "status": "stale",
-        "request_id": request.get("request_id"),
-        "workflow_state": state,
-        "errors": [reason],
-        "warnings": [],
-    }
 
 
 def _block_contract_changed(session_dir, request, state):
-    if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
-        return _job_block_result(
-            request,
-            state,
-            "generation_contract_changed",
-            ["Generation Contract在Job期间已变化"],
-        )
-    state = dict(state)
-    state.update({
-        "status": "draft",
-        "next_action": "submit_generation_design",
-        "plan": {},
-        "active_transaction": None,
-        "errors": [],
-        "warnings": [
-            "生成能力已更新；业务Request和Decision保持有效，"
-            "请基于当前Contract重新提交Design"
-        ],
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
-    })
-    write_workflow_state(session_dir, state)
-    return {
-        "transaction_version": TRANSACTION_VERSION,
-        "status": "draft",
-        "request_id": request.get("request_id"),
-        "workflow_state": state,
-        "errors": [],
-        "warnings": list(state["warnings"]),
-    }
+    return _job_block_result(
+        request,
+        state,
+        "generation_contract_changed",
+        ["Generation Contract在Job期间已变化"],
+    )
 
 
 def _block_pic_policy(session_dir, request, state, audit):
-    if state.get("workflow_state_version") == JOB_WORKFLOW_STATE_VERSION:
-        result = _job_block_result(
-            request,
-            state,
-            "invalid_pic_authorization",
-            audit.get("errors") or ["PIC authorization无效"],
-        )
-        result["pic_authorization_audit"] = audit
-        return result
-    state = transition_workflow(
-        session_dir,
-        request["request_id"],
-        status="blocked",
-        result={
-            "status": "invalid_pic_authorization",
-            "pic_authorization_audit": audit,
-        },
+    result = _job_block_result(
+        request,
+        state,
+        "invalid_pic_authorization",
+        audit.get("errors") or ["PIC authorization无效"],
     )
-    return {
-        "transaction_version": TRANSACTION_VERSION,
-        "status": "blocked",
-        "request_id": request.get("request_id"),
-        "workflow_state": state,
-        "pic_authorization_audit": audit,
-        "errors": audit.get("errors") or ["PIC authorization 无效"],
-        "warnings": [],
-    }
+    result["pic_authorization_audit"] = audit
+    return result
 
 
 def _job_block_result(request, state, category, errors):

@@ -46,7 +46,6 @@ def generation_provenance_matches(run_result, expected):
 def load_generation_provenance(report_path, *, project_root=None):
     from autowork_core.utils.debug_tools.recorder.capability import (
         validate_completed_transaction_artifact_source,
-        validate_accepted_transaction_capability_source,
     )
     from autowork_core.utils.debug_tools.recorder.generation_job import (
         generation_job_lease_is_valid,
@@ -75,43 +74,36 @@ def load_generation_provenance(report_path, *, project_root=None):
     if not isinstance(report, dict):
         raise ValueError("Generation transaction report 必须是 object")
     job_lease = report.get("generation_job_lease") or {}
-    if generation_job_lease_is_valid(job_lease):
-        session_dir, request, plan, _runtime_verification = (
-            validate_completed_transaction_artifact_source(
-                path,
-                report,
-                project_root=project_root,
-            )
+    if not generation_job_lease_is_valid(job_lease):
+        raise ValueError("Generation transaction未绑定Generation Job")
+    session_dir, request, plan, _runtime_verification = (
+        validate_completed_transaction_artifact_source(
+            path,
+            report,
+            project_root=project_root,
         )
-        state = load_workflow_state(
-            session_dir,
-            report.get("request_id"),
-        )
-        pointer = state.get("current_job") or {}
-        execution = state.get("job_execution") or {}
-        transaction = execution.get("transaction") or {}
-        if any((
-            state.get("status") != "running",
-            execution.get("phase") not in {"runtime", "oracle"},
-            pointer.get("job_id") != job_lease.get("job_id"),
-            pointer.get("job_fingerprint")
-            != job_lease.get("job_fingerprint"),
-            pointer.get("nonce") != job_lease.get("job_nonce"),
-            transaction.get("transaction_id")
-            != report.get("transaction_id"),
-            transaction.get("result_fingerprint")
-            != report.get("result_fingerprint"),
-        )):
-            raise ValueError(
-                "Generation Job runtime phase与Transaction不一致"
-            )
-    else:
-        session_dir, request, plan, _runtime_verification = (
-            validate_accepted_transaction_capability_source(
-                path,
-                report,
-                project_root=project_root,
-            )
+    )
+    state = load_workflow_state(
+        session_dir,
+        report.get("request_id"),
+    )
+    pointer = state.get("current_job") or {}
+    execution = state.get("job_execution") or {}
+    transaction = execution.get("transaction") or {}
+    if any((
+        state.get("status") != "running",
+        execution.get("phase") not in {"runtime", "oracle"},
+        pointer.get("job_id") != job_lease.get("job_id"),
+        pointer.get("job_fingerprint")
+        != job_lease.get("job_fingerprint"),
+        pointer.get("nonce") != job_lease.get("job_nonce"),
+        transaction.get("transaction_id")
+        != report.get("transaction_id"),
+        transaction.get("result_fingerprint")
+        != report.get("result_fingerprint"),
+    )):
+        raise ValueError(
+            "Generation Job runtime phase与Transaction不一致"
         )
     try:
         session_dir.relative_to(project_root)

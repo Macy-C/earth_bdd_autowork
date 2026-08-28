@@ -268,7 +268,7 @@ class SupplementCaptureSession:
                 ]) or None,
                 **(
                     {"capture_integrity": result.capture_integrity}
-                    if result.capture_integrity.get("status") == "complete"
+                    if result.capture_integrity
                     else {}
                 ),
                 "capture_config": {

@@ -237,7 +237,7 @@ class CaptureRuntime:
             )
         else:
             capture_integrity = {
-                "status": "legacy_unavailable",
+                "status": "external_capture",
                 "raw_event_count": None,
                 "canonical_event_count": len(event_list),
             }

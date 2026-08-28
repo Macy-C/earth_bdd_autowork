@@ -250,11 +250,7 @@ def restore_quarantine(
             and catalog.is_file()
             and _sha256(catalog) == expected_catalog_hash
         )
-        if not catalog_matches and not _legacy_empty_catalog_is_safe(
-            root,
-            catalog,
-            receipt,
-        ):
+        if not catalog_matches:
             raise ValueError(
                 "隔离后 Capability catalog 已变化，拒绝覆盖后续知识更新"
             )
@@ -434,25 +430,6 @@ def _write_capability_catalog(root):
         "derived": True,
     })
     return path
-
-
-def _legacy_empty_catalog_is_safe(root, catalog, receipt):
-    if receipt.get("catalog_after_sha256") is not None or not catalog.is_file():
-        return False
-    try:
-        value = _read_object(catalog)
-    except (OSError, json.JSONDecodeError, ValueError):
-        return False
-    active_files = list(
-        _capability_directory(root).glob("capability-*.json")
-    )
-    return (
-        receipt.get("catalog_before_exists") is False
-        and receipt.get("catalog_before_sha256") in {None, ""}
-        and value.get("derived") is True
-        and value.get("capabilities") == []
-        and not active_files
-    )
 
 
 def _active_capability_errors(report, root):

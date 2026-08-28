@@ -244,7 +244,6 @@ class TimelineEditorWindow:
         self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_selection)
         self.tree.tag_configure("supplement_action", foreground="#0b5f45")
-        self.tree.tag_configure("merged_action", foreground="#075985")
 
         right.rowconfigure(0, weight=1)
         right.columnconfigure(0, weight=1)
@@ -852,8 +851,6 @@ class TimelineEditorWindow:
                 if (action.get("source") or {}).get("kind") == "supplement"
                 else ()
             )
-            if action.get("source_action_ids"):
-                tags = (*tags, "merged_action")
             self.tree.insert(
                 "",
                 "end",
@@ -957,10 +954,7 @@ class TimelineEditorWindow:
             )
             return
         action = self.review_action_map.get(action_ids[0]) or {}
-        ignored = (
-            not action.get("included", True)
-            or (action.get("role") or "business") == "noise"
-        )
+        ignored = not action.get("included", True)
         if not ignored:
             if action.get("type") == "keyboard":
                 confirmed = messagebox.askyesno(
@@ -989,10 +983,7 @@ class TimelineEditorWindow:
                 completion_message="已忽略该动作；原始证据仍然保留。",
             )
             return
-        if (action.get("role") or "business") == "noise":
-            operation = lambda store, ids: store.restore_legacy_noise(ids[0])
-        else:
-            operation = lambda store, ids: store.apply_edit("include", ids)
+        operation = lambda store, ids: store.apply_edit("include", ids)
         self._apply(
             operation,
             action_ids,

@@ -192,8 +192,7 @@ class SessionProjectionBuilder:
                 projection = projection_store.current()
                 if projection is None:
                     raise ValueError(
-                        f"Take 缺少有效 Projection 5.7: {take_entry['path']}；"
-                        "旧 Run 需要使用旧版本或独立离线迁移工具"
+                        f"Take 缺少有效 Projection 5.7: {take_entry['path']}"
                     )
                 locator_path = projection.path(
                     "locator_candidates_effective"

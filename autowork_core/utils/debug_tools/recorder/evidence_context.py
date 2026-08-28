@@ -337,8 +337,7 @@ def _take_comparison_summary(session_dir, take):
     projection = ProjectionStore(take_dir).current()
     if projection is None:
         raise ValueError(
-            f"Take 缺少有效 Projection 5.7: {take.get('id')}；"
-            "旧 Run 需要使用旧版本或独立离线迁移工具"
+            f"Take 缺少有效 Projection 5.7: {take.get('id')}"
         )
     graph_path = projection.path("evidence_graph")
     if graph_path is None:
@@ -346,7 +345,7 @@ def _take_comparison_summary(session_dir, take):
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     if graph.get("evidence_graph_version") != EVIDENCE_GRAPH_VERSION:
         raise ValueError(
-            f"Take Evidence Graph 版本过旧，请先刷新投影: {take.get('id')}"
+            f"Take Evidence Graph身份无效: {take.get('id')}"
         )
     declared_fingerprint = str(take.get("graph_fingerprint") or "")
     if (
