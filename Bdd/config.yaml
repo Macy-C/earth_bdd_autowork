@@ -65,7 +65,13 @@ APP_SETTING:   ### 应用配置
  BACKEND: "uia"   # uia / win32
  PROCESS_TRACK_MODE: "snapshot" # snapshot 在首个 Step 前等待 1 秒后采样；也支持 root / none
 
-
+SUB_APP_SETTING: {} # 可选；按 Scenario/Feature tag 选择子项目应用，空值保持默认 APP_SETTING
+# 示例：
+# SUB_APP_SETTING:
+#  sub_app_a:
+#   TAG: "sub_app_a"
+#   APP_PATH: "C:/SubProjectA/AppA.exe"
+#   PROCESS_TRACK_MODE: "snapshot"
 
 
 
