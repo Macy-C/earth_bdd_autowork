@@ -7,8 +7,8 @@
 ai/
   manifest.json             # 资产包版本和路径清单
   context/                  # 长期架构共识、维护与迁移约定
-  prompts/                  # VS Code Prompt 的权威正文
-  instructions/             # 文件级生成规则的权威正文
+  prompts/                  # Copilot 工作流的权威正文
+  instructions/             # Recorder 生成规则的权威正文
 ```
 
 项目资产入口见[`Bdd/ai/README.md`](../Bdd/ai/README.md)。
@@ -40,19 +40,28 @@ Shadow Companion、旧 Work Package 残留、隔离资产和隐私边界，不�
 恢复都要求显式用户确认。`Bdd/ai/knowledge/quarantine`保存原始字节与恢复回执，但默认不
 属于可移植 Knowledge。
 
-## VS Code 发现入口
+## Copilot 发现与控制入口
 
-VS Code 只从固定位置发现 workspace instructions 和 Prompt，因此以下文件必须保留：
+VS Code 与 Copilot CLI 从固定位置发现 workspace 资产，因此以下文件必须保留：
 
 ```text
 .github/copilot-instructions.md
+.github/skills/*/SKILL.md
+.github/agents/*.agent.md
 .github/prompts/*.prompt.md
-.github/instructions/*.instructions.md
 .github/hooks/*.json
+.github/hooks/scripts/*
 ```
 
-Instructions 和 Prompt 是薄适配器，权威正文位于本目录。Hook 只执行小型确定性
-生命周期自动化，不复制 AI 规则。不要在 `.github` 和 `ai/` 中维护两套正文。
+用户显式选择 `Recorder Generation` Agent 并粘贴 Workbench 复制的 Job 路径。该 Agent
+加载内部 `recorder-generate` Skill；Workbench 已在复制前 claim Job，Agent-scoped Hook
+只是在宿主执行它时限制该会话只能推进同一Job；
+Workflow State仍是唯一运行状态源，Python协议校验Job、Transaction、Manifest和写入范围，
+当前Chat使用原生编辑工具应用候选，使VS Code提供修改文件、保留和撤销。
+
+该控制层不需要 MCP、端口、云服务器或数据库。`.github/hooks`只承载独立的Shadow
+Companion恢复检查，不参与Recorder生成。其他宿主只有在能提供等价原生编辑归属时，
+才能完成同一代码交付。
 
 ## 协作复盘
 

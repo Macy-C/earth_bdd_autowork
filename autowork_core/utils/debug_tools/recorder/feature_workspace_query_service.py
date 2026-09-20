@@ -180,6 +180,10 @@ class FeatureWorkspaceQueryService:
             scenario.recording_state == "recorded"
             for scenario in scenarios
         )
+        partial_count = sum(
+            scenario.recording_state == "partial"
+            for scenario in scenarios
+        )
         outdated_count = sum(
             scenario.recording_state == "outdated"
             for scenario in scenarios
@@ -212,6 +216,7 @@ class FeatureWorkspaceQueryService:
                 recorded_count,
                 len(scenarios),
                 outdated_count,
+                partial_count,
             ),
             recorded_scenario_count=recorded_count,
             scenario_count=len(scenarios),
@@ -264,10 +269,20 @@ def _scenario_dto(
         completed_count = 0
         issue = None
         run_path = None
+        step_statuses = ()
     else:
         run_path = _safe_recording_run_relpath(latest, recording_root)
         readiness = latest.get("readiness") or {}
         steps = latest.get("steps") or ()
+        step_statuses = tuple(
+            (
+                str(item.get("id") or ""),
+                str(item.get("status") or ""),
+                _selected_take_number(item),
+            )
+            for item in steps
+            if isinstance(item, dict) and item.get("id")
+        )
         recorded_step_ids = {
             str(item.get("id") or "")
             for item in steps
@@ -315,7 +330,10 @@ def _scenario_dto(
             issue = None
         else:
             state = "partial"
-            label = "未完成"
+            label = (
+                f"已录 {completed_count}/{len(expected_step_ids)} Step，"
+                "可继续录制"
+            )
             issue = None
     return FeatureScenarioDTO(
         scenario_id=scenario.id,
@@ -336,6 +354,7 @@ def _scenario_dto(
         ),
         run_path=run_path,
         issue=issue if latest else None,
+        step_statuses=step_statuses,
     )
 
 
@@ -352,6 +371,14 @@ def _safe_recording_run_relpath(entry, recording_root):
     if relative == Path("."):
         return None
     return relative.as_posix()
+
+
+def _selected_take_number(step):
+    text = str((step or {}).get("selected_take") or "")
+    if "-take-" not in text:
+        return None
+    suffix = text.rsplit("-take-", 1)[1]
+    return int(suffix) if suffix.isdecimal() else None
 
 
 def _display_path(path, root):
@@ -381,8 +408,12 @@ def _safe_workspace_feature_path(path, root):
     return resolved
 
 
-def _recording_summary(recorded, total, outdated):
-    label = f"{recorded}/{total} 已录制"
+def _recording_summary(recorded, total, outdated, partial=0):
+    label = (
+        f"{recorded}/{total} 个场景完整录制 · {partial} 个部分录制"
+        if partial
+        else f"{recorded}/{total} 已录制"
+    )
     if outdated:
         label += f" · {outdated} 需更新"
     return label

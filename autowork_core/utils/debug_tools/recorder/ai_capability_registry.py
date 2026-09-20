@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-AI_CAPABILITY_REGISTRY_VERSION = "1.5"
+AI_CAPABILITY_REGISTRY_VERSION = "1.6"
 _UNSET = object()
 _AI_EXCLUSION_POLICIES = frozenset({
     "direct_pic",

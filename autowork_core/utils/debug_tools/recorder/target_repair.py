@@ -16,8 +16,9 @@ from autowork_core.utils.debug_tools.recorder.run_lock import RunWriteLock
 from autowork_core.utils.debug_tools.recorder.timeline import TimelineStore
 
 
-TARGET_REPAIR_VERSION = "1.0"
+TARGET_REPAIR_VERSION = "1.1"
 MAX_FORENSIC_TREE_DELAY_MS = 50
+MAX_FORENSIC_RELATED_TREE_DELAY_MS = 20000
 _CONTAINER_TYPES = {
     "window",
     "pane",
@@ -93,17 +94,19 @@ class TargetRepairService:
             if any((
                 not tree,
                 tree.get("truncated") is not False,
-                int(tree.get("window_handle") or 0)
-                != int(raw.get("window_handle") or 0),
             )):
                 continue
             delay_ms = _capture_delay_ms(raw.get("wall_time"), tree.get("captured_at"))
-            if (
-                delay_ms is None
-                or abs(delay_ms) > MAX_FORENSIC_TREE_DELAY_MS
-            ):
+            if not _tree_can_repair_event(tree, raw, delay_ms):
                 continue
             nodes = list(tree.get("nodes") or ())
+            window = _tree_window(
+                nodes,
+                window_handle=tree.get("window_handle") or raw.get("window_handle"),
+                process_id=raw.get("process_id"),
+            )
+            if window is None:
+                continue
             leaves = [
                 node for node in nodes
                 if _eligible_leaf(
@@ -118,9 +121,6 @@ class TargetRepairService:
             for node in leaves:
                 if int(node.get("depth") or 0) != max_depth:
                     continue
-                locator = _unique_locator(node, nodes)
-                if locator is None:
-                    continue
                 element = {
                     key: node.get(key)
                     for key in _ELEMENT_FIELDS
@@ -128,6 +128,12 @@ class TargetRepairService:
                 binding = {
                     "status": "captured",
                     "element": element,
+                    "window": window,
+                    "ancestors": _tree_ancestors(
+                        node,
+                        nodes,
+                        window,
+                    ),
                 }
                 event_target = event_target_from_binding(
                     binding,
@@ -136,6 +142,11 @@ class TargetRepairService:
                 )
                 if event_target is None:
                     continue
+                repaired = _verified_repair_target(event_target)
+                if repaired is None:
+                    continue
+                element, locator, event_target = repaired
+                target_node = _matching_tree_node(nodes, element) or node
                 key = json.dumps(locator, ensure_ascii=False, sort_keys=True)
                 if key in seen:
                     continue
@@ -146,7 +157,7 @@ class TargetRepairService:
                     target_event_id,
                     tree_relative,
                     tree_sha256,
-                    str(node.get("id") or ""),
+                    str(target_node.get("id") or ""),
                     key,
                     length=16,
                 )
@@ -174,10 +185,11 @@ class TargetRepairService:
                         ),
                         "tree_path": tree_relative,
                         "tree_sha256": tree_sha256,
-                        "tree_node_id": str(node.get("id") or ""),
+                        "tree_node_id": str(target_node.get("id") or ""),
                         "tree_delay_ms": delay_ms,
-                        "window_handle": raw.get("window_handle"),
-                        "process_id": raw.get("process_id"),
+                        "window_handle": window.get("handle"),
+                        "raw_window_handle": raw.get("window_handle"),
+                        "process_id": window.get("process_id"),
                         "point": list(point),
                     },
                 })
@@ -278,6 +290,107 @@ def _eligible_leaf(node, *, point, process_id):
     return bool(control_type) and control_type not in _CONTAINER_TYPES
 
 
+def _tree_window(nodes, *, window_handle, process_id):
+    matches = [
+        node
+        for node in nodes
+        if int(node.get("handle") or 0) == int(window_handle or 0)
+        and (
+            process_id is None
+            or int(node.get("process_id") or 0) == int(process_id)
+        )
+        and node.get("parent_id") is None
+        and int(node.get("depth") or 0) == 0
+        and str(node.get("control_type") or "").casefold() == "window"
+    ]
+    if len(matches) != 1:
+        return None
+    return {
+        key: matches[0].get(key)
+        for key in _ELEMENT_FIELDS
+    }
+
+
+def _tree_can_repair_event(tree, raw, delay_ms):
+    if delay_ms is None:
+        return False
+    raw_details = raw.get("details") or {}
+    raw_window = int(
+        raw.get("window_handle")
+        or raw_details.get("window_handle")
+        or 0
+    )
+    tree_window = int(tree.get("window_handle") or 0)
+    if tree_window == raw_window:
+        return abs(delay_ms) <= MAX_FORENSIC_RELATED_TREE_DELAY_MS
+    raw_process = raw.get("process_id") or raw_details.get("process_id")
+    tree_process = tree.get("process_id") or _tree_process_id(tree)
+    if raw_process is None or tree_process is None:
+        return False
+    if int(raw_process) != int(tree_process):
+        return False
+    return abs(delay_ms) <= MAX_FORENSIC_RELATED_TREE_DELAY_MS
+
+
+def _tree_process_id(tree):
+    tree_window = int(tree.get("window_handle") or 0)
+    for node in tree.get("nodes") or ():
+        if (
+            int(node.get("handle") or 0) == tree_window
+            and node.get("parent_id") is None
+        ):
+            return node.get("process_id")
+    return None
+
+
+def _tree_ancestors(node, nodes, window):
+    by_id = {
+        str(item.get("id") or ""): item
+        for item in nodes
+        if item.get("id")
+    }
+    result = []
+    parent_id = str(node.get("parent_id") or "")
+    seen = set()
+    while parent_id and parent_id not in seen:
+        seen.add(parent_id)
+        parent = by_id.get(parent_id)
+        if parent is None:
+            return []
+        if int(parent.get("handle") or 0) == int(window.get("handle") or 0):
+            break
+        result.append({
+            key: parent.get(key)
+            for key in _ELEMENT_FIELDS
+        })
+        parent_id = str(parent.get("parent_id") or "")
+    return result
+
+
+def _matching_tree_node(nodes, element):
+    runtime_id = tuple((element or {}).get("runtime_id") or ())
+    if runtime_id:
+        matches = [
+            node for node in nodes
+            if tuple(node.get("runtime_id") or ()) == runtime_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    control_type = str((element or {}).get("control_type") or "")
+    for key in ("auto_id", "name"):
+        value = str((element or {}).get(key) or "")
+        if not value:
+            continue
+        matches = [
+            node for node in nodes
+            if str(node.get("control_type") or "") == control_type
+            and str(node.get(key) or "") == value
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
 def _unique_locator(node, nodes):
     control_type = str(node.get("control_type") or "")
     candidates = (
@@ -298,6 +411,37 @@ def _unique_locator(node, nodes):
                 key: value,
             }
     return None
+
+
+def _verified_repair_target(event_target):
+    event_target = dict(event_target or {})
+    element = {
+        key: (event_target.get("element") or {}).get(key)
+        for key in _ELEMENT_FIELDS
+    }
+    candidates = []
+    selected = None
+    for candidate in event_target.get("locator_candidates") or ():
+        candidate = dict(candidate or {})
+        locator = dict(candidate.get("locator") or {})
+        if locator.get("by", "child") not in {"child", "xpath"}:
+            candidates.append(candidate)
+            continue
+        if selected is None:
+            selected = candidate
+            candidate["validation"] = {
+                "status": "unique",
+                "count": 1,
+                "target_matches": True,
+                "source": "forensic_tree_unique_locator",
+            }
+        candidates.append(candidate)
+    if selected is None:
+        return None
+    event_target["locator_candidates"] = candidates
+    locator = dict(selected.get("locator") or {})
+    locator.pop("root", None)
+    return element, locator, event_target
 
 
 def _capture_delay_ms(event_time, captured_at):

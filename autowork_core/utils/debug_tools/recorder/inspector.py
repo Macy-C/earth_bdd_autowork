@@ -39,6 +39,18 @@ SCROLL_CONTAINER_CONTROL_TYPES = frozenset({
     *COLLECTION_CONTROL_TYPES,
     "document",
 })
+INTERACTIVE_CLICK_CONTROL_TYPES = frozenset({
+    "button",
+    "checkbox",
+    "combobox",
+    "hyperlink",
+    "listitem",
+    "menuitem",
+    "radiobutton",
+    "tabitem",
+    "treeitem",
+})
+PRESENTATION_CONTROL_TYPES = frozenset({"image", "text"})
 
 
 def _safe_call(func, default=None):
@@ -121,7 +133,11 @@ def event_target_from_binding(binding, raw, backend):
     if not isinstance(binding, dict) or binding.get("status") != "captured":
         return None
     captured_element = dict(binding.get("element") or {})
-    if not captured_element:
+    captured_properties = dict(
+        captured_element.pop("element_properties", {}) or {}
+    )
+    window_info = dict(binding.get("window") or {})
+    if not captured_element or not window_info:
         return None
     ancestors = [
         dict(item)
@@ -130,6 +146,7 @@ def event_target_from_binding(binding, raw, backend):
     ]
     selected_index = -1
     element_info = captured_element
+    element_properties = captured_properties
     if raw.get("event_type") == "mouse_wheel":
         for index, candidate in enumerate(
                 [captured_element, *ancestors],
@@ -138,22 +155,26 @@ def event_target_from_binding(binding, raw, backend):
                     SCROLL_CONTAINER_CONTROL_TYPES
             ):
                 element_info = candidate
+                element_properties = dict(
+                    element_info.pop("element_properties", {}) or {}
+                )
                 selected_index = index - 1
                 break
-    window_info = {
-        "name": str(raw.get("window_title") or ""),
-        "auto_id": "",
-        "control_type": "Window",
-        "class_name": str(raw.get("window_class") or ""),
-        "framework_id": "Win32",
-        "handle": raw.get("window_handle"),
-        "process_id": raw.get("process_id"),
-        "runtime_id": None,
-        "enabled": None,
-        "visible": None,
-        "value": None,
-        "rectangle": None,
-    }
+    elif (
+        raw.get("event_type") == "mouse_down"
+        and str(captured_element.get("control_type") or "").casefold()
+        in PRESENTATION_CONTROL_TYPES
+    ):
+        for index, candidate in enumerate(ancestors):
+            if str(candidate.get("control_type") or "").casefold() in (
+                    INTERACTIVE_CLICK_CONTROL_TYPES
+            ):
+                element_info = candidate
+                element_properties = dict(
+                    element_info.pop("element_properties", {}) or {}
+                )
+                selected_index = index
+                break
     root_name = _suggest_root_name_from_info(window_info, backend)
     point = tuple(raw.get("point") or ())
     candidates = _locator_candidates(
@@ -161,7 +182,20 @@ def event_target_from_binding(binding, raw, backend):
         root_name,
         point or (0, 0),
     )
+    chain_ancestors = list(reversed(ancestors[selected_index + 1:]))
+    direct_chain = _event_bound_direct_chain_candidate(
+        element_info,
+        chain_ancestors,
+        root_name,
+    )
+    if direct_chain is not None:
+        candidates.append(direct_chain)
+        candidates.sort(key=lambda item: -int(item.get("score", 0)))
     _defer_structured_candidates(candidates)
+    if direct_chain is not None:
+        direct_chain.setdefault("validation", {})["source"] = (
+            "event_direct_chain"
+        )
     first_structured = next((
         candidate
         for candidate in candidates
@@ -175,13 +209,13 @@ def event_target_from_binding(binding, raw, backend):
         ancestors,
         root_name,
     )
-    return {
+    result = {
         "backend": backend,
         "point": list(point) if point else None,
         "window": window_info,
         "element": element_info,
-        "element_properties": {},
-        "ancestors": list(reversed(ancestors[selected_index + 1:])),
+        "element_properties": element_properties,
+        "ancestors": chain_ancestors,
         "local_context": {},
         "pic_region_candidate": pic_region_candidate,
         "point_in_element": (
@@ -200,6 +234,42 @@ def event_target_from_binding(binding, raw, backend):
         "inspection_mode": "event_bound",
         "error": None,
     }
+    if element_info is not captured_element:
+        result["hit_element"] = captured_element
+    return result
+
+
+def _event_bound_direct_chain_candidate(element, ancestors, root_name):
+    steps = []
+    for ancestor in ancestors or ():
+        step = _event_bound_child_step(ancestor)
+        if not step:
+            return None
+        steps.append(step)
+    target_step = _event_bound_child_step(element)
+    if not steps or not target_step:
+        return None
+    return {
+        "score": 99,
+        "reason": "event direct child chain",
+        "name": _candidate_name(element, "by_event_chain"),
+        "locator": {
+            "root": root_name,
+            "by": "xpath",
+            "value": "/".join([*steps, target_step]),
+        },
+    }
+
+
+def _event_bound_child_step(element):
+    control_type = str((element or {}).get("control_type") or "")
+    if not control_type:
+        return ""
+    for attribute, value, _score in _stable_target_selectors(element):
+        predicate = make_xpath_predicate(attribute, value)
+        if predicate:
+            return f"child::{control_type}[{predicate}]"
+    return ""
 
 
 def _event_bound_pic_region_candidate(element, ancestors, root_name):
@@ -1374,6 +1444,35 @@ def _state_properties(element, element_info):
     )
     if readonly is not None:
         result["Value.IsReadOnly"] = readonly
+    toggle_state = _safe_attr(
+        _safe_attr(element, "iface_toggle"),
+        "CurrentToggleState",
+    )
+    if toggle_state in {0, 1, 2}:
+        result["Toggle.ToggleState"] = int(toggle_state)
+    selected = _safe_attr(
+        _safe_attr(element, "iface_selection_item"),
+        "CurrentIsSelected",
+    )
+    if isinstance(selected, (bool, int)) and selected in {0, 1}:
+        result["SelectionItem.IsSelected"] = bool(selected)
+    expand_state = _safe_attr(
+        _safe_attr(element, "iface_expand_collapse"),
+        "CurrentExpandCollapseState",
+    )
+    if expand_state in {0, 1, 2, 3}:
+        result["ExpandCollapse.ExpandCollapseState"] = int(expand_state)
+        if expand_state in {0, 1}:
+            result["ExpandCollapse.IsExpanded"] = expand_state == 1
+    range_value = _safe_attr(element, "iface_range_value")
+    for name, attribute in (
+        ("RangeValue.Value", "CurrentValue"),
+        ("RangeValue.Minimum", "CurrentMinimum"),
+        ("RangeValue.Maximum", "CurrentMaximum"),
+    ):
+        number = _safe_attr(range_value, attribute)
+        if isinstance(number, (int, float)) and not isinstance(number, bool):
+            result[name] = float(number)
     return result
 
 

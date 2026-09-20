@@ -65,7 +65,7 @@ class RecordingAnnotationRepository:
         self.path = self.session_dir / "recording-annotations.jsonl"
 
     def load(self):
-        if not self.path.exists():
+        if not self.path.is_file():
             return []
         records = []
         for line_number, line in enumerate(

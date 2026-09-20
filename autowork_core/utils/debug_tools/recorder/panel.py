@@ -18,6 +18,9 @@ from autowork_core.utils.debug_tools.recorder.feature_delivery import (
     is_feature_delivery_package,
     preview_feature_delivery,
 )
+from autowork_core.utils.debug_tools.recorder.evidence_compilation_shadow import (
+    publish_evidence_compilation_shadow_report,
+)
 from autowork_core.utils.debug_tools.recorder.hotkeys import (
     RECORDER_HOTKEYS,
     VK_F7,
@@ -41,6 +44,7 @@ from autowork_core.utils.debug_tools.recorder.portability_service import (
 )
 from autowork_core.utils.debug_tools.recorder.identity import stable_digest
 from autowork_core.utils.debug_tools.recorder.run_retirement import (
+    cleanup_legacy_running_generation,
     retire_recording_session,
 )
 from autowork_core.utils.debug_tools.recorder.review_panel import RecorderReviewWindow
@@ -133,6 +137,97 @@ def _observation_receipt_summary(receipt):
     )
 
 
+def _recorder_step_status_detail(value):
+    if isinstance(value, (list, tuple)):
+        status = value[0] if value else None
+        take_number = value[1] if len(value) > 1 else None
+    elif isinstance(value, dict):
+        status = value.get("status")
+        take_number = value.get("take_number")
+    else:
+        status = value
+        take_number = None
+    return str(status or "pending"), _positive_int(take_number)
+
+
+def _recorder_step_status_label(status, take_number=None):
+    status, embedded_take_number = _recorder_step_status_detail(status)
+    take_number = _positive_int(take_number) or embedded_take_number
+    if status == "completed" and take_number:
+        return f"已录 · {take_number}"
+    if status == "recording" and take_number and take_number > 1:
+        return f"重录中 · {take_number}"
+    return {
+        "pending": "待录制",
+        "recording": "录制中",
+        "completed": "已完成",
+        "skipped": "已跳过",
+    }.get(status, status or "待录制")
+
+
+def _positive_int(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _take_number_from_id(value):
+    text = str(value or "")
+    if "-take-" not in text:
+        return None
+    suffix = text.rsplit("-take-", 1)[1]
+    return int(suffix) if suffix.isdecimal() else None
+
+
+def _recorder_step_take_number(state):
+    state = state or {}
+    takes = list(state.get("takes") or [])
+    if state.get("status") == "recording":
+        numbers = [
+            _positive_int((take or {}).get("take_number"))
+            or _take_number_from_id((take or {}).get("id"))
+            for take in takes
+            if isinstance(take, dict)
+        ]
+        numbers = [number for number in numbers if number]
+        return (max(numbers) + 1) if numbers else len(takes) + 1
+    selected_take = str(state.get("selected_take") or "")
+    if state.get("status") == "completed" and selected_take:
+        for take in takes:
+            if not isinstance(take, dict):
+                continue
+            if str(take.get("id") or "") != selected_take:
+                continue
+            return (
+                _positive_int(take.get("take_number"))
+                or _take_number_from_id(selected_take)
+            )
+        return _take_number_from_id(selected_take)
+    return None
+
+
+def _step_statuses_to_map(step_statuses):
+    result = {}
+    for item in step_statuses or ():
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        step_id = str(item[0] or "")
+        if not step_id:
+            continue
+        result[step_id] = (
+            (item[1], item[2])
+            if len(item) > 2 and item[2] is not None
+            else item[1]
+        )
+    return result
+
+
+def _recorder_status_code(value):
+    return _recorder_step_status_detail(value)[0]
+
+
 class RecorderToolMixin:
     def init_recorder_tool_state(self):
         self.recorder_workbench = None
@@ -152,6 +247,7 @@ class RecorderToolMixin:
         self.recorder_feature_scenario_rows = {}
         self.recorder_scenario_map = {}
         self.recorder_step_map = {}
+        self.recorder_step_display_statuses = {}
         self.recorder_target_window_map = {}
         self.recorder_selected_window_handles = ()
         self.recorder_primary_window_handle = None
@@ -203,12 +299,7 @@ class RecorderToolMixin:
                 "令牌、患者或其他敏感信息。"
             )
         )
-        self.recorder_take_summary_help_var = tk.StringVar(
-            value=(
-                "可选，仅随F10保存本次录制并供人工审阅；"
-                "不会参与断言、binding或Plan推理。"
-            )
-        )
+        self.recorder_take_summary_help_var = tk.StringVar(value="")
         self.recorder_step_business_context_var = tk.StringVar(value="")
         self.recorder_step_context_revision_var = tk.StringVar(value="版本 0")
         self.recorder_step_context_revision = 0
@@ -267,8 +358,12 @@ class RecorderToolMixin:
             host,
             self.recorder_output_root_var.get().strip() or None,
             on_rerecord=self.resume_existing_recording,
+            on_import_feature=self.import_feature_recordings,
+            on_export_feature=self.export_library_feature,
+            on_export_scenario=self.export_library_scenario,
             on_open_session=self._open_existing_session_in_workbench,
             on_retire_session=self._retire_recording_session,
+            on_cleanup_legacy_generation=self._cleanup_legacy_generation,
             on_close=self._return_from_workbench_library,
             close_destroys=False,
         )
@@ -299,7 +394,8 @@ class RecorderToolMixin:
             return
         self.recorder_workbench.set_view_enabled(
             "review",
-            self.recorder_session is not None,
+            self.recorder_session is not None
+            or self._selected_recorder_run_path() is not None,
         )
         self.recorder_workbench.set_view_enabled(
             "timeline",
@@ -312,7 +408,7 @@ class RecorderToolMixin:
             library.refresh()
         elif view == "capture":
             self._ensure_capture_view()
-        elif view == "review" and self.recorder_session is not None:
+        elif view == "review":
             self.open_recorder_review()
 
     def _available_workbench_view(self):
@@ -337,7 +433,7 @@ class RecorderToolMixin:
         self.recording_library_window = None
         self.recorder_library_return_view = None
 
-    def _open_existing_session_in_workbench(self, session_dir):
+    def _open_existing_session_in_workbench(self, session_dir, *, return_view="library"):
         if self._recorder_is_active() or self.recorder_task_busy:
             if self.recording_library_window is not None:
                 self.recording_library_window.status_var.set(
@@ -369,20 +465,20 @@ class RecorderToolMixin:
         self.recorder_selected_step_ids = set(session.step_states)
         self.recorder_output_dir = session.session_dir
         self.recorder_output_root_var.set(str(session.output_root))
-        self.recorder_review_return_view = "library"
+        self.recorder_review_return_view = return_view
         self.open_recorder_review()
         return True
 
     def _retire_recording_session(self, session_dir, require_knowledge):
         session_dir = Path(session_dir).resolve()
         if self._recorder_is_active() or self.recorder_task_busy:
-            raise RuntimeError("当前仍在录制或保存，不能退役 Run")
+            raise RuntimeError("当前仍在录制或保存，不能删除录制资料")
         if (
             self.recorder_session is not None
             and self.recorder_session.session_dir == session_dir
         ):
             if not self._close_recorder_timeline():
-                raise RuntimeError("补录仍在进行，不能退役当前 Run")
+                raise RuntimeError("补录仍在进行，不能删除当前录制资料")
             self._close_recorder_review()
             self.recorder_session.close()
             self.recorder_session = None
@@ -394,6 +490,14 @@ class RecorderToolMixin:
         return retire_recording_session(
             session_dir,
             require_distilled_knowledge=bool(require_knowledge),
+        )
+
+    def _cleanup_legacy_generation(self, session_dir):
+        if self._recorder_is_active() or self.recorder_task_busy:
+            raise RuntimeError("当前仍在录制或保存，不能清理遗留生成状态")
+        return cleanup_legacy_running_generation(
+            session_dir,
+            reason="用户在录制任务页清理遗留生成状态",
         )
 
     def _export_feature_delivery(
@@ -408,7 +512,7 @@ class RecorderToolMixin:
         key_prefix = self._portability_key_prefix(output_root)
         if self.recorder_operations.list_active(key_prefix=key_prefix):
             raise RuntimeError("已有录屏包导入或导出任务正在执行")
-        self.recorder_status_var.set("正在导出Feature录制资料...")
+        self.recorder_status_var.set("正在导出当前 Feature 录制资料...")
         self.recorder_portability_active_kinds[key_prefix] = "export"
         try:
             self.recorder_operations.submit(
@@ -459,17 +563,26 @@ class RecorderToolMixin:
             raise
 
     @staticmethod
-    def _preview_feature_delivery(package_path):
-        return preview_feature_delivery(package_path, Paths.BASE_DIR)
+    def _preview_feature_delivery(package_path, *, target_feature_path=None):
+        return preview_feature_delivery(
+            package_path,
+            Paths.BASE_DIR,
+            target_feature_path=target_feature_path,
+        )
 
-    def _import_feature_delivery(self, package_path, output_root):
+    def _import_feature_delivery(
+            self,
+            package_path,
+            output_root,
+            target_feature_path=None,
+    ):
         if self._recorder_is_active() or self.recorder_task_busy:
-            raise RuntimeError("当前仍在录制或保存，不能导入Feature录制资料")
+            raise RuntimeError("当前仍在录制或保存，不能导入录制资料")
         output_root = Path(output_root).resolve()
         key_prefix = self._portability_key_prefix(output_root)
         if self.recorder_operations.list_active(key_prefix=key_prefix):
             raise RuntimeError("已有录屏包导入或导出任务正在执行")
-        self.recorder_status_var.set("正在校验并导入Feature录制资料...")
+        self.recorder_status_var.set("正在校验并导入录制资料...")
         self.recorder_portability_active_kinds[key_prefix] = "import"
         try:
             self.recorder_operations.submit(
@@ -477,6 +590,7 @@ class RecorderToolMixin:
                 self._portability_service(output_root).import_feature,
                 Path(package_path),
                 Paths.BASE_DIR,
+                Path(target_feature_path) if target_feature_path else None,
                 context={
                     "kind": "feature_import",
                     "recording_root": str(output_root),
@@ -507,11 +621,13 @@ class RecorderToolMixin:
         if self._recorder_is_active() or self.recorder_task_busy:
             self.recorder_status_var.set("当前仍在录制或保存，不能切换历史任务。")
             return False
-        if (
-            self.recorder_session is not None
-            and self.recorder_session.session_dir != session.session_dir
-        ):
-            self.recorder_session.close()
+        if self.recorder_session is not None:
+            if self.recorder_session.session_dir == session.session_dir:
+                if session is not self.recorder_session:
+                    session.close()
+                session = self.recorder_session
+            else:
+                self.recorder_session.close()
         session.reopen_for_recording()
         self.recorder_session = session
         self.recorder_feature_plan = session.feature_plan
@@ -542,8 +658,8 @@ class RecorderToolMixin:
             self.recorder_step_tree.focus(step_id)
             self.recorder_step_tree.see(step_id)
         self.recorder_status_var.set(
-            "历史任务已恢复。点击“录制当前 Step”会新增录制版本，"
-            "旧版本不会删除。"
+            "历史任务已恢复。点击“录制当前 Step”会重新录制当前 Step，"
+            "已有证据会保留用于维护追溯。"
         )
         return True
 
@@ -566,11 +682,28 @@ class RecorderToolMixin:
         self.recorder_workbench.set_view_enabled("timeline", False)
         return self.recorder_workbench
 
-    def _refresh_workbench_context(self, step_id=None):
+    def _refresh_workbench_context(
+            self,
+            step_id=None,
+            *,
+            model=None,
+            take_id=None,
+        ):
         if self.recorder_workbench is None:
             return None
         self.recorder_workbench_context_sequence += 1
         sequence = self.recorder_workbench_context_sequence
+        if model is not None:
+            self.recorder_operations.abandon_prefix(
+                self.recorder_workbench_context_operation_key,
+            )
+            self.recorder_workbench.set_context(
+                model,
+                step_id=step_id or model.selected_step_id,
+                take_id=take_id,
+            )
+            self._sync_workbench_view_states()
+            return model
         if self.recorder_session is None:
             self.recorder_operations.abandon_prefix(
                 self.recorder_workbench_context_operation_key,
@@ -752,32 +885,6 @@ class RecorderToolMixin:
             padx=8,
             pady=(0, 5),
         )
-        self.recorder_materials_button = ttk.Menubutton(
-            source,
-            text="录制资料",
-        )
-        self.recorder_materials_button.grid(
-            row=3, column=0, sticky="w", padx=8, pady=(0, 8)
-        )
-        self.recorder_materials_menu = tk.Menu(
-            self.recorder_materials_button,
-            tearoff=False,
-        )
-        self.recorder_materials_menu.add_command(
-            label="导入录制资料",
-            command=self.import_feature_recordings,
-        )
-        self.recorder_materials_menu.add_command(
-            label="导出当前 Feature",
-            command=self.export_selected_recorder_feature,
-        )
-        self.recorder_materials_menu.add_command(
-            label="导出当前场景",
-            command=self.export_selected_recorder_scenario,
-        )
-        self.recorder_materials_button.configure(
-            menu=self.recorder_materials_menu,
-        )
         ttk.Label(source, text="窗口").grid(
             row=4,
             column=0,
@@ -825,7 +932,7 @@ class RecorderToolMixin:
         steps_frame.columnconfigure(0, weight=1)
         self.recorder_step_tree = ttk.Treeview(
             steps_frame,
-            columns=("status", "keyword", "line", "text", "takes"),
+            columns=("status", "keyword", "line", "text"),
             show="headings",
             selectmode="browse",
         )
@@ -834,7 +941,6 @@ class RecorderToolMixin:
             ("keyword", "关键字", 150),
             ("line", "行", 50),
             ("text", "步骤", 470),
-            ("takes", "版本", 55),
         )
         for column, text, width in headings:
             self.recorder_step_tree.heading(column, text=text)
@@ -905,54 +1011,25 @@ class RecorderToolMixin:
             padx=8,
             pady=(7, 2),
         )
-        ttk.Label(actions, text="本次录制说明（仅审阅）").grid(
-            row=1,
-            column=0,
-            sticky="w",
-            padx=8,
-            pady=(2, 0),
-        )
-        self.recorder_take_summary_entry = ttk.Entry(actions)
-        self.recorder_take_summary_entry.grid(
-            row=1,
-            column=1,
-            columnspan=6,
-            sticky="ew",
-            padx=(5, 8),
-            pady=(2, 0),
-        )
-        ttk.Label(
-            actions,
-            textvariable=self.recorder_take_summary_help_var,
-            anchor="w",
-        ).grid(
-            row=2,
-            column=0,
-            columnspan=7,
-            sticky="ew",
-            padx=8,
-            pady=(2, 6),
-        )
-
         self.recorder_start_button = ttk.Button(
             actions,
             text="开始录制此场景",
             command=self.run_primary_recorder_action,
         )
-        self.recorder_start_button.grid(row=3, column=0, padx=8, pady=(0, 8))
+        self.recorder_start_button.grid(row=1, column=0, padx=8, pady=(6, 8))
         self.recorder_pause_button = ttk.Button(
             actions,
             text="暂停录制 F7",
             command=self.toggle_current_step_pause,
         )
-        self.recorder_pause_button.grid(row=3, column=1, sticky="w", padx=4, pady=(0, 8))
+        self.recorder_pause_button.grid(row=1, column=1, sticky="w", padx=4, pady=(6, 8))
         self.recorder_more_button = ttk.Menubutton(actions, text="更多")
         self.recorder_more_button.grid(
-            row=3,
+            row=1,
             column=2,
             sticky="w",
             padx=4,
-            pady=(0, 8),
+            pady=(6, 8),
         )
         self.recorder_more_menu = tk.Menu(
             self.recorder_more_button,
@@ -1041,7 +1118,7 @@ class RecorderToolMixin:
         if announce:
             message = (
                 f"已打开 {feature.name}："
-                f"{feature.recorded_scenario_count}/{feature.scenario_count} 个场景已录制。"
+                f"{feature.recording_label}。"
             )
             if warnings:
                 message += " " + "；".join(warnings)
@@ -1139,8 +1216,14 @@ class RecorderToolMixin:
             self.recorder_scenario_var.set(selected_scenario.scenario_id)
             scenario_plan = self._scenario_plan(selected_scenario.scenario_id)
             if scenario_plan is not None:
-                self._render_recorder_steps(scenario_plan)
+                self._render_recorder_steps(
+                    scenario_plan,
+                    status_by_step=_step_statuses_to_map(
+                        getattr(selected_scenario, "step_statuses", ())
+                    ),
+                )
         self._update_recorder_controls()
+        self._sync_workbench_view_states()
 
     def _selected_recorder_features(self):
         return (
@@ -1207,7 +1290,7 @@ class RecorderToolMixin:
             )
         except Exception as error:
             self.recorder_status_var.set(
-                "启动Feature录制资料导出失败: "
+                "启动 Feature 录制资料导出失败: "
                 f"{type(error).__name__}: {error}"
             )
 
@@ -1244,18 +1327,48 @@ class RecorderToolMixin:
                 f"{type(error).__name__}: {error}"
             )
 
-    def import_feature_recordings(self):
+    def export_library_feature(self, entry, output_path, output_root):
+        feature_path = self._library_feature_path(entry)
+        self._export_feature_delivery(feature_path, output_path, output_root)
+
+    def export_library_scenario(self, entry, output_path, output_root):
+        feature_path = self._library_feature_path(entry)
+        self._export_feature_scenarios(
+            feature_path,
+            (entry.scenario_id,),
+            output_path,
+            output_root,
+        )
+
+    @staticmethod
+    def _library_feature_path(entry):
+        raw_path = str(getattr(entry, "feature_source_relpath", "") or "")
+        if not raw_path:
+            raise ValueError("录制任务缺少 Feature 路径，不能导出")
+        feature_path = (Paths.BASE_DIR / raw_path).resolve()
+        feature_path.relative_to(Paths.BASE_DIR.resolve())
+        if not feature_path.is_file():
+            raise FileNotFoundError(feature_path)
+        return feature_path
+
+    def import_feature_recordings(self, *, output_root=None, parent=None):
+        parent = parent or self.recorder_window
+        output_root = Path(
+            output_root
+            or self.recorder_output_root_var.get()
+            or Paths.ARTIFACTS_DIR / "recording_sessions"
+        ).resolve()
         package = filedialog.askopenfilename(
-            parent=self.recorder_window,
-            title="导入 Feature 录制资料",
-            filetypes=(("Feature 录制资料", "*.zip"),),
+            parent=parent,
+            title="导入录制资料",
+            filetypes=(("录制资料包", "*.zip"),),
         )
         if not package:
-            return
+            return False
         package_path = Path(package)
         try:
             if not is_feature_delivery_package(package_path):
-                raise ValueError("所选文件不是Feature录制资料包")
+                raise ValueError("所选文件不是录制资料包")
             preview = self._preview_feature_delivery(package_path)
             feature = preview.get("feature") or {}
             target_status = str(preview.get("target_status") or "")
@@ -1270,13 +1383,51 @@ class RecorderToolMixin:
                     f"目标：{preview.get('target_path')}\n\n"
                     f"{detail}\n\n"
                     "未执行导入。请先在项目中确认并合并Feature。",
-                    parent=self.recorder_window,
+                    parent=parent,
                 )
-                self.recorder_status_var.set(
-                    "目标Feature内容不同，未导入录制资料。"
+                self._set_portability_status(
+                    "目标Feature内容不同，未导入录制资料。",
+                    output_root,
                 )
-                return
-            action = "新建" if target_status == "create" else "复用"
+                return False
+            target_feature_path = None
+            if target_status == "needs_target":
+                selected = filedialog.asksaveasfilename(
+                    parent=parent,
+                    title="保存导入的 Feature",
+                    defaultextension=".feature",
+                    filetypes=(("Feature 文件", "*.feature"),),
+                    initialfile=Path(
+                        str(preview.get("source_relpath") or "imported.feature")
+                    ).name,
+                )
+                if not selected:
+                    self._set_portability_status(
+                        "已取消导入录制资料。",
+                        output_root,
+                    )
+                    return False
+                target_feature_path = Path(selected)
+                preview = self._preview_feature_delivery(
+                    package_path,
+                    target_feature_path=target_feature_path,
+                )
+                target_status = str(preview.get("target_status") or "")
+                if target_status == "conflict":
+                    messagebox.showwarning(
+                        "Feature保存位置不可用",
+                        str(
+                            preview.get("conflict_summary")
+                            or "目标位置不可用，请重新选择。"
+                        ),
+                        parent=parent,
+                    )
+                    self._set_portability_status(
+                        "目标Feature保存位置不可用，未导入录制资料。",
+                        output_root,
+                    )
+                    return False
+            action = "创建" if target_status == "create" else "复用"
             total = int(feature.get("scenario_count") or 0)
             recorded = int(
                 feature.get("recorded_scenario_count")
@@ -1284,25 +1435,29 @@ class RecorderToolMixin:
                 or 0
             )
             if not messagebox.askyesno(
-                "导入 Feature 录制资料",
+                "导入录制资料",
                 f"Feature：{feature.get('name') or feature.get('id')}\n"
                 f"录制覆盖：{recorded}/{total} 个场景\n"
                 f"目标：{preview.get('target_path')}\n"
-                f"处理：{action}目标 Feature\n\n"
+                f"处理：{action} Feature\n\n"
                 "确认导入？",
-                parent=self.recorder_window,
+                    parent=parent,
             ):
-                self.recorder_status_var.set("已取消导入录制资料。")
-                return
+                self._set_portability_status("已取消导入录制资料。", output_root)
+                return False
             self._import_feature_delivery(
                 package_path,
-                self.recorder_output_root_var.get(),
+                output_root,
+                target_feature_path=target_feature_path,
             )
+            return True
         except Exception as error:
-            self.recorder_status_var.set(
-                "启动Feature录制资料导入失败: "
-                f"{type(error).__name__}: {error}"
+            self._set_portability_status(
+                "启动录制资料导入失败: "
+                f"{type(error).__name__}: {error}",
+                output_root,
             )
+            return False
 
     def load_recorder_feature(self):
         if self.recorder_session is not None:
@@ -1433,20 +1588,32 @@ class RecorderToolMixin:
             self.recorder_scenario_var.get()
         )
         if scenario is not None:
-            self._render_recorder_steps(scenario)
+            selected = self._selected_recorder_feature_scenario()
+            status_by_step = (
+                _step_statuses_to_map(getattr(selected, "step_statuses", ()))
+                if selected is not None
+                and selected.scenario_id == scenario.id
+                else None
+            )
+            self._render_recorder_steps(
+                scenario,
+                status_by_step=status_by_step,
+            )
+        self._sync_workbench_view_states()
 
-    def _render_recorder_steps(self, scenario):
+    def _render_recorder_steps(self, scenario, *, status_by_step=None):
         tree = self.recorder_step_tree
         tree.delete(*tree.get_children())
         self.recorder_step_map = {step.id: step for step in scenario.steps}
         self.recorder_selected_step_ids = {step.id for step in scenario.steps}
+        self.recorder_step_display_statuses = dict(status_by_step or {})
         for step in scenario.steps:
+            status = self.recorder_step_display_statuses.get(step.id)
             tree.insert("", "end", iid=step.id, values=(
-                "待录制",
+                _recorder_step_status_label(status),
                 f"Background {step.keyword}" if step.is_background else step.keyword,
                 step.line,
                 step.text,
-                0,
             ))
         children = tree.get_children()
         if children:
@@ -1454,6 +1621,22 @@ class RecorderToolMixin:
             tree.focus(children[0])
         self._load_selected_step_user_context()
         self._update_progress()
+
+    def _selected_recorder_run_path(self):
+        scenario_status = self._selected_recorder_feature_scenario()
+        raw_path = str(getattr(scenario_status, "run_path", "") or "").strip()
+        if not raw_path:
+            return None
+        recording_root = Path(
+            self.recorder_output_root_var.get().strip()
+            or Paths.ARTIFACTS_DIR / "recording_sessions"
+        ).resolve()
+        run_path = (recording_root / raw_path).resolve()
+        try:
+            run_path.relative_to(recording_root)
+        except ValueError:
+            return None
+        return run_path if run_path.is_dir() else None
 
     def _on_recorder_step_selected(self, event=None):
         self._load_selected_step_user_context()
@@ -1575,9 +1758,11 @@ class RecorderToolMixin:
         scenario_status = self._selected_recorder_feature_scenario()
         if (
                 scenario_status is not None
-                and scenario_status.recording_state == "partial"
+                and scenario_status.recording_state in {"partial", "recorded"}
                 and scenario_status.run_path
         ):
+            recording_state = str(scenario_status.recording_state or "")
+            selected_step_id = self._selected_recorder_step_id()
             recording_root = Path(
                 self.recorder_output_root_var.get().strip()
             ).resolve()
@@ -1595,8 +1780,13 @@ class RecorderToolMixin:
                     )
                 resumed.reopen_for_recording()
             except Exception as error:
+                action = (
+                    "恢复已完成场景"
+                    if recording_state == "recorded"
+                    else "继续未完成场景"
+                )
                 self.recorder_status_var.set(
-                    "继续未完成场景失败: "
+                    f"{action}失败: "
                     f"{type(error).__name__}: {error}"
                 )
                 return None
@@ -1607,9 +1797,20 @@ class RecorderToolMixin:
             self._render_recorder_steps(resumed.scenario_plan)
             self._set_recorder_plan_locked(True)
             self._refresh_recorder_step_states()
-            self._select_next_pending_step()
+            if recording_state == "partial":
+                self._select_next_pending_step()
+            elif (
+                    selected_step_id
+                    and selected_step_id in resumed.step_states
+                    and self.recorder_step_tree.exists(selected_step_id)
+            ):
+                self.recorder_step_tree.selection_set(selected_step_id)
+                self.recorder_step_tree.focus(selected_step_id)
+                self.recorder_step_tree.see(selected_step_id)
             self.recorder_status_var.set(
-                "已继续当前场景的未完成录制。"
+                "已恢复当前场景录制，可重新录制选中的 Step。"
+                if recording_state == "recorded"
+                else "已继续当前场景的未完成录制。"
             )
             self._update_recorder_controls()
             self._refresh_workbench_context()
@@ -1711,7 +1912,7 @@ class RecorderToolMixin:
             return
         step_id = self._selected_recorder_step_id()
         if step_id is None:
-            step = session.next_pending_step()
+            step = session.next_recordable_step()
             step_id = step.id if step else None
         if step_id not in session.step_states:
             self.recorder_status_var.set("请选择当前会话中的 Step。")
@@ -1719,7 +1920,7 @@ class RecorderToolMixin:
         state = session.step_states[step_id]
         if state["status"] == "completed" and not messagebox.askyesno(
             "重新录制",
-            "该 Step 已完成，是否创建新的录制版本？",
+            "该 Step 已完成，是否重新录制当前 Step？已有证据会保留用于维护追溯。",
             parent=self.recorder_window,
         ):
             return
@@ -1766,11 +1967,7 @@ class RecorderToolMixin:
                 "F9目标仍在采集中，请等待结果后再保存当前Step。"
             )
             return
-        take_summary = (
-            self.recorder_take_summary_entry.get().strip()
-            if self.recorder_take_summary_entry
-            else ""
-        )
+        take_summary = ""
         self.recorder_task_busy = True
         self.recorder_status_var.set("正在保存 Step 录制产物...")
         self._show_recorder_overlay("saving")
@@ -1786,11 +1983,28 @@ class RecorderToolMixin:
         if session is not None and session.is_recording:
             self.finish_current_step_recording()
             return
+        if session is None:
+            selected_scenario = self._selected_recorder_feature_scenario()
+            if getattr(selected_scenario, "recording_state", None) == "recorded":
+                self.start_selected_step_recording()
+                return
         if session is not None and session.is_finalized:
             self.open_recorder_review()
             return
+        selected_step_id = self._selected_recorder_step_id()
+        selected_step_state = (
+            session.step_states.get(selected_step_id)
+            if session is not None and selected_step_id
+            else None
+        )
+        if (
+                session is not None
+                and (selected_step_state or {}).get("status") == "completed"
+        ):
+            self.start_selected_step_recording()
+            return
         if session is not None and not any(
-            state["status"] == "pending"
+            state["status"] in {"pending", "skipped"}
             for state in session.step_states.values()
         ):
             self.finalize_recording_session()
@@ -1882,7 +2096,7 @@ class RecorderToolMixin:
             return
         if self.recorder_session.step_states[step_id]["status"] == "completed":
             self.recorder_status_var.set(
-                "已完成的 Step 不能跳过，可使用“开始 / 重录”创建新录制版本。"
+                "已完成的 Step 不能跳过，可使用“开始 / 重录”重新录制当前 Step。"
             )
             return
         if reason is None:
@@ -1907,9 +2121,13 @@ class RecorderToolMixin:
     def finalize_recording_session(self):
         if self.recorder_task_busy or self._recorder_is_active() or self.recorder_session is None:
             return
-        pending = [state for state in self.recorder_session.step_states.values() if state["status"] == "pending"]
-        if pending and not messagebox.askyesno(
-            "完成录制任务", f"还有 {len(pending)} 个 Step 未录制，仍要完成任务吗？", parent=self.recorder_window,
+        recordable = [
+            state
+            for state in self.recorder_session.step_states.values()
+            if state["status"] in {"pending", "skipped"}
+        ]
+        if recordable and not messagebox.askyesno(
+            "完成录制任务", f"还有 {len(recordable)} 个 Step 未录制，仍要完成任务吗？", parent=self.recorder_window,
         ):
             return
         try:
@@ -1938,7 +2156,6 @@ class RecorderToolMixin:
         self._refresh_recorder_step_states()
         self.refresh_recorder_feature_workspace(announce=False)
         self._update_recorder_controls()
-        self._refresh_workbench_context(step_id)
         return readiness
 
     def reset_recording_session(self):
@@ -1981,6 +2198,24 @@ class RecorderToolMixin:
             context=task_name,
         )
 
+    def _schedule_evidence_shadow(self, take):
+        take_id = str(getattr(take, "id", "") or "")
+        take_dir = getattr(take, "directory", None)
+        if not take_id or take_dir is None:
+            return None
+        try:
+            return self.recorder_operations.submit(
+                f"evidence-shadow:{take_id}",
+                publish_evidence_compilation_shadow_report,
+                Path(take_dir),
+                context={
+                    "take_id": take_id,
+                    "take_path": Path(take_dir).as_posix(),
+                },
+            )
+        except Exception:
+            return None
+
     def _schedule_recorder_poll(self):
         if self.recorder_poll_after_id is None:
             self.recorder_poll_after_id = self.app.after(100, self.poll_recorder_state)
@@ -2018,6 +2253,7 @@ class RecorderToolMixin:
                     task.value,
                     task.error,
                 )
+            self.recorder_operations.drain(key_prefix="evidence-shadow:")
             for task in self.recorder_operations.drain(
                     key=self.recorder_workbench_context_operation_key
             ):
@@ -2125,7 +2361,8 @@ class RecorderToolMixin:
             self._refresh_recorder_step_states()
             self.refresh_recorder_feature_workspace(announce=False)
             self._select_next_pending_step()
-            self.recorder_status_var.set("Step 录制完成，产物已更新。")
+            self.recorder_status_var.set("Step 已录制，证据已更新。")
+            self._schedule_evidence_shadow(result)
             if self.recorder_take_summary_entry is not None:
                 self.recorder_take_summary_entry.delete(0, "end")
         elif task_name == "cancel":
@@ -2184,48 +2421,89 @@ class RecorderToolMixin:
                 f"录制资料{('导出' if 'export' in task_name else '导入')}失败: "
                 f"{type(error).__name__}: {error}"
             )
-            self.recorder_status_var.set(message)
+            self._set_portability_status(message, task_root)
             return
         if task_name in {"export", "feature_export"}:
             message = (
-                f"已导出 {result.get('package_count')} 个独立Feature录制资料包，"
-                f"共 {result.get('run_count', 0)} 个 Run: "
+                f"已导出 {result.get('package_count')} 个独立 Feature 录制资料包，"
+                f"共 {result.get('run_count', 0)} 个录制任务: "
                 f"{result.get('package_path')}"
                 if result.get("package_count") is not None
                 else (
-                    f"已导出 {result.get('run_count', 0)} 个 Run: "
+                    f"已导出 {result.get('run_count', 0)} 个录制任务: "
                     f"{result.get('package_path')}"
                 )
             )
             warnings = tuple(result.get("warnings") or ())
             if warnings:
                 message += "；" + "；".join(warnings)
-            self.recorder_status_var.set(message)
+            self._set_portability_status(message, task_root)
             if task_name == "feature_export":
                 self.refresh_recorder_feature_workspace(announce=False)
             return
-        if task_name == "feature_import" and result.get("target_path"):
-            self.recorder_feature_path_var.set(str(result["target_path"]))
-            self.load_recorder_feature()
-        else:
-            self.refresh_recorder_feature_workspace(announce=False)
         imported_runs = (
             result.get("imported_runs")
             if task_name == "feature_import"
             else result.get("runs")
         ) or ()
-        ready_count = sum(
+        request_count = sum(
             bool(item.get("request_path"))
             for item in imported_runs
         )
         message = (
             f"已导入 {result.get('run_count', 0)} 个 Run；"
-            f"{ready_count} 个已生成目标机器 Request。"
+            f"已重建 {request_count} 个目标机器 Request。"
         )
+        partial_runs = [
+            item
+            for item in imported_runs
+            if item.get("status") == "partial_recording"
+        ]
+        complete_count = sum(
+            item.get("status") == "ready_for_generation"
+            for item in imported_runs
+        )
+        if complete_count:
+            message += f"其中 {complete_count} 个为完整场景资料。"
+        if partial_runs:
+            progress = "、".join(
+                f"{item.get('recorded_step_count', 0)}/"
+                f"{item.get('total_step_count', 0)} Step"
+                for item in partial_runs
+            )
+            message += (
+                f"其中 {len(partial_runs)} 个为部分录制资料（已录 {progress}，"
+                "可继续录制）。"
+            )
         warnings = tuple(result.get("warnings") or ())
         if warnings:
             message += "；" + "；".join(warnings)
+        self._set_portability_status(message, task_root, refresh_library=True)
+        if task_name == "feature_import":
+            self.refresh_recorder_feature_workspace(announce=False)
+
+    def _set_portability_status(
+            self,
+            message,
+            output_root,
+            *,
+            refresh_library=False,
+        ):
         self.recorder_status_var.set(message)
+        library = self.recording_library_window
+        if library is None:
+            return
+        try:
+            same_root = Path(library.output_root).resolve() == Path(
+                output_root
+            ).resolve()
+        except (OSError, TypeError, ValueError):
+            same_root = False
+        if not same_root:
+            return
+        if refresh_library:
+            library.refresh()
+        library.status_var.set(message)
 
     def _set_recorder_plan_locked(self, locked):
         state = "disabled" if locked else "normal"
@@ -2253,22 +2531,22 @@ class RecorderToolMixin:
             if not self.recorder_step_tree.exists(step_id):
                 continue
             values = list(self.recorder_step_tree.item(step_id, "values"))
-            values[0] = {
-                "pending": "待录制", "recording": "录制中", "completed": "已完成", "skipped": "已跳过",
-            }.get(state["status"], state["status"])
+            values[0] = _recorder_step_status_label(
+                state["status"],
+                _recorder_step_take_number(state),
+            )
             if (
                 state["status"] == "recording"
                 and self.recorder_session.is_paused
             ):
                 values[0] = "已暂停"
-            values[4] = len(state["takes"])
             self.recorder_step_tree.item(step_id, values=values)
         self._update_progress()
 
     def _select_next_pending_step(self):
         if self.recorder_session is None:
             return
-        step = self.recorder_session.next_pending_step()
+        step = self.recorder_session.next_recordable_step()
         if step and self.recorder_step_tree.exists(step.id):
             self.recorder_step_tree.selection_set(step.id)
             self.recorder_step_tree.focus(step.id)
@@ -2287,11 +2565,29 @@ class RecorderToolMixin:
 
     def _update_progress(self):
         if self.recorder_session is None:
-            self.recorder_progress_var.set(
-                f"本场景 {len(self.recorder_step_map)} 个 Step"
-                if self.recorder_step_map
-                else "请选择场景"
-            )
+            if not self.recorder_step_map:
+                self.recorder_progress_var.set("请选择场景")
+                return
+            statuses = self.recorder_step_display_statuses
+            if statuses:
+                completed = sum(
+                    _recorder_status_code(status) == "completed"
+                    for step_id, status in statuses.items()
+                    if step_id in self.recorder_step_map
+                )
+                skipped = sum(
+                    _recorder_status_code(status) == "skipped"
+                    for step_id, status in statuses.items()
+                    if step_id in self.recorder_step_map
+                )
+                self.recorder_progress_var.set(
+                    f"完成 {completed} / {len(self.recorder_step_map)}，"
+                    f"跳过 {skipped}"
+                )
+            else:
+                self.recorder_progress_var.set(
+                    f"本场景 {len(self.recorder_step_map)} 个 Step"
+                )
             return
         states = self.recorder_session.step_states.values()
         completed = sum(state["status"] == "completed" for state in states)
@@ -2302,39 +2598,6 @@ class RecorderToolMixin:
         session = self.recorder_session
         active = self._recorder_is_active()
         busy = self.recorder_task_busy
-        selected_features = self._selected_recorder_features()
-        can_manage_materials = not active and not busy
-        if self.recorder_materials_button is not None:
-            self.recorder_materials_button.configure(
-                state="normal" if can_manage_materials else "disabled"
-            )
-        if self.recorder_materials_menu is not None:
-            feature = selected_features[0] if selected_features else None
-            scenario = self._selected_recorder_feature_scenario()
-            self.recorder_materials_menu.entryconfigure(
-                "导入录制资料",
-                state="normal" if can_manage_materials else "disabled",
-            )
-            self.recorder_materials_menu.entryconfigure(
-                "导出当前 Feature",
-                state=(
-                    "normal"
-                    if can_manage_materials
-                    and feature is not None
-                    and self._feature_has_exportable_recording(feature)
-                    else "disabled"
-                ),
-            )
-            self.recorder_materials_menu.entryconfigure(
-                "导出当前场景",
-                state=(
-                    "normal"
-                    if can_manage_materials
-                    and scenario is not None
-                    and scenario.exportable
-                    else "disabled"
-                ),
-            )
         has_plan = (
             self.recorder_feature_plan is not None
             and bool(self.recorder_selected_step_ids)
@@ -2347,12 +2610,19 @@ class RecorderToolMixin:
                     else "disabled"
                 )
             )
-        pending = bool(
+        recordable = bool(
             session is not None
             and any(
-                state["status"] == "pending"
+                state["status"] in {"pending", "skipped"}
                 for state in session.step_states.values()
             )
+        )
+        selected_scenario = self._selected_recorder_feature_scenario()
+        selected_step_id = self._selected_recorder_step_id()
+        selected_step_state = (
+            session.step_states.get(selected_step_id)
+            if session is not None and selected_step_id
+            else None
         )
         if session is not None and session.is_recording:
             primary_text = "保存当前 Step F10"
@@ -2360,9 +2630,33 @@ class RecorderToolMixin:
         elif session is not None and session.is_finalized:
             primary_text = "审阅并交给 Copilot"
             primary_enabled = bool(self.recorder_output_dir) and not busy
-        elif session is not None and not pending:
+        elif (
+                session is not None
+                and (selected_step_state or {}).get("status") == "completed"
+        ):
+            primary_text = "重新录制当前 Step"
+            primary_enabled = not active and not busy
+        elif session is not None and not recordable:
             primary_text = "完成录制并审阅"
             primary_enabled = not active and not busy
+        elif session is None and getattr(
+            selected_scenario,
+            "recording_state",
+            None,
+        ) == "partial":
+            primary_text = "继续录制此场景"
+            primary_enabled = has_plan and not active and not busy
+        elif session is None and getattr(
+            selected_scenario,
+            "recording_state",
+            None,
+        ) == "recorded":
+            primary_text = "重新录制当前 Step"
+            primary_enabled = (
+                self._selected_recorder_run_path() is not None
+                and not active
+                and not busy
+            )
         else:
             primary_text = (
                 "开始录制此场景"
@@ -2430,6 +2724,10 @@ class RecorderToolMixin:
                 and not active
                 and not busy
             )
+            can_open_review = bool(
+                self.recorder_output_dir
+                or self._selected_recorder_run_path() is not None
+            )
             self.recorder_more_menu.entryconfigure(
                 "检查此处 F9",
                 state="normal" if can_observe else "disabled",
@@ -2448,7 +2746,7 @@ class RecorderToolMixin:
             )
             self.recorder_more_menu.entryconfigure(
                 "审阅并交给 Copilot",
-                state="normal" if self.recorder_output_dir else "disabled",
+                state="normal" if can_open_review else "disabled",
             )
             self.recorder_more_menu.entryconfigure(
                 "结束当前任务",
@@ -2473,6 +2771,13 @@ class RecorderToolMixin:
 
     def open_recorder_review(self):
         if self.recorder_session is None:
+            run_path = self._selected_recorder_run_path()
+            if run_path is not None:
+                self._open_existing_session_in_workbench(
+                    run_path,
+                    return_view="capture",
+                )
+                return
             self.recorder_status_var.set("至少完成一次 Step 录制后才能审阅。")
             return
         if self.recorder_review_window is not None:
@@ -2659,6 +2964,7 @@ class RecorderToolMixin:
                     pass
             self.recorder_task_busy = False
             self.recorder_pending_step_id = None
+        self.recorder_operations.abandon_prefix("evidence-shadow:")
         if self.recorder_poll_after_id is not None:
             try:
                 self.app.after_cancel(self.recorder_poll_after_id)

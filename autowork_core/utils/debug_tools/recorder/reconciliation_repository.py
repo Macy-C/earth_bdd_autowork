@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import yaml
@@ -17,6 +18,12 @@ from autowork_core.utils.debug_tools.recorder.evidence_context import (
 from autowork_core.utils.debug_tools.recorder.memory_digest import (
     build_memory_digest,
 )
+from autowork_core.utils.debug_tools.recorder.generation_job_result import (
+    generation_job_result_identity_is_valid,
+)
+from autowork_core.utils.debug_tools.recorder.generation_plan import (
+    plan_artifact_identity_is_valid,
+)
 from autowork_core.utils.debug_tools.recorder.semantic_pack import (
     SUPPORTED_SEMANTIC_PACK_VERSIONS,
 )
@@ -26,7 +33,7 @@ from autowork_core.utils.debug_tools.recorder.request_repository import (
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-BRIEF_VERSION = "4.4"
+BRIEF_VERSION = "4.6"
 SUPPORTED_BRIEF_VERSIONS = {BRIEF_VERSION}
 
 
@@ -89,6 +96,19 @@ class ReconciliationRepository:
         if not all(candidate_ids) or len(candidate_ids) != len(set(candidate_ids)):
             raise ValueError("input recovery candidate ID缺失或冲突")
         return result
+
+    def locator_reuse_context(self):
+        project_root, _recording_root = _project_and_recording_roots(
+            self.session_dir
+        )
+        return {
+            "session_dir": str(self.session_dir),
+            "project_root": str(project_root),
+            "user_modified_locator_files": _user_modified_locator_files(
+                self.session_dir,
+                project_root,
+            ),
+        }
 
     def write(self, request_id, reconciliation, brief):
         reconciliation_path = (
@@ -346,7 +366,117 @@ class ReconciliationRepository:
         )
         result["available"] = bool(result["packs"])
         self._attach_reuse_candidates(request, result)
+        verified_generation = self._load_verified_generation_candidates(request)
+        result["verified_naming_candidates"] = (
+            verified_generation["naming"]
+        )
+        result["verified_ambiguity_choices"] = (
+            verified_generation["ambiguity_choices"]
+        )
         return result
+
+    def _load_verified_naming_candidates(self, request):
+        return self._load_verified_generation_candidates(request)["naming"]
+
+    def _load_verified_generation_candidates(self, request):
+        request_id = str(request.get("request_id") or "")
+        request_scope = str(request.get("request_scope") or "")
+        if not request_id or not request_scope:
+            return {"naming": [], "ambiguity_choices": []}
+        result_root = self.session_dir / "ai" / "generation-job-results"
+        latest = None
+        for result_path in sorted(result_root.glob("job-*/*.json")):
+            try:
+                result_path.resolve().relative_to(result_root.resolve())
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if any((
+                    not generation_job_result_identity_is_valid(result),
+                    result.get("status") != "completed",
+                    result.get("category") != "static_validated",
+                    result.get("unresolved_issues"),
+                    not isinstance(result.get("completed_at"), str),
+            )):
+                continue
+            attempts = result.get("attempts") or []
+            attempt = attempts[-1] if attempts else {}
+            pointer = (attempt or {}).get("plan") or {}
+            plan_path_value = pointer.get("path")
+            candidate_request_id = str(
+                (result.get("job") or {}).get("request_id") or ""
+            )
+            if not plan_path_value:
+                continue
+            try:
+                plan_path = resolve_session_path(
+                    self.session_dir,
+                    plan_path_value,
+                )
+                plan_path.relative_to(
+                    (
+                        self.session_dir
+                        / "ai"
+                        / "plans"
+                        / candidate_request_id
+                    ).resolve()
+                )
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                candidate_request_path = (
+                    self.session_dir
+                    / "ai"
+                    / "requests"
+                    / f"{candidate_request_id}.json"
+                )
+                candidate_request = json.loads(
+                    candidate_request_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            source = plan.get("source") or {}
+            if any((
+                    not plan_artifact_identity_is_valid(plan),
+                    plan.get("status") != "validated",
+                    str(plan.get("request_id") or "") != candidate_request_id,
+                    str(candidate_request.get("request_scope") or "")
+                    != request_scope,
+                    str(plan.get("plan_id") or "")
+                    != str(pointer.get("plan_id") or ""),
+                    str(plan.get("plan_fingerprint") or "")
+                    != str(pointer.get("plan_fingerprint") or ""),
+            )):
+                continue
+            candidate = (
+                str(result["completed_at"]),
+                str(result_path),
+                plan,
+                result,
+            )
+            if latest is None or candidate[:2] > latest[:2]:
+                latest = candidate
+        if latest is None:
+            return {"naming": [], "ambiguity_choices": []}
+        _completed_at, _path, plan, result = latest
+        source = {
+            "kind": "same_scope_latest_static_validated_plan",
+            "job_id": str((result.get("job") or {}).get("job_id") or ""),
+            "request_id": str(plan.get("request_id") or ""),
+            "request_scope": request_scope,
+            "plan_id": str(plan.get("plan_id") or ""),
+            "revision_seal": str(
+                ((plan.get("source") or {}).get("revision_seal") or "")
+            ),
+        }
+        return {
+            "naming": _verified_naming_candidates_from_plan(
+                plan,
+                source=source,
+            ),
+            "ambiguity_choices": _verified_ambiguity_choices_from_plan(
+                plan,
+                source=source,
+            ),
+        }
 
     def _load_recorded_window_roots(self, request):
         roots = {}
@@ -458,6 +588,209 @@ class ReconciliationRepository:
                     f"代码复用索引不可用: {type(error).__name__}: {error}"
                 ],
             }
+
+
+def _verified_naming_candidates_from_plan(plan, *, source):
+    artifact = plan if isinstance(plan, dict) else {}
+    content = artifact.get("plan") or {}
+    owners = {
+        str(owner_id): owner
+        for owner_id, owner in (content.get("window_owners") or {}).items()
+        if isinstance(owner, dict)
+    }
+    result = []
+    seen = set()
+    for owner in owners.values():
+        root_name = str(owner.get("evidence_root") or "")
+        name = str(owner.get("public_name") or "")
+        if not root_name or not _public_naming_value(name):
+            continue
+        key = ("business_name", root_name, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "kind": "business_name",
+            "root_name": root_name,
+            "name": name,
+            "source": source,
+        })
+    for step_id, step in (content.get("steps") or {}).items():
+        for operation in (step or {}).get("operations") or ():
+            if not isinstance(operation, dict):
+                continue
+            action_id = str(operation.get("target_action_id") or "")
+            target_fingerprint = str(
+                operation.get("target_fingerprint") or ""
+            )
+            name = str(operation.get("target") or "")
+            if not action_id or not target_fingerprint or not _public_naming_value(
+                    name
+            ):
+                continue
+            key = (
+                "target_name",
+                str(step_id),
+                action_id,
+                target_fingerprint,
+                name,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append({
+                "kind": "target_name",
+                "step_id": str(step_id),
+                "action_id": action_id,
+                "target_fingerprint": target_fingerprint,
+                "name": name,
+                "source": source,
+            })
+    return result
+
+
+def _verified_ambiguity_choices_from_plan(plan, *, source):
+    content = (plan if isinstance(plan, dict) else {}).get("plan") or {}
+    result = []
+    seen = set()
+    for item in content.get("ambiguity_resolutions") or ():
+        if not isinstance(item, dict):
+            continue
+        ambiguity_id = str(item.get("ambiguity_id") or "")
+        outcome = str(item.get("outcome") or "")
+        if not ambiguity_id or not outcome:
+            continue
+        key = (ambiguity_id, outcome)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "ambiguity_id": ambiguity_id,
+            "outcome": outcome,
+            "action_ids": [
+                str(action_id)
+                for action_id in item.get("action_ids") or ()
+                if action_id
+            ],
+            "source": source,
+        })
+    return result
+
+
+def _public_naming_value(value):
+    import re
+
+    return bool(re.fullmatch(r"[a-z][a-z0-9_]{1,63}", str(value or "")))
+
+
+def _user_modified_locator_files(session_dir, project_root):
+    session_dir = Path(session_dir).resolve()
+    project_root = Path(project_root).resolve()
+    generated = {}
+    result_root = session_dir / "ai" / "generation-job-results"
+    for result_path in sorted(result_root.glob("job-*/*.json")):
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not generation_job_result_identity_is_valid(result):
+            continue
+        for record in _generation_result_file_snapshots(
+            result,
+            result_path=result_path,
+        ):
+            path = str(record.get("path") or "").replace("\\", "/")
+            if not path.startswith("Bdd/locators/"):
+                continue
+            if Path(path).suffix.casefold() not in {".yaml", ".yml"}:
+                continue
+            generated.setdefault(path, record)
+    modified = []
+    for path, previous in sorted(generated.items()):
+        current_path = project_root / path
+        if not current_path.is_file():
+            continue
+        try:
+            current = current_path.read_bytes()
+        except OSError:
+            continue
+        if any((
+                hashlib.sha256(current).hexdigest() != previous.get("sha256"),
+                current_path.stat().st_size != previous.get("size"),
+        )):
+            modified.append(path)
+    return modified
+
+
+def _generation_result_file_snapshots(result, *, result_path=None):
+    records = []
+    records.extend(result.get("file_snapshots") or [])
+    for report in _generation_result_reports(result, result_path=result_path):
+        records.extend(((report.get("code_manifest") or {}).get("files") or []))
+        records.extend(report.get("implementation_snapshot") or [])
+    values = []
+    seen = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        path = str(record.get("path") or "").replace("\\", "/")
+        if not path or path in seen:
+            continue
+        sha256 = record.get("sha256")
+        size = record.get("size")
+        if not isinstance(sha256, str) or not isinstance(size, int):
+            continue
+        seen.add(path)
+        values.append({"path": path, "sha256": sha256, "size": size})
+    return values
+
+
+def _generation_result_reports(result, *, result_path=None):
+    reports = []
+    for key in ("terminal_report_audit", "transaction_report"):
+        report = result.get(key) if isinstance(result, dict) else None
+        if isinstance(report, dict):
+            reports.append(report)
+    owner = (((result.get("stages") or {}).get("transaction") or {}).get(
+        "owner"
+    ) or {}) if isinstance(result, dict) else {}
+    report_path = owner.get("path")
+    if report_path:
+        try:
+            path = resolve_session_path(
+                _generation_result_session_dir(
+                    result,
+                    result_path=result_path,
+                ),
+                report_path,
+            )
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            report = None
+        if isinstance(report, dict):
+            reports.append(report)
+    return reports
+
+
+def _generation_result_session_dir(result, *, result_path=None):
+    if result_path is not None:
+        path = Path(result_path).resolve()
+        parts = path.parts
+        if "ai" in parts:
+            index = parts.index("ai")
+            if index > 0:
+                return Path(*parts[:index])
+    session_dir = str((result or {}).get("session_dir") or "")
+    if session_dir:
+        return Path(session_dir)
+    request_path = str(((result or {}).get("request") or {}).get("path") or "")
+    if request_path:
+        path = Path(request_path)
+        if "ai" in path.parts:
+            index = path.parts.index("ai")
+            if index > 0:
+                return Path(*path.parts[:index])
+    return Path(".")
 
 
 def load_generation_brief(path):

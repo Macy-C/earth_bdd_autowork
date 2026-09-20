@@ -5,8 +5,9 @@ import hashlib
 import json
 
 
-GENERATION_PROFILE_REGISTRY_VERSION = "1.0"
-GENERATION_ADMISSION_VERSION = "1.0"
+GENERATION_PROFILE_REGISTRY_VERSION = "1.4"
+GENERATION_PROFILE_VERSION = "1.4"
+GENERATION_ADMISSION_VERSION = "1.2"
 DEFAULT_GENERATION_PROFILE_ID = "generation_first"
 
 
@@ -15,12 +16,24 @@ _PROFILE_DEFINITIONS = (
         "profile_id": "generation_first",
         "label": "专心生成",
         "start_allowed": True,
+        "scenario_scope_policy": "explicit_scope_required",
         "investigation_policy": "named_scope_only",
-        "user_interaction_policy": "frontloaded_only",
+        "user_interaction_policy": "single_batch_during_design",
         "repair_policy": {
             "design": "progress_bounded_technical",
             "implementation": "manifest_scoped",
             "authority_change": "terminate_job",
+        },
+        "orchestration_policy": {
+            "user_trigger_count": 1,
+            "max_actions_per_fragment": 20,
+            "max_fragment_bytes": 12 * 1024,
+            "ordinary_static_service_level_target_seconds": 5 * 60,
+            "large_static_service_level_target_seconds": 30 * 60,
+            "large_job_step_threshold": 100,
+            "max_supported_step_count": 600,
+            "plan_count": 1,
+            "transaction_count": 1,
         },
     },
 )
@@ -88,6 +101,7 @@ def project_generation_admission(
     revision_seal = (request.get("revision_snapshot") or {}).get("seal")
     state_revision_seal = (state.get("revision") or {}).get("seal")
     readiness = request.get("readiness") or {}
+    scenario_scope = _scenario_scope(request)
     ambiguity = state.get("ambiguity") or {}
     decision = state.get("decision") or {}
     decision_pack = dict(decision_pack or {})
@@ -97,6 +111,10 @@ def project_generation_admission(
         decision,
         decision_pack,
         answer_record,
+    )
+    decision_batch_admissible = bool(
+        decision_batch.get("complete")
+        or decision.get("status") == "awaiting_answers"
     )
     active_transaction = state.get("active_transaction") or {}
     hard_blockers = [
@@ -126,6 +144,14 @@ def project_generation_admission(
             revision_seal,
         ),
         _check(
+            "complete_scenario_scope",
+            _scenario_scope_is_admissible(profile, scenario_scope),
+            _fingerprint({
+                "policy": profile.get("scenario_scope_policy"),
+                "scope": scenario_scope,
+            }),
+        ),
+        _check(
             "brief_identity",
             bool((state.get("brief") or {}).get("brief_fingerprint")),
             (state.get("brief") or {}).get("brief_fingerprint"),
@@ -134,11 +160,20 @@ def project_generation_admission(
             "evidence_readiness",
             bool(
                 readiness.get("bundle_valid")
+                and readiness.get("evidence_compiled", True) is not False
+                and readiness.get("evidence_generation_allowed", True)
+                is not False
                 and not hard_blockers
-                and not ambiguity.get("pending_evidence_count", 0)
             ),
             _fingerprint({
                 "bundle_valid": readiness.get("bundle_valid"),
+                "evidence_compiled": readiness.get("evidence_compiled"),
+                "evidence_generation_allowed": readiness.get(
+                    "evidence_generation_allowed"
+                ),
+                "evidence_compilation_status": readiness.get(
+                    "evidence_compilation_status"
+                ),
                 "hard_blocker_count": len(hard_blockers),
                 "pending_evidence_count": ambiguity.get(
                     "pending_evidence_count",
@@ -148,7 +183,7 @@ def project_generation_admission(
         ),
         _check(
             "decision_batch",
-            bool(decision_batch.get("complete")),
+            decision_batch_admissible,
             _fingerprint({
                 "status": decision.get("status"),
                 "pack": decision.get("pack") or {},
@@ -231,9 +266,33 @@ def _context_budget_warning(context_budget):
         "message": (
             "默认AI上下文超过性能目标；系统将继续创建Job并依赖紧凑投影/按需查询。"
             if context_budget.get("status") == "over_target"
-            else "默认AI上下文预算状态未通过性能检查。"
+            else "默认AI上下文在性能目标内。"
+            if context_budget.get("status") == "within_target"
+            else "默认AI上下文预算状态未知，不能声明性能检查通过。"
         ),
     }
+
+
+def _scenario_scope(request):
+    target = request.get("target") or {}
+    scenario = target.get("scenario") or {}
+    scope = scenario.get("generation_scope") or {}
+    return dict(scope) if isinstance(scope, dict) else {}
+
+
+def _scenario_scope_is_admissible(profile, scope):
+    policy = profile.get("scenario_scope_policy")
+    if policy == "complete_required":
+        return scope.get("complete") is True
+    if policy != "explicit_scope_required":
+        return False
+    selected = [str(item) for item in scope.get("selected_step_ids") or ()]
+    excluded = [str(item) for item in scope.get("excluded_step_ids") or ()]
+    if not selected:
+        return False
+    if scope.get("complete") is True:
+        return not excluded
+    return bool(excluded)
 
 
 def _decision_batch_receipt(decision, pack, answers):
@@ -284,7 +343,7 @@ def _decision_batch_receipt(decision, pack, answers):
 
 def _profile_value(definition):
     value = {
-        "generation_profile_version": "1.0",
+        "generation_profile_version": GENERATION_PROFILE_VERSION,
         **copy.deepcopy(definition),
     }
     value["profile_fingerprint"] = _fingerprint(value)

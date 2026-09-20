@@ -19,9 +19,9 @@ from autowork_core.utils.debug_tools.recorder.semantic_reconciler import (
 )
 
 
-AI_CONTEXT_ENVELOPE_VERSION = "1.3"
+AI_CONTEXT_ENVELOPE_VERSION = "2.1"
 READABLE_AI_CONTEXT_ENVELOPE_VERSIONS = {AI_CONTEXT_ENVELOPE_VERSION}
-GENERATION_DESIGN_CONTEXT_VERSION = "1.0"
+GENERATION_DESIGN_CONTEXT_VERSION = "1.1"
 DESIGN_CONTEXT_OMITTED_SECTIONS = frozenset({
     "adjustment",
     "agent_tasks",
@@ -31,6 +31,7 @@ DESIGN_CONTEXT_OMITTED_SECTIONS = frozenset({
     "memory_digest.detail",
     "scenario_intelligence",
     "semantics.packs",
+    "semantics.locator_reuse_matches",
     "semantics.step_continuity",
     "semantics.window_causality",
     "window_ownership.window_causality",
@@ -57,6 +58,7 @@ def build_ai_context_envelope(
         workflow_context=None,
         ai_capabilities=None,
         plan_context=None,
+        generation_task_bundle=None,
     ):
     session_dir = Path(session_dir).resolve()
     request = request if isinstance(request, dict) else {}
@@ -84,12 +86,27 @@ def build_ai_context_envelope(
         raise ValueError(
             "Generation Job 缺少 current job-design-context query"
         )
+    task_bundle = copy.deepcopy(generation_task_bundle or {})
+    brief_projection = (
+        _build_envelope_brief_reference(
+            brief,
+            session_dir=session_dir,
+            brief_path=brief_path,
+        )
+        if task_bundle
+        else _build_direct_brief_reference(
+            brief,
+            session_dir=session_dir,
+            brief_path=brief_path,
+        )
+    )
     envelope = {
         "ai_context_envelope_version": AI_CONTEXT_ENVELOPE_VERSION,
         "workflow_version": str(workflow_version),
         "job": _without_empty({
             "job_id": job.get("job_id"),
             "job_fingerprint": job.get("job_fingerprint"),
+            "workload": copy.deepcopy(job.get("workload") or {}),
             "path": _relative_path(session_dir, job_path),
         }),
         "request": _without_empty({
@@ -131,12 +148,9 @@ def build_ai_context_envelope(
                 ),
             }),
         }),
-        "brief": build_envelope_brief_projection(
-            brief,
-            session_dir=session_dir,
-            brief_path=brief_path,
-        ),
+        "brief": brief_projection,
         "plan_context": plan_context,
+        "generation_task_bundle": task_bundle,
         "ai_capabilities": ai_capabilities or {},
         "design_contract": compact_generation_design_contract(),
         "query_policy": {
@@ -168,12 +182,17 @@ def compact_ai_context_envelope_contract():
             "decision",
             "brief",
             "plan_context",
+            "generation_task_bundle",
             "ai_capabilities",
             "design_contract",
             "query_policy",
             "envelope_fingerprint",
         ],
-        "required_job_fields": ["job_id", "job_fingerprint"],
+        "required_job_fields": [
+            "job_id",
+            "job_fingerprint",
+            "workload",
+        ],
         "required_request_fields": [
             "request_id",
             "request_fingerprint",
@@ -183,10 +202,11 @@ def compact_ai_context_envelope_contract():
         "brief_transport": {
             "version": GENERATION_DESIGN_CONTEXT_VERSION,
             "rule": (
-                "The Envelope carries a GenerationDesignContextV1 projection "
-                "of the content-addressed Brief. Omitted detail may be "
-                "expanded only through the immutable Job's job-design-context "
-                "query; the full Brief remains the compiler authority."
+                "The Envelope carries a content-addressed Brief reference and "
+                "target summary. Scenario Design context carries per-Step "
+                "Action counts while Action facts expand by Step. Direct Jobs "
+                "carry system-baseline seed status; paged Jobs carry a "
+                "bound GenerationTaskBundle index."
             ),
         },
         "backend_identity": [
@@ -201,6 +221,101 @@ def compact_ai_context_envelope_contract():
         ),
     }
     value["contract_fingerprint"] = _fingerprint(value)
+    return value
+
+
+def _build_envelope_brief_reference(brief, *, session_dir, brief_path):
+    brief = dict(brief or {})
+    target = dict(brief.get("target") or {})
+    feature = dict(target.get("feature") or {})
+    scenario = dict(target.get("scenario") or {})
+    steps = [
+        dict(item)
+        for item in target.get("steps") or ()
+        if isinstance(item, dict)
+    ]
+    value = {
+        "generation_design_context_version": GENERATION_DESIGN_CONTEXT_VERSION,
+        "request_id": brief.get("request_id"),
+        "brief_fingerprint": brief.get("brief_fingerprint"),
+        "target": {
+            "feature": _copy_fields(
+                feature,
+                ("id", "name", "source_relpath"),
+            ),
+            "scenario": _copy_fields(
+                scenario,
+                ("id", "name", "kind", "example_id"),
+            ),
+            "steps": [
+                _copy_fields(
+                    step,
+                    ("id", "keyword", "semantic_type", "text"),
+                )
+                for step in steps
+            ],
+        },
+        "design_context_transport": {
+            "version": GENERATION_DESIGN_CONTEXT_VERSION,
+            "scope": "bundle_index",
+            "requested_step_id": None,
+            "omitted_sections": sorted(DESIGN_CONTEXT_OMITTED_SECTIONS),
+            "full_brief": {
+                "path": _relative_path(session_dir, brief_path),
+                "brief_fingerprint": brief.get("brief_fingerprint"),
+                "expand": "job-design-context",
+            },
+            "actions": {
+                "source": "generation_task_bundle",
+                "query": "job-task-bundle --fragment-id <fragment-id>",
+            },
+        },
+    }
+    value = _without_empty(value)
+    value["design_context_fingerprint"] = _design_context_fingerprint(value)
+    return value
+
+
+def _build_direct_brief_reference(brief, *, session_dir, brief_path):
+    brief = dict(brief or {})
+    target = dict(brief.get("target") or {})
+    steps = [
+        item
+        for item in target.get("steps") or ()
+        if isinstance(item, dict)
+    ]
+    value = {
+        "generation_design_context_version": GENERATION_DESIGN_CONTEXT_VERSION,
+        "request_id": brief.get("request_id"),
+        "brief_fingerprint": brief.get("brief_fingerprint"),
+        "target": {
+            "feature": _copy_fields(
+                dict(target.get("feature") or {}),
+                ("id", "name", "source_relpath"),
+            ),
+            "scenario": _copy_fields(
+                dict(target.get("scenario") or {}),
+                ("id", "name", "kind", "example_id"),
+            ),
+            "step_count": len(steps),
+        },
+        "design_context_transport": {
+            "version": GENERATION_DESIGN_CONTEXT_VERSION,
+            "scope": "system_baseline",
+            "requested_step_id": None,
+            "omitted_sections": sorted(DESIGN_CONTEXT_OMITTED_SECTIONS),
+            "full_brief": {
+                "path": _relative_path(session_dir, brief_path),
+                "brief_fingerprint": brief.get("brief_fingerprint"),
+                "expand": "job-design-context",
+            },
+            "actions": {
+                "source": "system_baseline",
+            },
+        },
+    }
+    value = _without_empty(value)
+    value["design_context_fingerprint"] = _design_context_fingerprint(value)
     return value
 
 
@@ -254,10 +369,9 @@ def build_envelope_brief_projection(
     for candidate in ownership.get("ownership_candidates") or ():
         if not isinstance(candidate, dict):
             continue
-        parent_root = str(candidate.get("parent_root") or "")
-        child_root = str(candidate.get("child_root") or "")
-        if parent_root in root_names or child_root in root_names:
-            root_names.update({parent_root, child_root})
+        root_name = str(candidate.get("root_name") or "")
+        if root_name:
+            root_names.add(root_name)
     projected = {
         "generation_design_context_version": GENERATION_DESIGN_CONTEXT_VERSION,
         "schema_version": brief.get("schema_version"),
@@ -275,7 +389,16 @@ def build_envelope_brief_projection(
         "actions": (
             [copy.deepcopy(item) for item in actions]
             if expanded_step
-            else [_project_design_action(item) for item in actions]
+            else (
+                [_project_design_action(item) for item in actions]
+                if requested_step_id
+                else []
+            )
+        ),
+        "action_summary": (
+            _project_design_action_summary(actions, target_steps)
+            if not requested_step_id
+            else {}
         ),
         "ambiguities": _project_design_ambiguities(
             brief.get("ambiguities") or (),
@@ -457,6 +580,42 @@ def _project_design_action(action):
     return _without_empty(projected)
 
 
+def _project_design_action_summary(actions, steps):
+    by_step = {}
+    for action in actions:
+        step_id = str(action.get("step_id") or "")
+        if not step_id:
+            continue
+        item = by_step.setdefault(step_id, {
+            "step_id": step_id,
+            "action_count": 0,
+            "action_types": set(),
+            "root_names": set(),
+        })
+        item["action_count"] += 1
+        action_type = str(action.get("type") or "")
+        if action_type:
+            item["action_types"].add(action_type)
+        root_name = str((action.get("target") or {}).get("root_name") or "")
+        if root_name:
+            item["root_names"].add(root_name)
+    ordered = []
+    for step in steps:
+        item = by_step.get(str(step.get("id") or ""))
+        if item is None:
+            continue
+        ordered.append({
+            "step_id": item["step_id"],
+            "action_count": item["action_count"],
+            "action_types": sorted(item["action_types"]),
+            "root_names": sorted(item["root_names"]),
+        })
+    return {
+        "action_count": sum(item["action_count"] for item in ordered),
+        "steps": ordered,
+    }
+
+
 def _project_design_action_semantics(value):
     value = dict(value or {})
     effect = _copy_fields(
@@ -581,10 +740,9 @@ def _project_design_window_ownership(
             (
                 "candidate_id",
                 "kind",
-                "parent_root",
-                "child_root",
+                "root_name",
                 "opener_action_id",
-                "child_action_ids",
+                "action_ids",
                 "step_id",
             ),
         ))
@@ -685,6 +843,9 @@ def _project_design_semantics(value, steps, *, requested_step_id):
     return _without_empty({
         "available": value.get("available"),
         "reuse_candidates": candidates,
+        "locator_reuse_summary": {
+            "verified_count": _locator_reuse_match_count(value, steps),
+        },
         "environment_dependencies": copy.deepcopy(
             value.get("environment_dependencies") or []
         ),
@@ -741,6 +902,10 @@ def _project_expanded_design_semantics(value, steps):
         ),
         "step_continuity": continuity,
         "reuse_candidates": candidates,
+        "locator_reuse_matches": _project_locator_reuse_matches(
+            value,
+            steps,
+        ),
         "environment_dependencies": copy.deepcopy(
             value.get("environment_dependencies") or []
         ),
@@ -775,6 +940,50 @@ def _project_design_reuse_candidate(value):
     if "exact_step_pattern" in (value.get("reasons") or []):
         result["exact_step_pattern"] = True
     return result
+
+
+def _project_locator_reuse_matches(value, steps):
+    step_ids = {
+        str(item.get("id") or "")
+        for item in steps or ()
+        if isinstance(item, dict) and item.get("id")
+    }
+    result = []
+    for item in (dict(value or {}).get("locator_reuse_matches") or ()):
+        if not isinstance(item, dict):
+            continue
+        if step_ids and str(item.get("step_id") or "") not in step_ids:
+            continue
+        result.append(_without_empty(_copy_fields(
+            item,
+            (
+                "match_id",
+                "status",
+                "step_id",
+                "action_id",
+                "root_name",
+                "evidence_name",
+                "owner_candidate_id",
+                "locator_file",
+                "locator_key",
+                "target_fingerprint",
+                "snapshot_proof",
+            ),
+        )))
+    return result
+
+
+def _locator_reuse_match_count(value, steps):
+    step_ids = {
+        str(item.get("id") or "")
+        for item in steps or ()
+        if isinstance(item, dict) and item.get("id")
+    }
+    return sum(
+        isinstance(item, dict)
+        and str(item.get("step_id") or "") in step_ids
+        for item in (dict(value or {}).get("locator_reuse_matches") or ())
+    )
 
 
 def _project_design_memory_digest(value, step_ids, *, requested_step_id):
@@ -887,6 +1096,17 @@ def ai_context_envelope_identity_is_valid(value):
                 for field in fields
         ):
             return False
+    job_value = value.get("job") or {}
+    workload = job_value.get("workload")
+    if not isinstance(workload, dict) or any((
+            not isinstance(workload.get("action_count"), int),
+            not isinstance(workload.get("step_count"), int),
+            not isinstance(
+                workload.get("static_service_level_target_seconds"),
+                int,
+            ),
+    )):
+        return False
     if not isinstance(value.get("brief"), dict):
         return False
     if not _brief_transport_is_valid(value):
@@ -896,6 +1116,19 @@ def ai_context_envelope_identity_is_valid(value):
     if not isinstance(value.get("decision"), dict):
         return False
     if not isinstance(value.get("ai_capabilities"), dict):
+        return False
+    bundle = value.get("generation_task_bundle")
+    uses_bundle = "job-task-bundle" in set(value.get("allowed_queries") or ())
+    if not isinstance(bundle, dict):
+        return False
+    if uses_bundle and any((
+        bundle.get("generation_task_bundle_version") != "1.4",
+        not bundle.get("bundle_id"),
+        not bundle.get("bundle_fingerprint"),
+        not isinstance(bundle.get("fragments"), list),
+    )):
+        return False
+    if not uses_bundle and bundle:
         return False
     if value.get("plan_context") is not None and not ai_plan_context_identity_is_valid(
             value.get("plan_context")
@@ -925,7 +1158,8 @@ def _brief_transport_is_valid(value):
     transport = brief.get("design_context_transport") or {}
     omitted = transport.get("omitted_sections") or []
     full_brief = transport.get("full_brief") or {}
-    return not any((
+    uses_bundle = "job-task-bundle" in set(value.get("allowed_queries") or ())
+    common_invalid = any((
         not isinstance(transport, dict),
         transport.get("version") != GENERATION_DESIGN_CONTEXT_VERSION,
         not isinstance(omitted, list),
@@ -943,6 +1177,20 @@ def _brief_transport_is_valid(value):
         not full_brief.get("path"),
         full_brief.get("expand") != "job-design-context",
     ))
+    if common_invalid:
+        return False
+    if uses_bundle:
+        return not any((
+            transport.get("scope") != "bundle_index",
+            (transport.get("actions") or {}).get("source")
+            != "generation_task_bundle",
+        ))
+    return bool(
+        transport.get("scope") == "system_baseline"
+        and (transport.get("actions") or {}).get("source")
+        == "system_baseline"
+        and isinstance((brief.get("target") or {}).get("step_count"), int)
+    )
 
 
 def ai_context_envelope_fingerprint(value):

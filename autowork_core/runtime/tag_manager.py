@@ -87,7 +87,7 @@ SCENARIO_OWNERS = (TagOwner.SCENARIO, TagOwner.SCENARIO_OUTLINE)
 RUNTIME_OWNERS = (TagOwner.FEATURE, TagOwner.RULE, *SCENARIO_OWNERS, TagOwner.EXAMPLES)
 STEP_SCOPE_PREFIXES = ("stepfile:", "step_file:", "steps:", "step:")
 SINGLE_STEP_PREFIX = "single:"
-SKIP_TAG_PRIORITY = ("maint", "skip", "rep")
+SKIP_TAG_PRIORITY = ("maint", "skip", "manual", "rep")
 SINGLE_STEP_RE = re.compile(
     r"^single:(previous|background|none):([1-9]\d*)"
     r"(?::example=([1-9]\d*)\.([1-9]\d*))?$",

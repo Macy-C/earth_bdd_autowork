@@ -95,13 +95,14 @@ class RecordingPortabilityService:
             output_dir,
         )
 
-    def import_feature(self, package_path, project_root):
+    def import_feature(self, package_path, project_root, target_feature_path=None):
         return self._run(
             "feature_import",
             package_path,
             self._import_feature,
             package_path,
             project_root,
+            target_feature_path,
         )
 
     def _export_feature(self, feature_path, package_path):
@@ -146,11 +147,12 @@ class RecordingPortabilityService:
             return _with_warning(result, _delivery_index_warning(error))
         return result
 
-    def _import_feature(self, package_path, project_root):
+    def _import_feature(self, package_path, project_root, target_feature_path=None):
         result = import_feature_delivery(
             package_path,
             project_root,
             self.recording_root,
+            target_feature_path=target_feature_path,
         )
         try:
             record_feature_delivery(self.recording_root, "import", result)
@@ -198,7 +200,7 @@ class RecordingPortabilityService:
             status="completed",
             run_count=int(result.get("run_count") or 0),
             ready_count=sum(
-                bool(item.get("request_path"))
+                item.get("status") == "ready_for_generation"
                 for item in ((
                     result.get("imported_runs")
                     if kind == "feature_import"

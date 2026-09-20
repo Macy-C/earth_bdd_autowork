@@ -123,7 +123,7 @@ def build_evidence_graph(
             "action-contact-sheet.png",
         ):
             path = projection_dir / name
-            if path.exists():
+            if path.is_file():
                 projected_artifacts.append((logical(name), path))
     artifacts = _artifact_manifest(
         take_dir,
@@ -146,7 +146,6 @@ def build_evidence_graph(
         for entry in locator_bundle.get("event_targets") or []
         if entry.get("event_id")
     }
-
     envelopes = [
         _action_envelope(
             action,
@@ -870,6 +869,9 @@ def _read_actions(take_dir):
         "actions_effective",
     )
     if path is None:
+        auto_path = Path(take_dir) / "actions.auto.json"
+        if auto_path.exists():
+            return list((_read_json(auto_path).get("actions") or []))
         raise ValueError(
             "Take 缺少有效 Projection 5.7 actions_effective"
         )
@@ -878,7 +880,7 @@ def _read_actions(take_dir):
 
 def _read_json(path):
     path = Path(path)
-    if not path.exists():
+    if not path.is_file():
         return {}
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -888,7 +890,7 @@ def _read_json(path):
 
 def _read_jsonl(path):
     path = Path(path)
-    if not path.exists():
+    if not path.is_file():
         return []
     values = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -903,7 +905,7 @@ def _read_jsonl(path):
 
 def _read_yaml(path):
     path = Path(path)
-    if not path.exists():
+    if not path.is_file():
         return {}
     try:
         return yaml.safe_load(path.read_text(encoding="utf-8")) or {}

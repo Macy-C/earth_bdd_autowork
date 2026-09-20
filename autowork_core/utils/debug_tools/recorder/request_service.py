@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from autowork_core.utils.debug_tools.recorder import request_repository
@@ -17,8 +19,6 @@ from autowork_core.utils.debug_tools.recorder.decision_pack import (
 from autowork_core.utils.debug_tools.recorder.generation_job_service import (
     admit_generation_job,
     inspect_generation_job,
-    retire_generation_job,
-    retry_generation_job,
     start_generation_job,
 )
 from autowork_core.utils.debug_tools.recorder.project_memory import (
@@ -34,6 +34,7 @@ from autowork_core.utils.debug_tools.recorder.workflow_service import (
 from autowork_core.utils.debug_tools.recorder.workflow_state import (
     load_workflow_state,
 )
+from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
 _SESSION_LOCKS = {}
@@ -107,7 +108,13 @@ class GenerationRequestService:
                 repair=repair,
             )
 
-    def generation_job(self, step_ids, *, profile_id="generation_first"):
+    def generation_job(
+            self,
+            step_ids,
+            *,
+            profile_id="generation_first",
+            force_new=False,
+        ):
         with self._lock:
             step_ids = request_repository.normalize_step_ids(step_ids)
             request = self.latest(step_ids)
@@ -118,17 +125,42 @@ class GenerationRequestService:
                 request,
             )
             self.last_auto_repair_audit = audit
+            if audit.get("status") in {"unresolved", "exhausted"}:
+                if _can_defer_auto_target_repair_to_copilot(request, audit):
+                    audit = {
+                        **audit,
+                        "status": "soft_unresolved",
+                        "deferred_to_copilot": True,
+                        "defer_reason": (
+                            "user_authority_ambiguity_pending"
+                            if audit.get("user_authority_ambiguity_pending")
+                            else "soft_target_repair_unresolved"
+                        ),
+                    }
+                    self.last_auto_repair_audit = audit
+                else:
+                    raise ValueError(
+                        _auto_target_repair_failure_message(audit)
+                    )
             path = request_repository.resolve_request_path(
                 self.session_dir,
                 request["request_path"],
             )
-            result = admit_generation_job(path, profile_id=profile_id)
+            result = admit_generation_job(
+                path,
+                profile_id=profile_id,
+                force_new=force_new,
+            )
             if result.get("status") == "rejected":
                 raise ValueError(
                     "生成前检查未通过: "
                     + ", ".join(result.get("errors") or [])
                 )
-            return {**result, "pre_admission_auto_repair": audit}
+            return {
+                **result,
+                "pre_admission_auto_repair": audit,
+                "force_new": bool(force_new),
+            }
 
     def _auto_repair_before_admission(self, step_ids, request):
         audit = {
@@ -159,12 +191,11 @@ class GenerationRequestService:
                 write=True,
                 return_brief=True,
             )
-            if brief is None or inspected.get("status") in {
-                "blocked",
-                "stale",
-            }:
+            if brief is None or inspected.get("status") == "stale":
                 audit["status"] = "skipped_unavailable_brief"
                 break
+            if _has_user_authority_ambiguity(brief):
+                audit["user_authority_ambiguity_pending"] = True
             issues = _auto_target_repair_issues(brief)
             if not issues:
                 audit["status"] = (
@@ -204,10 +235,18 @@ class GenerationRequestService:
                         "candidate_count": len(candidates),
                     })
                     continue
-                result = repair_service.apply_auto_fix(
-                    step_id=issue["step_id"],
-                    action_id=issue["action_id"],
-                )
+                try:
+                    result = repair_service.apply_auto_fix(
+                        step_id=issue["step_id"],
+                        action_id=issue["action_id"],
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError) as error:
+                    audit["skipped"].append({
+                        **issue,
+                        "reason": f"apply_failed: {type(error).__name__}: {error}",
+                        "candidate_count": len(candidates),
+                    })
+                    continue
                 receipt = result.get("receipt") or {}
                 audit["receipts"].append({
                     "step_id": issue["step_id"],
@@ -230,13 +269,118 @@ class GenerationRequestService:
             audit["status"] = "exhausted"
         return request, audit
 
-    def generation_command(self, step_ids, *, profile_id="generation_first"):
-        job = self.generation_job(step_ids, profile_id=profile_id)
+    def generation_command(
+            self,
+            step_ids,
+            *,
+            profile_id="generation_first",
+            command_sent_at=None,
+            force_new=False,
+        ):
+        return self._generation_command_payload(
+            step_ids,
+            profile_id=profile_id,
+            command_sent_at=command_sent_at,
+            force_new=force_new,
+        )["command"]
+
+    def _generation_command_payload(
+            self,
+            step_ids,
+            *,
+            profile_id="generation_first",
+            command_sent_at=None,
+            force_new=False,
+        ):
+        job = self.generation_job(
+            step_ids,
+            profile_id=profile_id,
+            force_new=force_new,
+        )
+        execution = job.get("job_execution") or {}
+        if execution.get("phase") == "ready":
+            job = start_generation_job(
+                job["job_path"],
+                expected_epoch=execution["epoch"],
+                command_sent_at=(
+                    command_sent_at
+                    or datetime.now().isoformat(timespec="milliseconds")
+                ),
+                timing_source="workbench_generation_command",
+            )
+        runtime_hint = _write_generation_runtime_hint(self.session_dir, job)
         path = _project_relative_job_path(
             self.session_dir,
             job["job_path"],
         )
-        return f'/recorder-generate "{path}"'
+        command = (runtime_hint.get("powershell_commands") or {}).get(
+            "advance_job"
+        )
+        command = command or f'"{path}"'
+        return {
+            "command": command,
+            "job": job,
+            "runtime_hint": runtime_hint,
+            "generation_workspace_projection": job.get(
+                "generation_workspace_projection"
+            ) or {},
+            "workspace_projection_summary": job.get(
+                "workspace_projection_summary"
+            ) or {},
+        }
+
+    def prepare_generation_handoff(
+            self,
+            step_ids,
+            *,
+            profile_id="generation_first",
+            command_sent_at=None,
+            force_new=False,
+        ):
+        with self._lock:
+            step_ids = request_repository.normalize_step_ids(step_ids)
+            request = self.latest(step_ids)
+            if request is None:
+                request = self.ensure_latest(step_ids, repair=True)
+            request_path = request_repository.resolve_request_path(
+                self.session_dir,
+                request["request_path"],
+            )
+            state = inspect_workflow(request_path, write=True)
+            question_count = 0
+            if state.get("status") == "needs_adjustment":
+                pack = load_decision_pack(
+                    self.session_dir,
+                    (state.get("decision") or {}).get("pack") or {},
+                    request,
+                    brief_fingerprint=(state.get("brief") or {}).get(
+                        "brief_fingerprint"
+                    ),
+                )
+                blocking = [
+                    question
+                    for question in (pack or {}).get("questions") or ()
+                    if question.get("blocking")
+                ]
+                question_count = len(blocking)
+            payload = self._generation_command_payload(
+                step_ids,
+                profile_id=profile_id,
+                command_sent_at=command_sent_at,
+                force_new=force_new,
+            )
+            return {
+                "status": "command_ready",
+                "request": request,
+                "question_count": question_count,
+                "command": payload["command"],
+                "generation_workspace_projection": payload[
+                    "generation_workspace_projection"
+                ],
+                "workspace_projection_summary": payload[
+                    "workspace_projection_summary"
+                ],
+            }
 
     def inspect_job(self, job_path):
         with self._lock:
@@ -247,22 +391,6 @@ class GenerationRequestService:
             return start_generation_job(
                 self._resolve_job_path(job_path),
                 expected_epoch=int(expected_epoch),
-            )
-
-    def retry_job(self, job_path, *, profile_id=None):
-        with self._lock:
-            return retry_generation_job(
-                self._resolve_job_path(job_path),
-                profile_id=profile_id,
-            )
-
-    def retire_job(self, job_path, *, reason, expected_epoch, claim_id=None):
-        with self._lock:
-            return retire_generation_job(
-                self._resolve_job_path(job_path),
-                reason=str(reason),
-                expected_epoch=int(expected_epoch),
-                claim_id=claim_id,
             )
 
     def answer_decision_batch(self, step_ids, selections):
@@ -320,6 +448,9 @@ class GenerationRequestService:
 
     def workflow_state(self, step_ids, *, refresh=False):
         request = self.latest(step_ids)
+        return self.workflow_state_for_request(request, refresh=refresh)
+
+    def workflow_state_for_request(self, request, *, refresh=False):
         if request is None:
             return {}
         if not refresh:
@@ -354,11 +485,22 @@ def _session_lock(session_dir):
 
 
 def _auto_target_repair_issues(brief):
+    observe_actions = {
+        (
+            str((ambiguity or {}).get("step_id") or ""),
+            str(action_id or ""),
+        )
+        for ambiguity in (brief or {}).get("ambiguities") or ()
+        for action_id in (ambiguity or {}).get("action_ids") or ()
+        if ((ambiguity or {}).get("facts") or {}).get("action_type") == "observe"
+    }
     grouped = {}
     for conflict in (brief or {}).get("conflicts") or ():
         code = str((conflict or {}).get("code") or "")
         step_id = str((conflict or {}).get("step_id") or "")
         action_id = str((conflict or {}).get("action_id") or "")
+        if (step_id, action_id) in observe_actions:
+            continue
         if (
             code not in _AUTO_TARGET_REPAIR_CODES
             or not step_id
@@ -366,6 +508,18 @@ def _auto_target_repair_issues(brief):
         ):
             continue
         grouped.setdefault((step_id, action_id), set()).add(code)
+    for ambiguity in (brief or {}).get("ambiguities") or ():
+        if str((ambiguity or {}).get("code") or "") != "weak_target_quality":
+            continue
+        step_id = str((ambiguity or {}).get("step_id") or "")
+        for action_id in (ambiguity or {}).get("action_ids") or ():
+            action_id = str(action_id or "")
+            if (step_id, action_id) in observe_actions:
+                continue
+            if step_id and action_id:
+                grouped.setdefault((step_id, action_id), set()).add(
+                    "weak_target_quality"
+                )
     return [
         {
             "step_id": step_id,
@@ -374,6 +528,61 @@ def _auto_target_repair_issues(brief):
         }
         for (step_id, action_id), codes in sorted(grouped.items())
     ]
+
+
+def _can_defer_auto_target_repair_to_copilot(request, audit):
+    readiness = (request or {}).get("readiness") or {}
+    if int(readiness.get("target_hard_blocker_count") or 0):
+        return False
+    if readiness.get("target_capture_generation_candidate") is False:
+        return False
+    if (audit or {}).get("user_authority_ambiguity_pending"):
+        return True
+    skipped = list((audit or {}).get("skipped") or ())
+    if not skipped:
+        return False
+    soft_codes = {
+        "partial_action_envelope",
+        "locator_not_uniquely_validated",
+        "weak_target_quality",
+    }
+    return all(
+        set(item.get("codes") or ()) <= soft_codes
+        for item in skipped
+    )
+
+
+def _has_user_authority_ambiguity(brief):
+    for ambiguity in (brief or {}).get("ambiguities") or ():
+        if not isinstance(ambiguity, dict):
+            continue
+        if ambiguity.get("routing") == "user_decision_required":
+            return True
+        for outcome in ambiguity.get("allowed_outcomes") or ():
+            if isinstance(outcome, dict) and outcome.get("authority") == "user":
+                return True
+    return False
+
+
+def _auto_target_repair_failure_message(audit):
+    skipped = list((audit or {}).get("skipped") or ())
+    total = len(skipped)
+    examples = []
+    for item in skipped[:3]:
+        codes = ",".join(item.get("codes") or ()) or "目标定位未验证"
+        reason = str(item.get("reason") or "无可用自动修复候选")
+        examples.append(
+            f"{item.get('step_id')}/{item.get('action_id')}({codes}: {reason})"
+        )
+    detail = "；".join(examples)
+    if total > len(examples):
+        detail += f"；另有 {total - len(examples)} 项"
+    return (
+        "生成前有录制目标需要 Copilot/系统核对，但没有可自动套用的冻结定位修复候选。"
+        "这不是 F9 说明丢失；通常是目标只能用 OCR/POS 或 locator 尚未验证。"
+        + (f" 影响: {detail}。" if detail else "")
+        + "请在审阅页查看对应问题，必要时只补录对应 Step。"
+    )
 
 
 def _project_relative_job_path(session_dir, job_path):
@@ -391,3 +600,70 @@ def _project_relative_job_path(session_dir, job_path):
         return path.relative_to(project_root.resolve()).as_posix()
     except ValueError as error:
         raise ValueError("Generation Job路径越出项目") from error
+
+
+def _write_generation_runtime_hint(session_dir, job):
+    session_dir = Path(session_dir).resolve()
+    relative_job_path = _project_relative_job_path(
+        session_dir,
+        job["job_path"],
+    )
+    project_root = next(
+        candidate.parent.parent
+        for candidate in (session_dir, *session_dir.parents)
+        if candidate.name.casefold() == "recording_sessions"
+        and candidate.parent.name.casefold() == "artifacts"
+    ).resolve()
+    executable = Path(sys.executable).resolve()
+    if not executable.is_file():
+        raise RuntimeError("当前Recorder Python解释器不可用")
+    quoted_python = _powershell_quote(str(executable))
+    quoted_job = _powershell_quote(relative_job_path)
+    module = "autowork_core.utils.debug_tools.recorder.generation_workflow"
+    hint = {
+            "runtime_hint_version": "1.2",
+            "project_root": str(project_root),
+            "python_executable": str(executable),
+            "job_id": str(job.get("job_id") or ""),
+            "job_path": relative_job_path,
+            "generation_workspace_projection": job.get(
+                "generation_workspace_projection"
+            ) or {},
+            "workspace_projection_summary": job.get(
+                "workspace_projection_summary"
+            ) or {},
+            "preferred_entrypoint": "advance_job",
+            "powershell_commands": {
+                "advance_job": (
+                    f"& {quoted_python} -B -m {module} advance-job {quoted_job}"
+                ),
+                "inspect_job": (
+                    f"& {quoted_python} -B -m {module} inspect-job {quoted_job}"
+                ),
+                "settle_job": (
+                    f"& {quoted_python} -B -m {module} settle-job {quoted_job}"
+                ),
+                "generate_job": (
+                    f"& {quoted_python} -B -m {module} generate-job {quoted_job}"
+                ),
+                "job_design_context": (
+                    f"& {quoted_python} -B -m {module} job-design-context {quoted_job}"
+                ),
+            },
+            "user_experience_timing": {
+                "scope": "workbench_click_to_terminal_result",
+                "command_errors_count_as_user_time": True,
+                "rule_file_reads_count_as_user_time": True,
+                "terminal_rendering_count_as_user_time": True,
+            },
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    write_json_atomic(
+        project_root / ".copilot" / "recorder-runtime" / "python.json",
+        hint,
+    )
+    return hint
+
+
+def _powershell_quote(value):
+    return '"' + str(value).replace('"', '`"') + '"'

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import ast
 import base64
+import copy
 import hashlib
 import json
 import os
 import secrets
+import subprocess
 import time
 import zipfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
+
+import yaml
 
 from config.paths import Paths
 from autowork_core.utils.debug_tools.recorder.annotations import (
@@ -30,11 +36,27 @@ from autowork_core.utils.debug_tools.recorder.generation_plan import (
 from autowork_core.utils.debug_tools.recorder.generation_contract import (
     generation_contract_lease_matches,
 )
+from autowork_core.utils.debug_tools.recorder.generation_capsule import (
+    generation_capsule_input_snapshot,
+    generation_capsule_source_files,
+    load_generation_capsule,
+)
+from autowork_core.utils.debug_tools.recorder.generation_workspace_projection import (
+    load_generation_workspace_projection,
+)
 from autowork_core.utils.debug_tools.recorder.generation_job import (
     generation_job_lease_is_valid,
+    load_generation_job,
 )
 from autowork_core.utils.debug_tools.recorder.generation_job_result import (
+    publish_pretransaction_job_failure,
     publish_static_job_outcome,
+)
+from autowork_core.utils.debug_tools.recorder.generation_diff import (
+    build_generation_diff,
+    build_generation_diff_summary,
+    generation_diff_pointer_is_valid,
+    load_generation_diff,
 )
 from autowork_core.utils.debug_tools.recorder.generation_pic_policy import (
     snapshot_pic_policy,
@@ -73,10 +95,16 @@ from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
     implementation_manifest_identity_is_valid,
     implementation_manifest_matches_transaction,
 )
+from autowork_core.utils.debug_tools.recorder.locator_reuse import (
+    locator_mapping_fingerprint,
+)
 from autowork_core.utils.debug_tools.recorder.implementation_materializer import (
-    materialize_implementation_scaffold,
-    rollback_implementation_scaffold,
-    system_materialization_matches,
+    build_implementation_scaffold_candidate,
+    implementation_scaffold_candidate_audit,
+    implementation_scaffold_candidate_matches,
+    implementation_scaffold_candidate_workspace_audit,
+    load_implementation_scaffold_candidate,
+    persist_implementation_scaffold_candidate,
 )
 from autowork_core.utils.debug_tools.recorder.implementation_validation_ledger import (
     append_validation_attempt,
@@ -112,6 +140,7 @@ from autowork_core.utils.debug_tools.recorder.workflow_state import (
 )
 from autowork_core.utils.debug_tools.recorder.workflow_service import inspect_workflow
 from autowork_core.utils.debug_tools.recorder.transaction_integrity import (
+    TRANSACTION_VERSION,
     completed_report_fingerprint,
     runtime_code_snapshot_fingerprint,
     transaction_result_fingerprint,
@@ -119,8 +148,8 @@ from autowork_core.utils.debug_tools.recorder.transaction_integrity import (
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-TRANSACTION_VERSION = "3.0"
-IMPLEMENTATION_RECEIPT_VERSION = "2.0"
+IMPLEMENTATION_RECEIPT_VERSION = "2.1"
+HOST_DELIVERY_OBSERVATION_VERSION = "1.0"
 STAGE_TIMING_LEDGER_VERSION = "1.0"
 STAGE_TIMING_ORDER = (
     "semantic_selection",
@@ -150,6 +179,8 @@ PROTECTED_ROOT_FILES = (
 )
 PROJECT_GUARD_EXCLUDED_ROOTS = (
     Path(".git"),
+    Path(".copilot/recorder-routing"),
+    Path(".copilot/recorder-runtime"),
     Path("artifacts"),
     Path("logs"),
     Path("framework_validation/output"),
@@ -235,7 +266,7 @@ def _prepare_generation_transaction_locked(
                     request.get("request_id"),
                 )
             else:
-                return _resume_generation_transaction(
+                resumed = _resume_generation_transaction(
                     session_dir,
                     request,
                     existing,
@@ -243,10 +274,20 @@ def _prepare_generation_transaction_locked(
                     report,
                     project_root=effective_project_root,
                 )
+                if resumed.get("status") != "transaction_superseded":
+                    return resumed
+                existing = resumed.get("workflow_state") or load_workflow_state(
+                    session_dir,
+                    request.get("request_id"),
+                )
+                generation_job_expected_epoch = (
+                    existing.get("job_execution") or {}
+                ).get("epoch")
     try:
         orphan = find_committed_generation_file_lease_report(
             effective_project_root,
             request.get("request_id"),
+            generation_job_lease=generation_job_lease,
         )
     except GenerationFileConflict as error:
         return _block_stale(
@@ -271,7 +312,7 @@ def _prepare_generation_transaction_locked(
                 request.get("request_id"),
             )
         else:
-            return _resume_generation_transaction(
+            resumed = _resume_generation_transaction(
                 session_dir,
                 request,
                 existing,
@@ -279,6 +320,35 @@ def _prepare_generation_transaction_locked(
                 report,
                 project_root=effective_project_root,
             )
+            if resumed.get("status") != "transaction_superseded":
+                return resumed
+            existing = resumed.get("workflow_state") or load_workflow_state(
+                session_dir,
+                request.get("request_id"),
+            )
+            generation_job_expected_epoch = (
+                existing.get("job_execution") or {}
+            ).get("epoch")
+    try:
+        if _release_stale_committed_generation_file_lease(
+                effective_project_root,
+                request,
+                generation_job_lease,
+        ):
+            existing = load_workflow_state(
+                session_dir,
+                request.get("request_id"),
+            )
+            generation_job_expected_epoch = (
+                existing.get("job_execution") or {}
+            ).get("epoch")
+    except GenerationFileConflict as error:
+        return _block_stale(
+            session_dir,
+            request,
+            existing,
+            str(error),
+        )
     state = inspect_workflow(
         request_path,
         write=True,
@@ -337,7 +407,30 @@ def _prepare_generation_transaction_locked(
             state,
             "; ".join(scope_binding_errors),
         )
-    generation_input_snapshot = _snapshot_generation_roots(project_root)
+    try:
+        generation_capsule = _generation_job_capsule(
+            session_dir,
+            state,
+            generation_job_lease,
+        )
+        generation_input_snapshot = generation_capsule_input_snapshot(
+            generation_capsule
+        )
+        generation_source_files = generation_capsule_source_files(
+            generation_capsule
+        )
+        generation_workspace_projection = _generation_job_workspace_projection(
+            session_dir,
+            state,
+            generation_job_lease,
+        )
+    except ValueError as error:
+        return _block_stale(
+            session_dir,
+            request,
+            state,
+            str(error),
+        )
     generation_symlinks = _snapshot_symlinks(generation_input_snapshot)
     if generation_symlinks:
         return _block_stale(
@@ -400,6 +493,7 @@ def _prepare_generation_transaction_locked(
         allowed_write_roots=ALLOWED_WRITE_ROOTS,
         protected_write_roots=PROTECTED_WRITE_ROOTS,
         protected_root_files=PROTECTED_ROOT_FILES,
+        generation_workspace_projection=generation_workspace_projection,
     )
     design_finished_at = _now_millis()
     design_duration_ms = _elapsed_ms(design_started_monotonic)
@@ -413,6 +507,78 @@ def _prepare_generation_transaction_locked(
                 or ["Implementation Manifest 无法从Plan派生"]
             ),
         )
+    git_state_audit = _normalize_git_allowed_change_state(
+        project_root,
+        implementation_manifest.get("allowed_changes") or (),
+    )
+    if git_state_audit["errors"]:
+        return _block_stale(
+            session_dir,
+            request,
+            state,
+            "; ".join(git_state_audit["errors"]),
+        )
+    if git_state_audit["normalized"]:
+        generation_symlinks = _snapshot_symlinks(generation_input_snapshot)
+        if generation_symlinks:
+            return _block_stale(
+                session_dir,
+                request,
+                state,
+                "generation roots包含符号链接: "
+                f"{generation_symlinks}",
+            )
+        resolution_errors, _resolution_warnings = (
+            validate_owner_resolution_snapshot(
+                project_root,
+                ((plan.get("plan") or {}).get("window_owners") or {}),
+                brief,
+                generation_input_snapshot=generation_input_snapshot,
+            )
+        )
+        if resolution_errors:
+            return _block_stale(
+                session_dir,
+                request,
+                state,
+                "; ".join(resolution_errors),
+            )
+        implementation_errors, _implementation_warnings = (
+            validate_implementation_resolution_snapshot(
+                project_root,
+                plan,
+                brief,
+                generation_input_snapshot=generation_input_snapshot,
+                reject_existing_create=True,
+            )
+        )
+        if implementation_errors:
+            return _block_stale(
+                session_dir,
+                request,
+                state,
+                "; ".join(implementation_errors),
+            )
+        implementation_manifest = build_implementation_manifest(
+            plan,
+            brief,
+            generation_input_snapshot,
+            request_id=request.get("request_id"),
+            allowed_write_roots=ALLOWED_WRITE_ROOTS,
+            protected_write_roots=PROTECTED_WRITE_ROOTS,
+            protected_root_files=PROTECTED_ROOT_FILES,
+            generation_workspace_projection=generation_workspace_projection,
+        )
+        if implementation_manifest.get("status") != "ready":
+            return _block_stale(
+                session_dir,
+                request,
+                state,
+                "; ".join(
+                    implementation_manifest.get("errors")
+                    or ["Implementation Manifest 无法从Plan派生"]
+                ),
+            )
     annotation_lease, annotation_errors = _annotation_lease(
         request,
         plan,
@@ -431,6 +597,37 @@ def _prepare_generation_transaction_locked(
         f"transaction-{now.strftime('%Y%m%d-%H%M%S-%f')}-"
         f"{stable_digest(request['request_id'], now.isoformat(), length=8)}"
     )
+    candidate, candidate_preflight = _preflight_implementation_candidate(
+        project_root,
+        implementation_manifest,
+        generation_input_snapshot,
+        generation_source_files,
+        transaction_id=transaction_id,
+        request=request,
+        plan=plan,
+        brief=brief,
+        generation_workspace_projection=generation_workspace_projection,
+    )
+    if candidate_preflight["status"] == "failed":
+        reason = next(iter(candidate_preflight["errors"]), None)
+        return publish_pretransaction_job_failure(
+            session_dir,
+            request["request_id"],
+            claim_id=generation_job_claim_id,
+            expected_epoch=generation_job_expected_epoch,
+            expected_phase="implementation",
+            category="system_candidate_invalid",
+            next_action="review_generation_failure",
+            implementation_owner={
+                "type": "system_candidate_preflight",
+                "status": "failed",
+                "reason": reason,
+                "errors": list(candidate_preflight["errors"]),
+                "candidate_fingerprint": candidate_preflight.get(
+                    "candidate_fingerprint"
+                ),
+            },
+        )
     output = (
         session_dir
         / "ai"
@@ -493,10 +690,21 @@ def _prepare_generation_transaction_locked(
             (session_dir / (state.get("plan") or {})["path"]).resolve()
         ),
         "implementation_summary": _implementation_summary(plan),
+        **(
+            {"generation_workspace_projection": copy.deepcopy(
+                (load_generation_job(
+                    session_dir,
+                    state.get("current_job") or {},
+                ) or {}).get("generation_workspace_projection") or {}
+            )}
+            if generation_workspace_projection
+            else {}
+        ),
         "implementation_manifest": implementation_manifest,
         "implementation_packet": build_implementation_packet(
             implementation_manifest
         ),
+        "candidate_preflight": candidate_preflight,
         "system_materialization": {"status": "pending"},
         "risk": state.get("risk") or {},
         "allowed_write_roots": [path.as_posix() for path in ALLOWED_WRITE_ROOTS],
@@ -516,6 +724,7 @@ def _prepare_generation_transaction_locked(
         "pic_usage_audit": {"status": "pending"},
         "plan_conformance_audit": {"status": "pending"},
         "code_manifest": None,
+        "implementation_diff": None,
         "lease_revision_audit": {"status": "pending"},
         "annotation_lease_audit": {"status": "pending"},
         "implementation_snapshot": [],
@@ -540,37 +749,45 @@ def _prepare_generation_transaction_locked(
             report["generation_file_lease"],
         )
         write_json_atomic(output, report)
-        report["generation_baseline"] = _capture_generation_baseline(
-            project_root,
-            implementation_manifest,
-            generation_input_snapshot,
-            lease=report["generation_file_lease"],
-            output_path=output.parent / "generation-baseline.json",
-            transaction_id=transaction_id,
-        )
+        try:
+            report["generation_baseline"] = _capture_generation_baseline(
+                project_root,
+                implementation_manifest,
+                generation_input_snapshot,
+                lease=report["generation_file_lease"],
+                output_path=output.parent / "generation-baseline.json",
+                transaction_id=transaction_id,
+            )
+        except ValueError as error:
+            release_generation_file_lease(
+                project_root,
+                report.get("generation_file_lease"),
+            )
+            output.unlink(missing_ok=True)
+            return _block_commit_rebase_required(
+                session_dir,
+                request,
+                state,
+                str(error),
+            )
         write_json_atomic(output, report)
-        report["system_materialization"] = materialize_implementation_scaffold(
-            project_root,
-            implementation_manifest,
-            generation_input_snapshot,
-            lease=report["generation_file_lease"],
-            journal_path=output.parent / "materialization-journal.json",
+        candidate_pointer = persist_implementation_scaffold_candidate(
+            session_dir,
+            transaction_id,
+            candidate,
+            output_dir=output.parent,
+        )
+        report["system_materialization"] = (
+            implementation_scaffold_candidate_audit(
+                candidate,
+                candidate_pointer,
+            )
         )
         write_json_atomic(output, report)
     except GenerationFileConflict as error:
         output.unlink(missing_ok=True)
         return _block_stale(session_dir, request, state, str(error))
     except Exception:
-        try:
-            rollback_implementation_scaffold(
-                project_root,
-                report.get("system_materialization") or {},
-                lease=report.get("generation_file_lease"),
-                manifest=implementation_manifest,
-                journal_path=output.parent / "materialization-journal.json",
-            )
-        except Exception:
-            pass
         release_generation_file_lease(
             project_root,
             report.get("generation_file_lease"),
@@ -595,16 +812,6 @@ def _prepare_generation_transaction_locked(
             transaction=pointer,
         )
     except Exception:
-        try:
-            rollback_implementation_scaffold(
-                project_root,
-                report.get("system_materialization") or {},
-                lease=report.get("generation_file_lease"),
-                manifest=implementation_manifest,
-                journal_path=output.parent / "materialization-journal.json",
-            )
-        except Exception:
-            pass
         release_generation_file_lease(
             project_root,
             report.get("generation_file_lease"),
@@ -632,6 +839,22 @@ def _resume_generation_transaction(
         errors.append("GenerationTransaction request_id 与当前Request不一致")
 
     if report.get("status") == "running":
+        protocol_reason = _running_transaction_protocol_refresh_reason(
+            session_dir,
+            request,
+            state,
+            report,
+        )
+        if not errors and protocol_reason:
+            return _supersede_running_generation_transaction(
+                session_dir,
+                request,
+                state,
+                report_path,
+                report,
+                project_root=project_root,
+                reason=protocol_reason,
+            )
         try:
             _validate_report_identity(report_path, report)
         except ValueError as error:
@@ -643,27 +866,43 @@ def _resume_generation_transaction(
                 report.get("generation_contract_lease"),
             )
         ):
-            aborted = _abort_generation_transaction_locked(
+            return _supersede_running_generation_transaction(
+                session_dir,
+                request,
+                state,
                 report_path,
-                reason=(
-                    "Generation Contract changed while the transaction was "
-                    "running; archive the draft and re-submit Design."
-                ),
+                report,
                 project_root=project_root,
-                generation_job_claim_id=(
-                    (state.get("job_execution") or {}).get("claim_id")
-                ),
-                generation_job_expected_epoch=(
-                    (state.get("job_execution") or {}).get("epoch")
-                ),
+                reason="generation_contract_changed",
             )
-            return {
-                **aborted,
-                "workflow_state": load_workflow_state(
-                    session_dir,
-                    request.get("request_id"),
-                ),
-            }
+        if not errors and _running_manifest_is_outdated(
+                session_dir,
+                request,
+                state,
+                report,
+        ):
+            return _supersede_running_generation_transaction(
+                session_dir,
+                request,
+                state,
+                report_path,
+                report,
+                project_root=project_root,
+                reason="implementation_manifest_outdated",
+            )
+        if not errors and _project_guard_changed_paths(
+                report.get("project_guard_snapshot") or {},
+                _snapshot_project_guard(project_root),
+        ):
+            return _supersede_running_generation_transaction(
+                session_dir,
+                request,
+                state,
+                report_path,
+                report,
+                project_root=project_root,
+                reason="project_guard_changed",
+            )
         try:
             report["generation_file_lease"] = commit_generation_file_lease(
                 project_root,
@@ -677,20 +916,24 @@ def _resume_generation_transaction(
             report.get("generation_file_lease"),
         ))
         try:
-            report["system_materialization"] = (
-                materialize_implementation_scaffold(
-                    project_root,
-                    report.get("implementation_manifest") or {},
-                    report.get("generation_input_snapshot") or {},
-                    lease=report.get("generation_file_lease"),
-                    journal_path=report_path.parent
-                    / "materialization-journal.json",
-                )
+            candidate = load_implementation_scaffold_candidate(
+                session_dir,
+                (report.get("system_materialization") or {}).get(
+                    "candidate"
+                ),
+                transaction_id=report.get("transaction_id"),
             )
-            write_json_atomic(report_path, report)
+            expected_audit = implementation_scaffold_candidate_audit(
+                candidate,
+                (report.get("system_materialization") or {}).get(
+                    "candidate"
+                ),
+            )
+            if report.get("system_materialization") != expected_audit:
+                raise ValueError("Implementation candidate audit mismatch")
         except (OSError, TypeError, ValueError) as error:
             errors.append(
-                "Implementation scaffold recovery failed: "
+                "Implementation candidate recovery failed: "
                 f"{type(error).__name__}: {error}"
             )
         if errors:
@@ -752,11 +995,187 @@ def _resume_generation_transaction(
     return report
 
 
+def _running_transaction_protocol_refresh_reason(
+        session_dir,
+        request,
+        state,
+        report,
+    ):
+    execution = state.get("job_execution") or {}
+    context_errors = _generation_job_context_errors(
+        state,
+        request,
+        report.get("generation_job_lease") or {},
+        claim_id=execution.get("claim_id"),
+        expected_epoch=execution.get("epoch"),
+        expected_phase="implementation",
+    )
+    if any((
+            context_errors,
+            report.get("generation_job_claim_id")
+            != execution.get("claim_id"),
+    )):
+        return None
+    if report.get("transaction_version") != TRANSACTION_VERSION:
+        return "transaction_protocol_changed"
+    if not generation_contract_lease_matches(
+            session_dir,
+            report.get("generation_contract_lease"),
+    ):
+        return "generation_contract_changed"
+    if not implementation_manifest_identity_is_valid(
+            report.get("implementation_manifest")
+    ):
+        return "implementation_manifest_protocol_changed"
+    return None
+
+
+def _running_manifest_is_outdated(session_dir, request, state, report):
+    brief, plan, artifact_errors = _load_frozen_artifacts(
+        session_dir,
+        request,
+        state,
+        report,
+    )
+    if artifact_errors:
+        return False
+    return not implementation_manifest_matches_transaction(
+        report.get("implementation_manifest"),
+        plan,
+        brief,
+        report.get("generation_input_snapshot") or {},
+        request_id=request.get("request_id"),
+        allowed_write_roots=ALLOWED_WRITE_ROOTS,
+        protected_write_roots=PROTECTED_WRITE_ROOTS,
+        protected_root_files=PROTECTED_ROOT_FILES,
+        generation_workspace_projection=_report_workspace_projection(
+            session_dir,
+            report,
+        ),
+    )
+
+
+def _supersede_running_generation_transaction(
+        session_dir,
+        request,
+        state,
+        report_path,
+        report,
+        *,
+        project_root,
+        reason,
+    ):
+    report = dict(report)
+    superseded_at = datetime.now().isoformat(timespec="seconds")
+    report["status"] = "superseded"
+    report["superseded_at"] = superseded_at
+    report["superseded_reason"] = str(reason or "outdated_transaction")
+    report["completion_fingerprint"] = None
+    report["result_fingerprint"] = transaction_result_fingerprint(report)
+    write_json_atomic(report_path, report)
+    release_generation_file_lease(
+        project_root,
+        report.get("generation_file_lease"),
+    )
+    execution = state.get("job_execution") or {}
+    job_lease = report.get("generation_job_lease") or {}
+    transition_generation_job(
+        session_dir,
+        request["request_id"],
+        job_id=job_lease.get("job_id"),
+        job_fingerprint=job_lease.get("job_fingerprint"),
+        claim_id=execution.get("claim_id"),
+        expected_epoch=execution.get("epoch"),
+        expected_phase="implementation",
+        phase="implementation",
+        next_action="prepare_generation_transaction",
+        clear_active_transaction=True,
+    )
+    return {
+        "transaction_version": TRANSACTION_VERSION,
+        "status": "transaction_superseded",
+        "request_id": request.get("request_id"),
+        "transaction_id": report.get("transaction_id"),
+        "superseded_reason": report["superseded_reason"],
+        "workflow_state": load_workflow_state(
+            session_dir,
+            request.get("request_id"),
+        ),
+        "errors": [],
+        "warnings": [],
+    }
+
+
+def _release_stale_committed_generation_file_lease(
+        project_root,
+        request,
+        generation_job_lease,
+    ):
+    orphan = find_committed_generation_file_lease_report(
+        project_root,
+        request.get("request_id"),
+    )
+    if orphan is None:
+        return False
+    report_path, report = orphan
+    if (report.get("generation_job_lease") or {}) == generation_job_lease:
+        return False
+    reason = _stale_committed_lease_release_reason(
+        report,
+        generation_job_lease,
+    )
+    if reason is None:
+        return False
+    _supersede_committed_generation_transaction_report(
+        project_root,
+        report_path,
+        report,
+        reason=reason,
+    )
+    return True
+
+
+def _stale_committed_lease_release_reason(report, generation_job_lease):
+    if report.get("status") != "running":
+        return None
+    if (
+            report.get("transaction_version") != TRANSACTION_VERSION
+            or not report.get("candidate_preflight")
+    ):
+        return "transaction_protocol_changed"
+    if (report.get("generation_job_lease") or {}) != generation_job_lease:
+        return "replaced_generation_job"
+    return None
+
+
+def _supersede_committed_generation_transaction_report(
+        project_root,
+        report_path,
+        report,
+        *,
+        reason,
+    ):
+    report = dict(report)
+    superseded_at = datetime.now().isoformat(timespec="seconds")
+    report["status"] = "superseded"
+    report["superseded_at"] = superseded_at
+    report["superseded_reason"] = str(reason or "outdated_transaction")
+    report["completion_fingerprint"] = None
+    report["result_fingerprint"] = transaction_result_fingerprint(report)
+    write_json_atomic(report_path, report)
+    release_generation_file_lease(
+        project_root,
+        report.get("generation_file_lease"),
+    )
+
+
 def _transaction_pointer(report, relative_path):
     return {
         "transaction_id": report.get("transaction_id"),
         "path": str(relative_path),
         "revision_seal": (
+
+
             (report.get("lease") or {}).get("revision") or {}
         ).get("seal"),
         "plan_fingerprint": (
@@ -781,6 +1200,8 @@ def _generation_job_context_errors(
         *,
         claim_id,
         expected_epoch,
+
+
         expected_phase,
     ):
     if not generation_job_lease_is_valid(lease):
@@ -790,6 +1211,8 @@ def _generation_job_context_errors(
     checks = {
         "workflow_version": state.get("workflow_state_version"),
         "request_id": lease.get("request_id") == request.get("request_id"),
+
+
         "job_id": lease.get("job_id") == pointer.get("job_id"),
         "job_fingerprint": lease.get("job_fingerprint")
         == pointer.get("job_fingerprint"),
@@ -804,6 +1227,523 @@ def _generation_job_context_errors(
         "status": state.get("status") == "running",
     }
     return [name for name, passed in checks.items() if not passed]
+
+
+def _generation_job_capsule(session_dir, state, lease):
+    pointer = state.get("current_job") or {}
+    job = load_generation_job(session_dir, pointer)
+    if job is None:
+        raise ValueError("Generation Job identity invalid")
+    if (job.get("generation_capsule") or {}).get(
+            "capsule_fingerprint"
+    ) != lease.get("generation_capsule_fingerprint"):
+        raise ValueError("Generation Job lease capsule mismatch")
+    return load_generation_capsule(
+        session_dir,
+        job.get("generation_capsule") or {},
+    )
+
+
+def _generation_job_workspace_projection(session_dir, state, lease):
+    pointer = state.get("current_job") or {}
+    job = load_generation_job(session_dir, pointer)
+    if job is None:
+        raise ValueError("Generation Job identity invalid")
+    if (job.get("generation_capsule") or {}).get(
+            "capsule_fingerprint"
+    ) != lease.get("generation_capsule_fingerprint"):
+        raise ValueError("Generation Job lease capsule mismatch")
+    projection_pointer = job.get("generation_workspace_projection") or {}
+    if not projection_pointer:
+        return None
+    projection = load_generation_workspace_projection(
+        session_dir,
+        projection_pointer,
+    )
+    if projection.get("generation_input_snapshot_fingerprint") != (
+            (job.get("generation_capsule") or {}).get(
+                "generation_input_snapshot_fingerprint"
+            )
+    ):
+        raise ValueError("Generation workspace projection与Capsule snapshot不一致")
+    return projection
+
+
+def _report_workspace_projection(session_dir, report):
+    pointer = (report or {}).get("generation_workspace_projection") or {}
+    if not pointer:
+        return None
+    return load_generation_workspace_projection(session_dir, pointer)
+
+
+def _generation_job_input_snapshot(session_dir, state, lease):
+    return generation_capsule_input_snapshot(
+        _generation_job_capsule(session_dir, state, lease)
+    )
+
+
+def _preflight_implementation_candidate(
+        project_root,
+        manifest,
+        generation_input_snapshot,
+        source_files,
+        *,
+        transaction_id,
+        request,
+        plan,
+        brief,
+        generation_workspace_projection=None,
+    ):
+    allowed = sorted(manifest.get("allowed_changes") or ())
+    ai_editable = sorted(manifest.get("ai_editable_changes") or ())
+    ai_candidate_files = _plan_implementation_candidate_files(
+        plan,
+        ai_editable,
+    )
+    if set(ai_candidate_files) != set(ai_editable):
+        candidate = build_implementation_scaffold_candidate(
+            project_root,
+            manifest,
+            generation_input_snapshot,
+            transaction_id=transaction_id,
+        )
+        return candidate, {
+            "candidate_preflight_version": "1.0",
+            "status": "not_applicable",
+            "reason": "candidate_bundle_missing_ai_content",
+            "candidate_fingerprint": candidate.get("candidate_fingerprint"),
+            "file_count": len(candidate.get("files") or ()),
+            "required_validations": [],
+            "validations": {},
+            "plan_conformance_audit": {
+                "status": "not_evaluated",
+                "checked_operations": 0,
+            },
+            "errors": [],
+        }
+    complete_candidate = allowed == sorted(
+        set(manifest.get("system_owned_changes") or ())
+        | set(ai_candidate_files)
+    )
+    errors = []
+    candidate = None
+    validations = {}
+    required_validations = []
+    plan_audit = {
+        "status": "not_evaluated",
+        "checked_operations": 0,
+    }
+    with TemporaryDirectory(prefix="bdd-autowork-candidate-preflight-") as value:
+        staging_root = Path(value).resolve()
+        try:
+            _materialize_candidate_preflight_workspace_slice(
+                staging_root,
+                project_root,
+                manifest,
+                generation_input_snapshot,
+                source_files,
+                generation_workspace_projection,
+            )
+            candidate = build_implementation_scaffold_candidate(
+                staging_root,
+                manifest,
+                generation_input_snapshot,
+                transaction_id=transaction_id,
+                candidate_files=[
+                    ai_candidate_files[path]
+                    for path in sorted(ai_candidate_files)
+                ],
+            )
+            _materialize_candidate_preflight_workspace_slice(
+                staging_root,
+                project_root,
+                manifest,
+                generation_input_snapshot,
+                [],
+                generation_workspace_projection,
+                candidate=candidate,
+            )
+            if not complete_candidate:
+                return candidate, {
+                    "candidate_preflight_version": "1.0",
+                    "status": "not_applicable",
+                    "reason": "candidate_bundle_is_not_complete",
+                    "candidate_fingerprint": candidate.get(
+                        "candidate_fingerprint"
+                    ),
+                    "file_count": len(candidate.get("files") or ()),
+                    "required_validations": [],
+                    "validations": {},
+                    "plan_conformance_audit": {
+                        "status": "not_evaluated",
+                        "checked_operations": 0,
+                    },
+                    "errors": [],
+                }
+            if sorted(candidate.get("system_owned_files") or ()) != allowed:
+                errors.append(
+                    "Implementation candidate files do not cover the complete "
+                    "allowed change scope"
+                )
+            _materialize_candidate_preflight_files(staging_root, candidate)
+            changed = list(candidate.get("system_owned_files") or ())
+            target = request.get("target") or {}
+            source_feature = (target.get("feature") or {}).get(
+                "source_relpath"
+            )
+            required_validations = _required_validations(changed)
+            if not source_feature:
+                required_validations = [
+                    name for name in required_validations
+                    if name != "step_scope"
+                ]
+            validations = run_generation_validations(
+                staging_root,
+                changed,
+                source_feature=source_feature,
+                plan_artifact=plan,
+                target_steps=target.get("steps") or [],
+                target_scenario=target.get("scenario") or {},
+            )
+            for name in required_validations:
+                result = validations.get(name) or {}
+                if result.get("status") != "passed":
+                    details = list(result.get("errors") or ())
+                    errors.append(
+                        f"Candidate preflight {name} failed"
+                        + (f": {'; '.join(details)}" if details else "")
+                    )
+            plan_errors, plan_audit = validate_plan_conformance(
+                staging_root,
+                changed,
+                plan,
+                request=request,
+                brief=brief,
+                generation_input_snapshot=generation_input_snapshot,
+            )
+            errors.extend(
+                f"Candidate preflight Plan-to-Code: {error}"
+                for error in plan_errors
+            )
+        except (OSError, TypeError, ValueError) as error:
+            errors.append(
+                "Candidate preflight could not be completed: "
+                f"{type(error).__name__}: {error}"
+            )
+    audit = {
+        "candidate_preflight_version": "1.0",
+        "status": "failed" if errors else "passed",
+        "candidate_fingerprint": (
+            (candidate or {}).get("candidate_fingerprint")
+        ),
+        "file_count": len((candidate or {}).get("files") or ()),
+        "required_validations": required_validations,
+        "validations": validations,
+        "plan_conformance_audit": plan_audit,
+        "errors": errors,
+    }
+    return candidate, audit
+
+
+def _plan_implementation_candidate_files(plan_artifact, ai_editable):
+    plan = (plan_artifact or {}).get("plan") or {}
+    files = {}
+    for item in plan.get("implementation_candidate_files") or ():
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        if path:
+            files[path] = dict(item)
+    return {
+        path: files[path]
+        for path in sorted(set(ai_editable or ()))
+        if path in files
+    }
+
+
+def _materialize_candidate_preflight_sources(staging_root, source_files):
+    for source in source_files or ():
+        if not isinstance(source, dict) or source.get("is_symlink") is not False:
+            raise ValueError("Candidate preflight source must be a regular file")
+        relative = _candidate_preflight_relative_path(source.get("path"))
+        encoding = source.get("content_encoding")
+        if encoding == "utf-8":
+            content = str(source.get("content") or "").encode("utf-8")
+        elif encoding == "base64":
+            content = base64.b64decode(
+                str(source.get("content_base64") or ""),
+                validate=True,
+            )
+        else:
+            raise ValueError(
+                f"Candidate preflight source encoding is invalid: {relative}"
+            )
+        if hashlib.sha256(content).hexdigest() != source.get("sha256"):
+            raise ValueError(
+                f"Candidate preflight source hash mismatch: {relative}"
+            )
+        path = staging_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def _materialize_candidate_preflight_workspace_slice(
+        staging_root,
+        project_root,
+        manifest,
+        generation_input_snapshot,
+        source_files,
+        generation_workspace_projection,
+        *,
+        candidate=None,
+    ):
+    _materialize_candidate_preflight_sources(staging_root, source_files)
+    projection_required = bool(
+        generation_workspace_projection
+        or (manifest.get("current_content_projection") or {})
+    )
+    if not projection_required:
+        return
+    if not isinstance(generation_workspace_projection, dict):
+        raise ValueError("Candidate preflight workspace projection missing")
+    _validate_preflight_workspace_projection(
+        manifest,
+        generation_input_snapshot,
+        generation_workspace_projection,
+    )
+    paths = _preflight_workspace_slice_paths(
+        manifest,
+        generation_input_snapshot,
+        generation_workspace_projection,
+        candidate=candidate,
+    )
+    _materialize_preflight_snapshot_paths(
+        staging_root,
+        project_root,
+        generation_input_snapshot,
+        paths,
+    )
+
+
+def _validate_preflight_workspace_projection(
+        manifest,
+        generation_input_snapshot,
+        generation_workspace_projection,
+    ):
+    expected = _fingerprint(generation_input_snapshot)
+    observed = generation_workspace_projection.get(
+        "generation_input_snapshot_fingerprint"
+    )
+    manifest_projection = manifest.get("current_content_projection") or {}
+    if observed != expected:
+        raise ValueError(
+            "Candidate preflight workspace projection与input snapshot不一致"
+        )
+    if manifest_projection and any((
+            manifest_projection.get("projection_fingerprint")
+            != generation_workspace_projection.get("projection_fingerprint"),
+            manifest_projection.get("generation_input_snapshot_fingerprint")
+            != observed,
+    )):
+        raise ValueError(
+            "Candidate preflight workspace projection与Manifest不一致"
+        )
+
+
+def _preflight_workspace_slice_paths(
+        manifest,
+        generation_input_snapshot,
+        generation_workspace_projection,
+        *,
+        candidate=None,
+    ):
+    snapshot_files = (generation_input_snapshot or {}).get("files") or {}
+    paths = set()
+    for value in manifest.get("read_only_reuse") or ():
+        paths.add(_candidate_preflight_relative_path(value).as_posix())
+    for record in manifest.get("files") or ():
+        if not isinstance(record, dict):
+            continue
+        path = _candidate_preflight_relative_path(record.get("path")).as_posix()
+        if record.get("strategy") == "reuse" or path in snapshot_files:
+            paths.add(path)
+    candidate_paths = {
+        _candidate_preflight_relative_path(item.get("path")).as_posix()
+        for item in (candidate or {}).get("files") or ()
+        if isinstance(item, dict) and item.get("path")
+    }
+    imported_paths = _candidate_local_import_paths(candidate)
+    paths.update(path for path in imported_paths if path in snapshot_files)
+    paths.update(_required_projection_package_markers(
+        generation_workspace_projection,
+        set(paths) | candidate_paths | imported_paths,
+    ))
+    paths.difference_update(candidate_paths)
+    return sorted(paths)
+
+
+def _required_projection_package_markers(
+        generation_workspace_projection,
+        relevant_paths,
+    ):
+    markers = (
+        (generation_workspace_projection.get("required_structure_files") or {})
+        .get("package_markers") or []
+    )
+    result = []
+    for marker in markers:
+        if not isinstance(marker, dict) or marker.get("status") != "present":
+            continue
+        path = _candidate_preflight_relative_path(marker.get("path")).as_posix()
+        parent = str(PurePosixPath(path).parent)
+        required_by = {
+            str(item).replace("\\", "/")
+            for item in marker.get("required_by") or []
+        }
+        if required_by & relevant_paths or any(
+                str(item).startswith(parent + "/")
+                for item in relevant_paths
+        ):
+            result.append(path)
+    return result
+
+
+def _candidate_local_import_paths(candidate):
+    result = set()
+    for item in (candidate or {}).get("files") or ():
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        if not path.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(str(item.get("content") or ""), path)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    result.update(_module_candidate_paths(alias.name))
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                result.update(_module_candidate_paths(node.module or ""))
+    return result
+
+
+def _module_candidate_paths(module):
+    module = str(module or "")
+    if not module.startswith("Bdd."):
+        return set()
+    path = module.replace(".", "/")
+    return {path + ".py", path + "/__init__.py"}
+
+
+def _materialize_preflight_snapshot_paths(
+        staging_root,
+        project_root,
+        generation_input_snapshot,
+        paths,
+    ):
+    snapshot_files = (generation_input_snapshot or {}).get("files") or {}
+    for relative in sorted(set(paths or [])):
+        baseline = snapshot_files.get(relative)
+        if not isinstance(baseline, dict):
+            raise ValueError(
+                "Candidate preflight workspace projection path missing from snapshot: "
+                f"{relative}"
+            )
+        if baseline.get("is_symlink") is True:
+            raise ValueError(
+                "Candidate preflight workspace projection path is symlink: "
+                f"{relative}"
+            )
+        expected_sha256 = baseline.get("sha256")
+        expected_size = baseline.get("size")
+        if not isinstance(expected_sha256, str) or not isinstance(expected_size, int):
+            raise ValueError(
+                "Candidate preflight workspace projection snapshot invalid: "
+                f"{relative}"
+            )
+        source_path = _generation_target_path(project_root, relative)
+        content = _preflight_workspace_slice_content(source_path, relative)
+        _verify_preflight_workspace_slice_content(
+            relative,
+            content,
+            expected_sha256,
+            expected_size,
+        )
+        staged_path = staging_root / _candidate_preflight_relative_path(relative)
+        if staged_path.exists() or staged_path.is_symlink():
+            staged_content = _preflight_workspace_slice_content(
+                staged_path,
+                relative,
+            )
+            _verify_preflight_workspace_slice_content(
+                relative,
+                staged_content,
+                expected_sha256,
+                expected_size,
+            )
+            continue
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_path.write_bytes(content)
+
+
+def _preflight_workspace_slice_content(path, relative):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(
+            "Candidate preflight workspace projection path changed type: "
+            f"{relative}"
+        )
+    if not path.is_file():
+        raise ValueError(
+            "Candidate preflight workspace projection path missing after freeze: "
+            f"{relative}"
+        )
+    return path.read_bytes()
+
+
+def _verify_preflight_workspace_slice_content(
+        relative,
+        content,
+        expected_sha256,
+        expected_size,
+    ):
+    if hashlib.sha256(content).hexdigest() != expected_sha256 or len(content) != expected_size:
+        raise ValueError(
+            "Candidate preflight workspace projection path drifted: "
+            f"{relative}"
+        )
+
+
+def _fingerprint(value):
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _materialize_candidate_preflight_files(staging_root, candidate):
+    for item in (candidate or {}).get("files") or ():
+        relative = _candidate_preflight_relative_path(item.get("path"))
+        content = str(item.get("content") or "").encode("utf-8")
+        if hashlib.sha256(content).hexdigest() != item.get("sha256"):
+            raise ValueError(
+                f"Candidate preflight file hash mismatch: {relative}"
+            )
+        path = staging_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def _candidate_preflight_relative_path(value):
+    path = Path(str(value or "").replace("\\", "/"))
+    if not str(value or "") or path.is_absolute() or ".." in path.parts:
+        raise ValueError("Candidate preflight path is invalid")
+    return path
 
 
 def _now_millis():
@@ -1013,6 +1953,7 @@ def _abort_generation_transaction_locked(
     generation_job_claim_id=None,
     generation_job_expected_epoch=None,
     allow_project_guard_drift=False,
+    allow_generation_root_drift=False,
     ):
     report_path = Path(report_path).resolve()
     session_dir = _session_dir_for_transaction_report_path(report_path)
@@ -1093,7 +2034,14 @@ def _abort_generation_transaction_locked(
         ) from error
     changed = set(_changed_snapshot_paths(
         report.get("generation_input_snapshot") or {},
-        _snapshot_generation_roots(root),
+        _snapshot_generation_roots(
+            root,
+            exact_files=(
+                (report.get("generation_input_snapshot") or {}).get(
+                    "exact_files"
+                ) or ()
+            ),
+        ),
     ))
     allowed = set(
         (report.get("implementation_manifest") or {}).get(
@@ -1101,13 +2049,14 @@ def _abort_generation_transaction_locked(
         ) or ()
     )
     unexpected = sorted(changed - allowed)
-    if unexpected:
+    if unexpected and not allow_generation_root_drift:
         raise ValueError(
             f"Abort found generation changes outside transaction: {unexpected}"
         )
-    project_guard_drifted = _snapshot_project_guard(root) != report.get(
-        "project_guard_snapshot"
-    )
+    project_guard_drifted = bool(_project_guard_changed_paths(
+        report.get("project_guard_snapshot") or {},
+        _snapshot_project_guard(root),
+    ))
     if project_guard_drifted and not allow_project_guard_drift:
         raise ValueError("Abort found project changes outside generation roots")
     requested_at = datetime.now().isoformat(timespec="seconds")
@@ -1128,6 +2077,11 @@ def _abort_generation_transaction_locked(
                 allow_project_guard_drift
             ),
             "project_guard_drift_detected": bool(project_guard_drifted),
+            "generation_root_drift_allowed": bool(
+                allow_generation_root_drift
+            ),
+            "generation_root_drift_detected": bool(unexpected),
+            "generation_root_drift_paths": unexpected,
         },
         "summary": reason,
     })
@@ -1183,7 +2137,14 @@ def _complete_aborted_generation_transaction(
     _load_generation_baseline(report_path, report)
     changed = set(_changed_snapshot_paths(
         report.get("generation_input_snapshot") or {},
-        _snapshot_generation_roots(project_root),
+        _snapshot_generation_roots(
+            project_root,
+            exact_files=(
+                (report.get("generation_input_snapshot") or {}).get(
+                    "exact_files"
+                ) or ()
+            ),
+        ),
     ))
     allowed = set(
         (report.get("implementation_manifest") or {}).get(
@@ -1191,16 +2152,20 @@ def _complete_aborted_generation_transaction(
         ) or ()
     )
     unexpected = sorted(changed - allowed)
-    if unexpected:
+    allow_generation_root_drift = bool(
+        (report.get("abort") or {}).get("generation_root_drift_allowed")
+    )
+    if unexpected and not allow_generation_root_drift:
         raise ValueError(
             f"Abort recovery found changes outside transaction: {unexpected}"
         )
     allow_project_guard_drift = bool(
         (report.get("abort") or {}).get("project_guard_drift_allowed")
     )
-    project_guard_drifted = _snapshot_project_guard(project_root) != report.get(
-        "project_guard_snapshot"
-    )
+    project_guard_drifted = bool(_project_guard_changed_paths(
+        report.get("project_guard_snapshot") or {},
+        _snapshot_project_guard(project_root),
+    ))
     if project_guard_drifted and not allow_project_guard_drift:
         raise ValueError("Abort recovery project guard mismatch")
     if report.get("status") == "aborting":
@@ -1215,40 +2180,27 @@ def _complete_aborted_generation_transaction(
             phase="draft_archived",
             draft_archive=archive,
         )
-        rollback_implementation_scaffold(
-            project_root,
-            report.get("system_materialization") or {},
-            lease=report.get("generation_file_lease"),
-            manifest=report.get("implementation_manifest") or {},
-            journal_path=report_path.parent / "materialization-journal.json",
-        )
         report = _write_abort_progress(
             report_path,
             report,
-            phase="system_materialization_rolled_back",
-            system_materialization_rolled_back=True,
+            phase="workspace_revert_delegated_to_host",
+            system_materialization_rolled_back=False,
         )
-        restored = _restore_generation_baseline(
-            project_root,
-            report,
-            report_path,
-        )
+        restored = []
         report = _write_abort_progress(
             report_path,
             report,
-            phase="generation_baseline_restored",
+            phase="workspace_revert_delegated_to_host",
             restored_files=restored,
         )
     _validate_aborted_implementation_archive(
         report_path.parent / "aborted-implementation.zip",
         report,
     )
-    if _snapshot_generation_roots(project_root) != report.get(
-            "generation_input_snapshot"):
-        raise ValueError("Abort recovery generation baseline mismatch")
-    project_guard_drifted = _snapshot_project_guard(project_root) != report.get(
-        "project_guard_snapshot"
-    )
+    project_guard_drifted = bool(_project_guard_changed_paths(
+        report.get("project_guard_snapshot") or {},
+        _snapshot_project_guard(project_root),
+    ))
     if project_guard_drifted and not allow_project_guard_drift:
         raise ValueError("Abort recovery project guard mismatch")
     lease = report.get("generation_file_lease")
@@ -1388,21 +2340,31 @@ def _finish_generation_transaction_locked(
         report.get("generation_file_lease"),
     ))
     materialization_errors = []
+    implementation_manifest = report.get("implementation_manifest") or {}
+    git_state_audit = _normalize_git_allowed_change_state(
+        project_root,
+        implementation_manifest.get("allowed_changes") or (),
+    )
+    scope_errors.extend(git_state_audit["errors"])
     system_materialization = report.get("system_materialization") or {}
-    if derive_changed_files:
-        if system_materialization.get("status") == "materialized":
-            if not system_materialization_matches(
-                    project_root,
-                    system_materialization,
-            ):
-                materialization_errors.append(
-                    "Implementation scaffold changed after system "
-                    "materialization"
-                )
-        else:
-            materialization_errors.append(
-                "Implementation scaffold was not materialized during prepare"
-            )
+    workspace_candidate_audit = {
+        "status": "not_prepared",
+        "matches": False,
+        "files": [],
+    }
+    if system_materialization.get("status") == "candidate_prepared":
+        workspace_candidate_audit = _implementation_candidate_workspace_audit(
+            report_path,
+            report,
+            project_root,
+        )
+        materialization_errors.extend(
+            _implementation_candidate_audit_errors(workspace_candidate_audit)
+        )
+    elif derive_changed_files:
+        materialization_errors.append(
+            "Implementation candidate was not prepared"
+        )
     changed, change_errors, change_audit = _actual_generation_changes(
         project_root,
         report.get("generation_input_snapshot") or {},
@@ -1413,7 +2375,6 @@ def _finish_generation_transaction_locked(
         ).get("system_owned_changes") or (),
     )
     reported = list(change_audit.get("reported") or ())
-    implementation_manifest = report.get("implementation_manifest") or {}
     manifest_allowed = set(
         implementation_manifest.get("allowed_changes") or ()
     )
@@ -1432,9 +2393,21 @@ def _finish_generation_transaction_locked(
             "生成事务修改了Implementation Manifest只读复用文件: "
             f"{read_only_changes}"
         )
+    git_state_audit = _normalize_git_allowed_change_state(
+        project_root,
+        manifest_allowed,
+    )
+    scope_errors.extend(git_state_audit["errors"])
+    scope_errors.extend(_protected_locator_key_errors(
+        project_root,
+        implementation_manifest.get("protected_locator_keys") or (),
+    ))
     change_audit["implementation_manifest"] = {
         "allowed_changes": sorted(manifest_allowed),
         "read_only_reuse": sorted(manifest_read_only),
+        "protected_locator_keys": list(
+            implementation_manifest.get("protected_locator_keys") or ()
+        ),
         "undeclared_changes": undeclared_changes,
         "read_only_changes": read_only_changes,
     }
@@ -1452,7 +2425,7 @@ def _finish_generation_transaction_locked(
         scope_errors.append("Generation transaction 缺少项目guard快照")
         guard_changes = []
     else:
-        guard_changes = _changed_snapshot_paths(
+        guard_changes = _project_guard_changed_paths(
             guard_baseline,
             _snapshot_project_guard(project_root),
         )
@@ -1491,6 +2464,10 @@ def _finish_generation_transaction_locked(
             allowed_write_roots=ALLOWED_WRITE_ROOTS,
             protected_write_roots=PROTECTED_WRITE_ROOTS,
             protected_root_files=PROTECTED_ROOT_FILES,
+            generation_workspace_projection=_report_workspace_projection(
+                session_dir,
+                report,
+            ),
         ):
         artifact_errors.append(
             "Implementation Manifest 身份无效或与冻结Plan/Brief不一致"
@@ -1587,16 +2564,6 @@ def _finish_generation_transaction_locked(
         request_id=request.get("request_id"),
         plan_fingerprint=plan.get("plan_fingerprint"),
     )
-    if (
-        system_materialization.get("status") == "materialized"
-        and not system_materialization_matches(
-            project_root,
-            system_materialization,
-        )
-    ):
-        artifact_errors.append(
-            "Implementation scaffold changed after system materialization"
-        )
     manifest_errors = list(code_manifest.get("errors") or ())
     if (
         code_manifest.get("status") != "passed"
@@ -1674,6 +2641,7 @@ def _finish_generation_transaction_locked(
             evidence_audit=evidence_audit,
             policy_audit=policy_audit,
             pic_usage_audit=pic_usage_audit,
+            workspace_candidate_audit=workspace_candidate_audit,
             errors=errors,
         )
         manifest = report.get("implementation_manifest") or {}
@@ -1700,6 +2668,9 @@ def _finish_generation_transaction_locked(
             "fingerprint": ledger.get("fingerprint"),
             "attempt_count": len(ledger.get("attempts") or ()),
             "latest_status": attempt.get("status"),
+            "retry_attention_required": (
+                _validation_retry_attention_required(ledger)
+            ),
         }
         report["stage_timing_ledger"] = _update_stage_timing(
             report,
@@ -1709,7 +2680,13 @@ def _finish_generation_transaction_locked(
             finished_at=_now_millis(),
             duration_ms=_elapsed_ms(validation_started_monotonic),
         )
+        report["host_delivery_observation"] = _host_delivery_observation(
+            project_root,
+            changed,
+            validation_started_at=validation_started_at,
+        )
         report["system_materialization"] = system_materialization
+        report["workspace_candidate_audit"] = workspace_candidate_audit
         write_json_atomic(report_path, report)
         validation_result["attempt"] = attempt
         return validation_result
@@ -1720,7 +2697,10 @@ def _finish_generation_transaction_locked(
     )
     completed_at = datetime.now()
     transaction_finished_at = completed_at.isoformat(timespec="milliseconds")
-    unresolved_issues = _plan_unresolved_issues(plan)
+    unresolved_issues = _generation_unresolved_issues(
+        plan,
+        report.get("implementation_manifest") or {},
+    )
     report.update({
         "status": status,
         "completed_at": completed_at.isoformat(timespec="seconds"),
@@ -1733,7 +2713,6 @@ def _finish_generation_transaction_locked(
         "changed_files": changed,
         "reported_changed_files": reported,
         "change_set_audit": change_audit,
-        "system_materialization": system_materialization,
         "validations": validations,
         "required_validations": required,
         "summary": str(summary or (plan.get("plan") or {}).get("summary") or ""),
@@ -1761,6 +2740,7 @@ def _finish_generation_transaction_locked(
         "plan_conformance_audit": plan_audit,
         "code_manifest": code_manifest,
         "evidence_audit": evidence_audit,
+        "workspace_candidate_audit": workspace_candidate_audit,
         "implementation_snapshot": snapshot_files(
             _implementation_snapshot_paths(
                 implementation_manifest,
@@ -1782,6 +2762,22 @@ def _finish_generation_transaction_locked(
         ],
         "errors": errors,
     })
+    report["host_delivery_observation"] = _host_delivery_observation(
+        project_root,
+        changed,
+        validation_started_at=validation_started_at,
+    )
+    report["git_diff_visibility"] = _git_diff_visibility_audit(
+        project_root,
+        report,
+        changed,
+    )
+    if report["git_diff_visibility"].get("status") in {"failed", "partial"}:
+        report["warnings"] = [
+            *(report.get("warnings") or []),
+            "Git diff visibility intent-to-add incomplete; generated files "
+            "remain valid but new-file diff display may require manual git add -N.",
+        ]
     report["stage_timing_ledger"] = _complete_transaction_timing(
         report,
         transaction_finished_at,
@@ -1855,6 +2851,15 @@ def _finalize_terminal_snapshot(report_path, report, project_root):
         report.pop("completion_fingerprint", None)
     report["implementation_receipt"] = _implementation_receipt(report)
     if report.get("status") in {"completed", "completed_no_changes"}:
+        report["implementation_diff"] = build_generation_diff(
+            project_root,
+            report_path,
+            report,
+        )
+        report["implementation_diff_summary"] = build_generation_diff_summary(
+            Path(report.get("session_dir") or report_path.parents[3]),
+            report["implementation_diff"],
+        )
         _record_memory(report_path, report)
         report["completion_fingerprint"] = completed_report_fingerprint(
             report
@@ -1867,6 +2872,16 @@ def _finalize_terminal_snapshot(report_path, report, project_root):
 def _implementation_receipt(report):
     manifest = report.get("implementation_manifest") or {}
     materialization = report.get("system_materialization") or {}
+    materialization_commit = report.get("system_materialization_commit") or {}
+    workspace_candidate_audit = report.get("workspace_candidate_audit") or {}
+    delivery_write_channel = (
+        "system_materializer"
+        if materialization_commit.get("status") == "materialized"
+        else "host_native_edit"
+        if workspace_candidate_audit.get("matches") is True
+        and report.get("changed_files")
+        else "none"
+    )
     value = {
         "implementation_receipt_version": IMPLEMENTATION_RECEIPT_VERSION,
         "owner": "generation_transaction",
@@ -1889,6 +2904,18 @@ def _implementation_receipt(report):
             manifest.get("system_owned_changes") or ()
         ),
         "materialization_status": materialization.get("status"),
+        "materialization_commit_status": materialization_commit.get(
+            "status"
+        ),
+        "materialization_commit": dict(materialization_commit),
+        "git_diff_visibility": dict(report.get("git_diff_visibility") or {}),
+        "delivery_write_channel": delivery_write_channel,
+        "workspace_candidate_audit_status": workspace_candidate_audit.get(
+            "status"
+        ),
+        "workspace_candidate_matches": workspace_candidate_audit.get(
+            "matches"
+        ) is True,
         "validation_ledger": dict(
             report.get("implementation_validation_ledger") or {}
         ),
@@ -1896,6 +2923,281 @@ def _implementation_receipt(report):
     }
     value["fingerprint"] = _receipt_fingerprint(value)
     return value
+
+
+def _git_diff_visibility_audit(project_root, report, changed_files):
+    audit = {
+        "git_diff_visibility_version": "1.0",
+        "status": "not_applicable",
+        "mode": "git_intent_to_add",
+        "files": [],
+        "skipped": [],
+        "errors": [],
+    }
+    changed = set(str(item).replace("\\", "/") for item in changed_files or ())
+    materialization_commit = report.get("system_materialization_commit") or {}
+    if materialization_commit.get("status") != "materialized":
+        audit["status"] = "no_materialization_commit"
+        return audit
+    written = set(
+        str(item).replace("\\", "/")
+        for item in materialization_commit.get("written_files") or ()
+    )
+    if not changed or not written:
+        audit["status"] = "no_new_files"
+        return audit
+    manifest = report.get("implementation_manifest") or {}
+    allowed = set(
+        str(item).replace("\\", "/")
+        for item in manifest.get("allowed_changes") or ()
+    )
+    journal_path = Path(str(materialization_commit.get("journal_path") or ""))
+    try:
+        journal = _read_json(journal_path)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        audit["status"] = "failed"
+        audit["errors"].append(
+            "materialization_journal_unavailable: "
+            f"{type(error).__name__}: {error}"
+        )
+        return audit
+    candidates = []
+    for item in journal.get("files") or ():
+        if not isinstance(item, dict):
+            continue
+        relative = str(item.get("path") or "").replace("\\", "/")
+        if not relative:
+            continue
+        if relative not in allowed:
+            audit["skipped"].append({"path": relative, "reason": "not_allowed"})
+            continue
+        if relative not in changed or relative not in written:
+            audit["skipped"].append({"path": relative, "reason": "not_written_change"})
+            continue
+        if item.get("original_sha256") is not None:
+            audit["skipped"].append({"path": relative, "reason": "tracked_or_existing_file"})
+            continue
+        if item.get("byte_exact"):
+            audit["skipped"].append({"path": relative, "reason": "byte_exact"})
+            continue
+        candidates.append(relative)
+    candidates = sorted(set(candidates))
+    if not candidates:
+        audit["status"] = "no_new_files"
+        return audit
+    project_root = Path(project_root).resolve()
+    git = ["git", "-C", str(project_root), "-c", "core.quotepath=false"]
+    try:
+        inside = subprocess.run(
+            [*git, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, ValueError) as error:
+        audit["status"] = "not_applicable"
+        audit["errors"].append(f"git_unavailable: {type(error).__name__}: {error}")
+        return audit
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        audit["status"] = "not_applicable"
+        return audit
+    untracked = _git_untracked_paths(git, candidates, audit)
+    if not untracked:
+        audit["status"] = "no_untracked_new_files"
+        return audit
+    applied = []
+    for chunk in _path_chunks(untracked):
+        result = subprocess.run(
+            [*git, "add", "-N", "--", *chunk],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            audit["errors"].append(
+                "git_add_intent_to_add_failed: "
+                + (result.stderr or result.stdout or "").strip()
+            )
+            continue
+        applied.extend(chunk)
+    applied = sorted(set(applied))
+    audit["files"] = applied
+    if not applied:
+        audit["status"] = "failed"
+        return audit
+    _verify_git_intent_to_add(git, applied, audit)
+    audit["status"] = "partial" if audit["errors"] else "applied"
+    return audit
+
+
+def _git_untracked_paths(git, paths, audit):
+    status = subprocess.run(
+        [*git, "status", "--porcelain=v1", "-uall", "--", *paths],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if status.returncode != 0:
+        audit["errors"].append(
+            "git_status_failed: " + (status.stderr or status.stdout or "").strip()
+        )
+        return []
+    path_set = set(paths)
+    untracked = []
+    seen = set()
+    for line in status.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        state = line[:2]
+        relative = line[3:].replace("\\", "/")
+        if " -> " in relative:
+            relative = relative.rsplit(" -> ", 1)[-1]
+        if relative not in path_set:
+            continue
+        seen.add(relative)
+        if state == "??":
+            untracked.append(relative)
+        else:
+            audit["skipped"].append({
+                "path": relative,
+                "reason": "not_untracked",
+                "git_status": state,
+            })
+    for relative in sorted(path_set - seen):
+        audit["skipped"].append({
+            "path": relative,
+            "reason": "not_reported_by_git_status",
+        })
+    return sorted(set(untracked))
+
+
+def _verify_git_intent_to_add(git, paths, audit):
+    worktree = subprocess.run(
+        [*git, "diff", "--name-status", "--", *paths],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if worktree.returncode not in {0, 1}:
+        audit["errors"].append(
+            "git_diff_visibility_check_failed: "
+            + (worktree.stderr or worktree.stdout or "").strip()
+        )
+        return
+    visible = set()
+    for line in worktree.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0] == "A":
+            visible.add(parts[-1].replace("\\", "/"))
+    missing = sorted(set(paths) - visible)
+    if missing:
+        audit["errors"].append(
+            "git_diff_visibility_missing_paths: " + ", ".join(missing)
+        )
+    cached = subprocess.run(
+        [*git, "diff", "--cached", "--name-only", "--", *paths],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if cached.returncode not in {0, 1}:
+        audit["errors"].append(
+            "git_cached_visibility_check_failed: "
+            + (cached.stderr or cached.stdout or "").strip()
+        )
+        return
+    staged = [line.strip() for line in cached.stdout.splitlines() if line.strip()]
+    if staged:
+        audit["errors"].append(
+            "git_intent_to_add_staged_content: " + ", ".join(staged)
+        )
+
+
+def _path_chunks(paths, size=100):
+    values = list(paths or [])
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
+
+
+def _host_delivery_observation(
+        project_root,
+        changed_files,
+        *,
+        validation_started_at,
+):
+    root = Path(project_root).resolve()
+    changed = [str(item) for item in changed_files or ()]
+    observed = []
+    missing = []
+    errors = []
+    for relative in changed:
+        try:
+            target = (root / relative).resolve()
+            target.relative_to(root)
+            if not target.is_file():
+                missing.append(relative)
+                continue
+            stat = target.stat()
+        except (OSError, ValueError) as error:
+            errors.append({"path": relative, "error": str(error)})
+            continue
+        observed.append({
+            "path": relative,
+            "mtime_epoch_ms": int(stat.st_mtime * 1000),
+            "mtime_at": _timestamp_iso(stat.st_mtime),
+        })
+    observed.sort(key=lambda item: item["mtime_epoch_ms"])
+    if not changed:
+        status = "not_required"
+    elif len(observed) == len(changed) and not errors:
+        status = "observed"
+    elif observed:
+        status = "partial"
+    else:
+        status = "not_observed"
+    first = observed[0] if observed else {}
+    last = observed[-1] if observed else {}
+    validation_started_epoch_ms = _datetime_epoch_ms(validation_started_at)
+    last_write_to_validation_start_ms = None
+    if validation_started_epoch_ms is not None and last:
+        last_write_to_validation_start_ms = max(
+            0,
+            validation_started_epoch_ms - int(last["mtime_epoch_ms"]),
+        )
+    return {
+        "host_delivery_observation_version": HOST_DELIVERY_OBSERVATION_VERSION,
+        "status": status,
+        "source": "filesystem_stat_after_validation",
+        "validation_started_at": validation_started_at,
+        "file_count": len(changed),
+        "observed_file_count": len(observed),
+        "missing_file_count": len(missing),
+        "first_target_path": first.get("path"),
+        "first_target_mtime_at": first.get("mtime_at"),
+        "last_target_path": last.get("path"),
+        "last_target_mtime_at": last.get("mtime_at"),
+        "target_write_spread_ms": (
+            int(last["mtime_epoch_ms"]) - int(first["mtime_epoch_ms"])
+            if first and last else None
+        ),
+        "last_write_to_validation_start_ms": last_write_to_validation_start_ms,
+        "missing_targets": missing[:20],
+        "errors": errors[:20],
+    }
+
+
+def _timestamp_iso(timestamp):
+    return datetime.fromtimestamp(timestamp).isoformat(timespec="milliseconds")
+
+
+def _datetime_epoch_ms(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return int(parsed.timestamp() * 1000)
 
 
 def _receipt_fingerprint(value):
@@ -1919,6 +3221,7 @@ def _implementation_validation_result(
         evidence_audit,
         policy_audit,
         pic_usage_audit,
+        workspace_candidate_audit,
         errors,
     ):
     issues = [_implementation_validation_issue(error) for error in errors]
@@ -1944,6 +3247,7 @@ def _implementation_validation_result(
         "evidence_audit": evidence_audit,
         "generation_policy_audit": policy_audit,
         "pic_usage_audit": pic_usage_audit,
+        "workspace_candidate_audit": workspace_candidate_audit,
         "issues": issues,
     }
 
@@ -1984,6 +3288,39 @@ def _implementation_validation_issue(error):
     }
 
 
+def _validation_retry_attention_required(ledger):
+    attempts = list((ledger or {}).get("attempts") or [])
+    for attempt in attempts[:-1]:
+        if attempt.get("status") == "valid":
+            continue
+        if not _expected_pre_apply_validation_attempt(attempt):
+            return True
+    return False
+
+
+def _expected_pre_apply_validation_attempt(attempt):
+    issues = [
+        issue for issue in attempt.get("issues") or []
+        if isinstance(issue, dict)
+    ]
+    return bool(issues) and all(
+        _expected_pre_apply_validation_issue(issue)
+        for issue in issues
+    )
+
+
+def _expected_pre_apply_validation_issue(issue):
+    message = str(issue.get("message") or "")
+    return any(marker in message for marker in (
+        "Implementation candidate file missing",
+        "behavior_file 不存在",
+        "Page Object 不存在",
+        "root locator 文件不存在",
+        "缺少 owned Page/View 的有序计划调用",
+        "生成代码缺少计划值",
+    ))
+
+
 def _fail_running_transaction_after_exception(
         report_path,
         report,
@@ -2000,7 +3337,10 @@ def _fail_running_transaction_after_exception(
     try:
         if report.get("status") != "running":
             try:
-                _validate_terminal_report_identity(report_path, report)
+                _validate_recoverable_terminal_report_identity(
+                    report_path,
+                    report,
+                )
                 with generation_file_lease_publish_guard(
                     root,
                     report.get("generation_file_lease"),
@@ -2229,6 +3569,23 @@ def _decision_trace(brief, plan):
                 uncertainties.append(operation["uncertainty"])
             if operation.get("reuse_reference"):
                 reuse_used.append(operation["reuse_reference"])
+        for relationship in step.get("action_relationships") or []:
+            source_action_id = str(
+                relationship.get("source_action_id") or ""
+            )
+            source = actions.get((str(step_id), source_action_id)) or {}
+            evidence_ids = list(dict.fromkeys(
+                source.get("evidence") or []
+            ))
+            used.extend(evidence_ids)
+            claims.append({
+                "claim_id": f"action-relationship-{len(claims) + 1:03d}",
+                "statement": (
+                    f"{relationship.get('kind')} {source_action_id} -> "
+                    f"{relationship.get('consumer_action_id') or ''}"
+                ).strip(),
+                "evidence_ids": evidence_ids,
+            })
         for action_id in step.get("ignored_action_ids") or []:
             action = actions.get((str(step_id), str(action_id))) or {}
             evidence_ids = list(action.get("evidence") or [])
@@ -2347,7 +3704,9 @@ def _memory_trace_audit(brief, plan):
         for item in digest.get("items") or []
         if item.get("memory_id")
     }
-    declared = (plan.get("plan") or {}).get("memory_trace") or {}
+    normalized_plan = plan.get("plan") or {}
+    trace_declared = "memory_trace" in normalized_plan
+    declared = normalized_plan.get("memory_trace") or {}
     applied = _memory_trace_entries(declared.get("applied"))
     dismissed = _memory_trace_entries(declared.get("dismissed"))
     declared_ids = {
@@ -2379,12 +3738,12 @@ def _memory_trace_audit(brief, plan):
     ]
     if unknown or overlap:
         status = "invalid"
-    elif applied or dismissed:
+    elif trace_declared:
         status = "passed"
     elif available:
-        status = "not_provided"
+        status = "invalid"
         warnings.append(
-            "Brief 含相关经验，但 Plan 未声明采用或拒绝"
+            "Brief 含相关经验，但 Plan 缺少memory_trace评估"
         )
     else:
         status = "not_available"
@@ -2415,6 +3774,48 @@ def _memory_trace_entries(values):
         result.append(item)
         seen.add(memory_id)
     return result
+
+
+def _protected_locator_key_errors(project_root, records):
+    project_root = Path(project_root).resolve()
+    errors = []
+    seen = set()
+    for record in records or ():
+        if not isinstance(record, dict):
+            errors.append("Implementation Manifest protected_locator_key无效")
+            continue
+        path_value = str(record.get("file") or "")
+        key = str(record.get("key") or "")
+        expected = str(record.get("locator_fingerprint") or "")
+        identity = (path_value, key)
+        if not path_value or not key or not expected or identity in seen:
+            errors.append("Implementation Manifest protected_locator_key无效")
+            continue
+        seen.add(identity)
+        path = _generation_target_path(project_root, path_value)
+        try:
+            value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeError, yaml.YAMLError) as error:
+            errors.append(
+                "无法验证复用Locator key: "
+                f"{path_value}:{key}: {type(error).__name__}"
+            )
+            continue
+        locator = value.get(key) if isinstance(value, dict) else None
+        if not isinstance(locator, dict):
+            errors.append(
+                f"复用Locator key缺失或无效: {path_value}:{key}"
+            )
+            continue
+        try:
+            actual = locator_mapping_fingerprint(locator)
+        except ValueError:
+            actual = ""
+        if actual != expected:
+            errors.append(
+                f"复用Locator key已被修改: {path_value}:{key}"
+            )
+    return errors
 
 
 def _validate_evidence_trace(session_dir, request, trace, changed_files):
@@ -2488,11 +3889,11 @@ def _normalize_changed_files(project_root, values):
     return list(dict.fromkeys(changed)), errors
 
 
-def _snapshot_generation_roots(project_root):
+def _snapshot_generation_roots(project_root, *, exact_files=()):
     return _snapshot_paths(
         project_root,
         ALLOWED_WRITE_ROOTS,
-        exact_files=(),
+        exact_files=tuple(Path(path) for path in exact_files or ()),
     )
 
 
@@ -2797,44 +4198,6 @@ def _validate_aborted_implementation_archive(archive_path, report):
     }
 
 
-def _restore_generation_baseline(project_root, report, report_path):
-    project_root = Path(project_root).resolve()
-    baseline = _load_generation_baseline(report_path, report)
-    restored = []
-    with generation_file_lease_write_guard(
-            project_root,
-            report.get("generation_file_lease"),
-    ):
-        for item in baseline["files"]:
-            relative = item["path"]
-            path = _generation_target_path(project_root, relative)
-            if item.get("exists") is True:
-                content = base64.b64decode(
-                    item["content_base64"].encode("ascii"),
-                    validate=True,
-                )
-                _atomic_write_bytes(path, content)
-            else:
-                if path.exists() and not path.is_file():
-                    raise ValueError(
-                        f"Abort target changed type: {relative}"
-                    )
-                path.unlink(missing_ok=True)
-            restored.append(relative)
-    return restored
-
-
-def _atomic_write_bytes(path, content):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    try:
-        temporary.write_bytes(content)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def snapshot_runtime_code(project_root):
     return _snapshot_generation_roots(project_root)
 
@@ -2858,6 +4221,72 @@ def _implementation_snapshot_paths(manifest, changed_files):
             if str(path)
         ),
     })
+
+
+def _implementation_candidate_matches(report_path, report, project_root):
+    return _implementation_candidate_workspace_audit(
+        report_path,
+        report,
+        project_root,
+    )["matches"]
+
+
+def _implementation_candidate_workspace_audit(
+        report_path,
+        report,
+        project_root,
+    ):
+    try:
+        candidate = load_implementation_scaffold_candidate(
+            _session_dir_for_transaction_report_path(report_path),
+            (report.get("system_materialization") or {}).get("candidate"),
+            transaction_id=report.get("transaction_id"),
+        )
+    except (OSError, TypeError, ValueError) as error:
+        return {
+            "status": "invalid_candidate",
+            "matches": False,
+            "files": [],
+            "error": f"{type(error).__name__}: {error}",
+        }
+    manifest = report.get("implementation_manifest") or {}
+    if any((
+        candidate.get("manifest_id")
+        != manifest.get("implementation_manifest_id"),
+        candidate.get("manifest_fingerprint")
+        != manifest.get("implementation_manifest_fingerprint"),
+    )):
+        return {
+            "status": "manifest_mismatch",
+            "matches": False,
+            "files": [],
+            "error": "Implementation candidate与Manifest不一致",
+        }
+    return implementation_scaffold_candidate_workspace_audit(
+        project_root,
+        candidate,
+    )
+
+
+def _implementation_candidate_audit_errors(audit):
+    errors = []
+    for item in audit.get("files") or ():
+        if item.get("status") == "matches":
+            continue
+        detail = (
+            f"expected_sha256={item.get('expected_sha256')}, "
+            f"actual_sha256={item.get('actual_sha256')}"
+        )
+        errors.append(
+            "Implementation candidate file "
+            f"{item.get('status')}: {item.get('path')} ({detail})"
+        )
+    if not errors and not audit.get("matches"):
+        errors.append(
+            "Implementation candidate audit failed: "
+            f"{audit.get('error') or audit.get('status')}"
+        )
+    return errors
 
 
 def transaction_code_snapshot_matches(report, project_root):
@@ -2920,6 +4349,29 @@ def _snapshot_project_guard(project_root):
             path.as_posix()
             for path in (*ALLOWED_WRITE_ROOTS, *PROJECT_GUARD_EXCLUDED_ROOTS)
         ],
+        "files": files,
+    }
+
+
+def _project_guard_changed_paths(before, after):
+    return _changed_snapshot_paths(
+        _filter_project_guard_snapshot(before),
+        _filter_project_guard_snapshot(after),
+    )
+
+
+def _filter_project_guard_snapshot(snapshot):
+    files = {}
+    for relative, record in (snapshot.get("files") or {}).items():
+        relative_path = Path(str(relative))
+        if any(
+            relative_path == root or root in relative_path.parents
+            for root in PROJECT_GUARD_EXCLUDED_ROOTS
+        ):
+            continue
+        files[str(relative).replace("\\", "/")] = record
+    return {
+        "snapshot_version": snapshot.get("snapshot_version"),
         "files": files,
     }
 
@@ -2988,7 +4440,10 @@ def _actual_generation_changes(
             "unreported": [],
             "falsely_reported": list(reported),
         }
-    current = _snapshot_generation_roots(project_root)
+    current = _snapshot_generation_roots(
+        project_root,
+        exact_files=baseline.get("exact_files") or (),
+    )
     symlinks = _snapshot_symlinks(current)
     if symlinks:
         errors.append(f"generation roots包含符号链接: {symlinks}")
@@ -3030,6 +4485,118 @@ def _changed_snapshot_paths(before, after):
         for path in set(before_files) | set(after_files)
         if before_files.get(path) != after_files.get(path)
     )
+
+
+def _git_allowed_change_state_errors(project_root, paths):
+    return _normalize_git_allowed_change_state(project_root, paths)["errors"]
+
+
+def _normalize_git_allowed_change_state(project_root, paths):
+    paths = sorted({str(path).replace("\\", "/") for path in paths or ()})
+    if not paths:
+        return {"status": "not_applicable", "normalized": [], "errors": []}
+    project_root = Path(project_root).resolve()
+    git = ["git", "-C", str(project_root), "-c", "core.quotepath=false"]
+    try:
+        inside = subprocess.run(
+            [*git, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, ValueError):
+        return {"status": "not_applicable", "normalized": [], "errors": []}
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return {"status": "not_applicable", "normalized": [], "errors": []}
+    tracked = set()
+    head = subprocess.run(
+        [*git, "ls-tree", "-r", "--name-only", "HEAD", "--", *paths],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if head.returncode == 0:
+        tracked = {line.strip() for line in head.stdout.splitlines() if line.strip()}
+    status = subprocess.run(
+        [*git, "status", "--porcelain=v1", "-uall", "--", *paths],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if status.returncode != 0:
+        return {
+            "status": "failed",
+            "normalized": [],
+            "errors": ["无法读取Git工作区状态，拒绝生成写入目标"],
+        }
+    errors = []
+    normalized = []
+    path_set = set(paths)
+    for line in status.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        state = line[:2]
+        relative = line[3:]
+        if " -> " in relative:
+            relative = relative.rsplit(" -> ", 1)[-1]
+        if relative not in path_set:
+            continue
+        index_state, worktree_state = state[0], state[1]
+        if state == "??":
+            continue
+        if index_state == "D" and relative in tracked:
+            error = _run_git_normalization(
+                git,
+                ["restore", "--staged", "--", relative],
+                relative,
+            )
+            if error:
+                errors.append(error)
+                continue
+            path = project_root / relative
+            if path.exists():
+                normalized.append({
+                    "path": relative,
+                    "action": "unstage_tracked_delete",
+                })
+            else:
+                normalized.append({
+                    "path": relative,
+                    "action": "unstage_user_deleted_tracked_file",
+                })
+        elif index_state != " ":
+            errors.append(
+                "生成目标存在Git暂存区变更，拒绝生成: "
+                f"{relative} status={state}"
+            )
+        elif worktree_state == "D" and relative in tracked:
+            normalized.append({
+                "path": relative,
+                "action": "accept_user_deleted_tracked_file",
+            })
+    return {
+        "status": "normalized" if normalized and not errors else (
+            "failed" if errors else "clean"
+        ),
+        "normalized": normalized,
+        "errors": errors,
+    }
+
+
+def _run_git_normalization(git, arguments, relative):
+    try:
+        result = subprocess.run(
+            [*git, *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, ValueError) as error:
+        return f"无法修复Git生成目标状态: {relative}: {type(error).__name__}"
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "").strip()
+        return f"无法修复Git生成目标状态: {relative}: {message}"
+    return None
 
 
 def _snapshot_file_record(path):
@@ -3131,6 +4698,32 @@ def _plan_unresolved_issues(plan_artifact):
     ]
 
 
+def _generation_unresolved_issues(plan_artifact, implementation_manifest):
+    result = []
+    seen = set()
+    for issue in [
+            *_plan_unresolved_issues(plan_artifact),
+            *(
+                dict(item)
+                for item in (implementation_manifest or {}).get(
+                    "unresolved_issues"
+                ) or ()
+                if isinstance(item, dict)
+            ),
+    ]:
+        identity = str(issue.get("issue_id") or "") or json.dumps(
+            issue,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(issue)
+    return result
+
+
 def _completion_status(
         changed,
         *,
@@ -3186,6 +4779,35 @@ def _validate_terminal_report_identity(report_path, report):
                 != declared_completion
         ):
             raise ValueError("GenerationTransaction 完成报告指纹无效")
+        pointer = report.get("implementation_diff")
+        if not generation_diff_pointer_is_valid(
+                pointer,
+                transaction_id=report.get("transaction_id"),
+        ):
+            raise ValueError("GenerationTransaction implementation diff无效")
+        load_generation_diff(
+            report.get("session_dir"),
+            pointer,
+            offset=0,
+            limit=1,
+        )
+
+
+def _validate_recoverable_terminal_report_identity(report_path, report):
+    if (report.get("terminal_snapshot_audit") or {}).get("status") != "pending":
+        _validate_terminal_report_identity(report_path, report)
+        return
+    _validate_report_static_identity(report_path, report)
+    if report.get("status") not in {"completed", "completed_no_changes"}:
+        raise ValueError("GenerationTransaction恢复终态无效")
+    if any((
+        report.get("implementation_diff") is not None,
+        transaction_result_fingerprint(report)
+        != report.get("result_fingerprint"),
+        completed_report_fingerprint(report)
+        != report.get("completion_fingerprint"),
+    )):
+        raise ValueError("GenerationTransaction恢复终态身份无效")
 
 
 def _validate_report_static_identity(report_path, report):
@@ -3198,6 +4820,7 @@ def _validate_report_static_identity(report_path, report):
         "project_root",
         "lease",
         "implementation_manifest",
+        "candidate_preflight",
         "generation_job_lease",
         "generation_job_claim_id",
     )
@@ -3294,6 +4917,15 @@ def _block_contract_changed(session_dir, request, state):
         state,
         "generation_contract_changed",
         ["Generation Contract在Job期间已变化"],
+    )
+
+
+def _block_commit_rebase_required(session_dir, request, state, reason):
+    return _job_block_result(
+        request,
+        state,
+        "commit_rebase_required",
+        [reason],
     )
 
 

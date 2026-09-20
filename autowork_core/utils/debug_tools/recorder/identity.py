@@ -36,6 +36,45 @@ def locator_candidate_id(locator, reason):
     return "locator-candidate-" + hashlib.sha256(payload).hexdigest()[:16]
 
 
+def assertion_candidate_key(candidate):
+    value = dict(candidate or {})
+    parameters = value.get("parameters")
+    payload = json.dumps(
+        {
+            "operation": str(value.get("operation") or ""),
+            "target": str(value.get("target") or ""),
+            "parameters": parameters if isinstance(parameters, dict) else {},
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "assertion-candidate-" + hashlib.sha256(payload).hexdigest()[:16]
+
+
+def operation_choice_key(choice):
+    value = dict(choice or {})
+    payload = json.dumps(
+        {
+            "step_id": str(value.get("step_id") or ""),
+            "action_id": str(value.get("action_id") or ""),
+            "action_type": str(value.get("action_type") or ""),
+            "target_fingerprint": str(value.get("target_fingerprint") or ""),
+            "control_type": str(value.get("control_type") or ""),
+            "operation": str(value.get("operation") or ""),
+            "category": str(value.get("category") or ""),
+            "status": str(value.get("status") or ""),
+            "basis": str(value.get("basis") or ""),
+            "requires_value_action": bool(value.get("requires_value_action")),
+            "value_source_status": str(value.get("value_source_status") or ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "operation-choice-" + hashlib.sha256(payload).hexdigest()[:16]
+
+
 def safe_segment(value, max_length=32, fallback="item"):
     text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", str(value or fallback))
     text = text.strip("_. ") or fallback

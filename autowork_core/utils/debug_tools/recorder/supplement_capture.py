@@ -94,6 +94,9 @@ class SupplementCaptureSession:
         self.tree_max_nodes = int(
             self.capture_config.get("tree_max_nodes", 1200)
         )
+        self.tree_capture_timeout_ms = _optional_positive_int(
+            self.capture_config.get("tree_capture_timeout_ms")
+        )
         self.monitor_index = max(1, int(
             monitor_index
             if monitor_index is not None
@@ -275,6 +278,7 @@ class SupplementCaptureSession:
                     "with_video": self.with_video,
                     "with_screenshots": self.with_screenshots,
                     "with_tree": self.with_tree,
+                    "tree_capture_timeout_ms": self.tree_capture_timeout_ms,
                     "monitor_index": self.monitor_index,
                     "capture_target_process_only": (
                         self.capture_target_process_only
@@ -382,6 +386,7 @@ class SupplementCaptureSession:
                 window_handle=handle,
                 max_depth=self.tree_max_depth,
                 max_nodes=self.tree_max_nodes,
+                timeout_ms=self.tree_capture_timeout_ms,
             )
         return {
             "schema_version": SCHEMA_VERSION,
@@ -536,6 +541,16 @@ def _public_window(window):
         "title": str(window.get("title") or ""),
         "class_name": str(window.get("class_name") or ""),
     }
+
+
+def _optional_positive_int(value):
+    if value in (None, ""):
+        return None
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
 
 
 def _replace_ids(value, event_ids):

@@ -31,6 +31,13 @@ from autowork_core.utils.debug_tools.recorder.annotations import (
 from autowork_core.utils.debug_tools.recorder.bundle_validator import validate_ai_bundle
 from autowork_core.utils.debug_tools.recorder.capability import mark_capabilities_stale
 from autowork_core.utils.debug_tools.recorder.capture_runtime import CaptureRuntime
+from autowork_core.utils.debug_tools.recorder.evidence_acquisition import (
+    build_acquisition_record,
+    write_acquisition_record,
+)
+from autowork_core.utils.debug_tools.recorder.evidence_compiler import (
+    compile_take_evidence,
+)
 from autowork_core.utils.debug_tools.recorder.input_capture import InputCaptureEngine
 from autowork_core.utils.debug_tools.recorder.identity import (
     compact_feature_directory_name,
@@ -99,6 +106,7 @@ class RecordingSessionConfig:
     monitor_index: int = 1
     tree_max_depth: int = 12
     tree_max_nodes: int = 1200
+    tree_capture_timeout_ms: int | None = None
     target_window_handle: int | None = None
     target_window_title: str | None = None
     target_window_handles: tuple[int, ...] = ()
@@ -877,6 +885,9 @@ class FeatureRecordingSession:
         timeline = TimelineStore(take_dir)
         timeline_state_path = timeline.state_path
         if not timeline_state_path.exists():
+            compile_take_evidence(take_dir)
+            timeline_state_path = timeline.state_path
+        if not timeline_state_path.exists():
             raise FileNotFoundError(f"timeline-state.json 不存在: {timeline_state_path}")
         timeline_state = json.loads(timeline_state_path.read_text(encoding="utf-8"))
         effective_actions = timeline.effective_actions()
@@ -1055,6 +1066,14 @@ class FeatureRecordingSession:
         return None
 
     @_session_locked
+    def next_recordable_step(self):
+        for status in ("pending", "skipped"):
+            for step in self.selected_steps:
+                if self.step_states[step.id]["status"] == status:
+                    return step
+        return None
+
+    @_session_locked
     def finalize(self):
         if self.is_closed:
             raise RuntimeError("会话已经关闭")
@@ -1230,6 +1249,20 @@ class FeatureRecordingSession:
                 after_tree,
                 tree_diff,
                 locator_bundle,
+            )
+            _record_tree_acquisition(
+                take.directory,
+                "ui/before-tree.json",
+                before_tree,
+                phase="before_step",
+                window_handle=before_tree.get("window_handle"),
+            )
+            _record_tree_acquisition(
+                take.directory,
+                "ui/after-tree.json",
+                after_tree,
+                phase="after_step",
+                window_handle=after_tree.get("window_handle"),
             )
             timeline_state = TimelineStore(take.directory).initialize(actions)
             relative_take = take.directory.relative_to(self.session_dir).as_posix()
@@ -1460,6 +1493,7 @@ class FeatureRecordingSession:
             window_handle=window_handle,
             max_depth=self.config.tree_max_depth,
             max_nodes=self.config.tree_max_nodes,
+            timeout_ms=self.config.tree_capture_timeout_ms,
         )
 
     def _capture_window_evidence_before(
@@ -1478,6 +1512,13 @@ class FeatureRecordingSession:
                 self.writer._write_json_path(
                     take_dir / directory / "before-tree.json",
                     before_tree,
+                )
+                _record_tree_acquisition(
+                    take_dir,
+                    directory / "before-tree.json",
+                    before_tree,
+                    phase="before_step",
+                    window_handle=handle,
                 )
             screenshot_path = (
                 Path("screenshots") / "before.png"
@@ -1633,6 +1674,13 @@ class FeatureRecordingSession:
                 active["take"].directory / evidence["before_tree"],
                 before_tree,
             )
+            _record_tree_acquisition(
+                active["take"].directory,
+                evidence["before_tree"],
+                before_tree,
+                phase="first_business_window",
+                window_handle=handle,
+            )
             if screenshot_temp is not None:
                 self._publish_temp_file(
                     screenshot_temp,
@@ -1698,6 +1746,13 @@ class FeatureRecordingSession:
             active["take"].directory / "ui" / "before-tree.json",
             evidence["before_tree_data"],
         )
+        _record_tree_acquisition(
+            active["take"].directory,
+            "ui/before-tree.json",
+            evidence["before_tree_data"],
+            phase="promoted_primary_window",
+            window_handle=handle,
+        )
         if screenshot_temp is not None:
             self._publish_temp_file(
                 screenshot_temp,
@@ -1738,6 +1793,13 @@ class FeatureRecordingSession:
                     take_dir / item["after_tree"],
                     after_tree,
                 )
+                _record_tree_acquisition(
+                    take_dir,
+                    item["after_tree"],
+                    after_tree,
+                    phase="after_step",
+                    window_handle=handle,
+                )
                 self.writer._write_json_path(
                     take_dir / item["tree_diff"],
                     tree_diff,
@@ -1775,6 +1837,13 @@ class FeatureRecordingSession:
                             take_dir / item["after_tree"],
                             after_tree,
                         )
+                        _record_tree_acquisition(
+                            take_dir,
+                            item["after_tree"],
+                            after_tree,
+                            phase="after_step",
+                            window_handle=handle,
+                        )
                         self.writer._write_json_path(
                             take_dir / item["tree_diff"],
                             tree_diff,
@@ -1807,6 +1876,8 @@ class FeatureRecordingSession:
             for key in (
                 "admission",
                 "process_relation",
+                "owner_handle",
+                "owner_chain",
                 "first_seen_ms",
                 "last_seen_ms",
                 "opened_during_take",
@@ -1815,6 +1886,14 @@ class FeatureRecordingSession:
                 "event_ids",
             ):
                 evidence[key] = deepcopy(lifecycle.get(key))
+            window = evidence.get("window") or {}
+            window["owner_handle"] = deepcopy(
+                lifecycle.get("owner_handle")
+            )
+            window["owner_chain"] = deepcopy(
+                lifecycle.get("owner_chain") or []
+            )
+            evidence["window"] = window
 
     def _capture_screenshot(self, destination, window_handle=None):
         if not self.config.with_screenshots:
@@ -2149,6 +2228,34 @@ def _empty_tree_snapshot(window_handle, reason):
         "disabled": False,
         "error": str(reason),
     }
+
+
+def _record_tree_acquisition(
+        take_dir,
+        relative_path,
+        tree,
+        *,
+        phase,
+        window_handle,
+):
+    if (tree or {}).get("disabled"):
+        return
+    status = "failed" if (tree or {}).get("error") else "captured"
+    try:
+        record = build_acquisition_record(
+            take_dir,
+            kind="tree_snapshot",
+            time_anchor={
+                "phase": phase,
+                "window_handle": window_handle,
+            },
+            status=status,
+            artifact=(relative_path if status == "captured" else None),
+            error=(tree or {}).get("error"),
+        )
+        write_acquisition_record(take_dir, record)
+    except Exception:
+        return
 
 
 def _step_plan_from_dict(value):

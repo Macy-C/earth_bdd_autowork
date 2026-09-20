@@ -1,5 +1,5 @@
 {
-  "ai_asset_pack_version": "1.10",
+  "ai_asset_pack_version": "1.19",
   "project_assets_root": "Bdd/ai",
   "context": [
     "context/project.md",
@@ -42,12 +42,28 @@
   },
   "discovery_adapters": [
     ".github/copilot-instructions.md",
-    ".github/prompts/recorder-generate.prompt.md",
+    ".github/skills/recorder-generate/SKILL.md",
+    ".github/agents/recorder-generation.agent.md",
     ".github/prompts/collaboration-review.prompt.md",
     ".github/prompts/collaboration-promote.prompt.md",
-    ".github/hooks/shadow-companion.json",
-    ".github/instructions/bdd-generation.instructions.md"
+    ".github/hooks/scripts/recorder-generation.ps1",
+    ".github/hooks/shadow-companion.json"
   ],
+  "recorder_host_control": {
+    "version": "1.9",
+    "skill": ".github/skills/recorder-generate/SKILL.md",
+    "agent": ".github/agents/recorder-generation.agent.md",
+    "hook_scope": "agent",
+    "windows_hook_wrapper": ".github/hooks/scripts/recorder-generation.ps1",
+    "trigger": "select Recorder Generation Agent and submit <job-path>",
+    "scope": "bound_generation_job",
+    "workspace_write_owner": "current_chat_native_edit",
+    "workflow_state_authoritative": true,
+    "baseline_role": "system_owned_when_proven_else_ai_seed",
+    "business_questions": "single_combined_batch_after_claim",
+    "task_bundle_role": "large_job_read_only_pages",
+    "mcp_required": false
+  },
   "collaboration_learning": {
     "review_schema": "context/collaboration-review.schema.json",
     "promotion_schema": "context/collaboration-promotion.schema.json",

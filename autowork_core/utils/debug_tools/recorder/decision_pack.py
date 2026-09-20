@@ -12,18 +12,38 @@ from autowork_core.utils.debug_tools.recorder.table_usage import (
     infer_table_usage,
     table_business_outcome_candidates,
 )
+from autowork_core.utils.debug_tools.recorder.value_authority import (
+    qualify_value_sources,
+    resolve_recorded_action_value,
+)
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-DECISION_PACK_VERSION = "5.8"
+DECISION_PACK_VERSION = "5.11"
 SUPPORTED_DECISION_PACK_VERSIONS = {DECISION_PACK_VERSION}
-ANSWER_VERSION = "5.1"
+ANSWER_VERSION = "5.3"
 SUPPORTED_ANSWER_VERSIONS = {ANSWER_VERSION}
+BUSINESS_FACT_PATCH_VERSION = "1.0"
 TECHNICAL_PATCH_KINDS = {
     "binding",
     "operation",
     "role",
     "table_usage",
+}
+BUSINESS_FACT_TYPES = {
+    "business_context",
+    "business_expectation",
+    "expected_value",
+    "value_authority",
+    "value_source",
+}
+BUSINESS_VALUE_SOURCE_KINDS = {
+    "data_table",
+    "examples",
+    "feature_literal",
+    "recorded_action",
+    "runtime",
+    "semantic_literal",
 }
 
 
@@ -51,8 +71,9 @@ def build_decision_pack(
             step_id,
             excluded_action_ids=covered_action_ids,
         ))
+    questions.extend(_value_authority_questions(request, brief))
     questions.extend(_table_usage_questions(request, brief))
-    questions.extend(_ambiguity_questions(brief))
+    questions.extend(_ambiguity_questions(request, brief))
     questions = _dedupe_questions(questions)
     questions = [
         _with_question_presentation(question, request, brief)
@@ -224,6 +245,19 @@ def validate_answers(pack, answers, *, request=None):
     for question_id, question in questions.items():
         if question.get("blocking") and question_id not in answer_map:
             errors.append(f"阻塞问题未回答: {question_id}")
+    errors.extend(_validate_additional_business_answers(
+        answers.get("additional_business_answers"),
+        request=request,
+    ))
+    errors.extend(_validate_freeform_business_answers(
+        answers.get("freeform_business_answers"),
+        request=request,
+    ))
+    errors.extend(_validate_business_fact_patch(
+        answers.get("business_fact_patch"),
+        answers.get("freeform_business_answers"),
+        request=request,
+    ))
     return errors, answer_map
 
 
@@ -235,6 +269,7 @@ def compile_answers_to_plan_patch(pack, answers, *, request=None):
     pic_authorizations = []
     ambiguity_resolutions = []
     decisions = []
+    business_facts = []
     for question_id, resolved in answer_map.items():
         question = resolved["question"]
         option = resolved["option"]
@@ -248,7 +283,7 @@ def compile_answers_to_plan_patch(pack, answers, *, request=None):
         kind = patch.get("kind")
         if kind in TECHNICAL_PATCH_KINDS:
             raise ValueError(
-                "Decision Pack 5.8不能修改技术实现字段: "
+                f"Decision Pack {DECISION_PACK_VERSION}不能修改技术实现字段: "
                 f"kind={kind}"
             )
         if kind == "table_business_outcome":
@@ -271,6 +306,12 @@ def compile_answers_to_plan_patch(pack, answers, *, request=None):
                     *step_patch["ignored_action_ids"],
                     *(resolution.get("action_ids") or []),
                 ])
+        elif kind == "business_fact":
+            fact = dict(patch.get("fact") or {})
+            fact["step_id"] = step_id
+            fact["source_answer_id"] = question_id
+            fact.setdefault("reason", "User selected a Decision option.")
+            business_facts.append(fact)
         decisions.append({
             "question_id": question_id,
             "step_id": step_id,
@@ -280,11 +321,46 @@ def compile_answers_to_plan_patch(pack, answers, *, request=None):
             "action_ids": question.get("action_ids") or [],
             "note": resolved["note"],
         })
+    for item in answers.get("additional_business_answers") or ():
+        normalized = _normalize_additional_business_answer(item)
+        decisions.append({
+            "question_id": "q-ai-business-" + _hash(normalized)[:16],
+            "step_id": normalized["step_id"],
+            "option_id": None,
+            "confidence": "user_declared",
+            "evidence_ids": [],
+            "action_ids": [],
+            "question": normalized["question"],
+            "note": normalized["answer"],
+            "source": "ai_discovered_business_question",
+        })
+    freeform_answers = [
+        _normalize_freeform_business_answer(item)
+        for item in answers.get("freeform_business_answers") or ()
+    ]
+    for normalized in freeform_answers:
+        decisions.append({
+            "question_id": normalized["answer_id"],
+            "step_id": normalized["step_id"],
+            "option_id": None,
+            "confidence": "user_declared",
+            "evidence_ids": [],
+            "action_ids": [],
+            "question": normalized["question"],
+            "note": normalized["answer"],
+            "source": "freeform_business_answer",
+        })
+    business_facts.extend(_business_fact_patch_facts(
+        answers.get("business_fact_patch"),
+        freeform_answers,
+        request=request,
+    ))
     return {
         "steps": steps,
         "ambiguity_resolutions": ambiguity_resolutions,
         "pic_authorizations": pic_authorizations,
         "decision_trace": decisions,
+        "business_facts": business_facts,
         "uncertainties": [
             question["question_id"]
             for question in pack.get("questions") or ()
@@ -306,6 +382,19 @@ def persist_answers(session_dir, request, pack, answers):
         "pack_fingerprint": pack.get("pack_fingerprint"),
         "revision_seal": pack.get("revision_seal"),
         "answers": answers.get("answers") or [],
+        "additional_business_answers": [
+            _normalize_additional_business_answer(item)
+            for item in answers.get("additional_business_answers") or ()
+        ],
+        "freeform_business_answers": [
+            _normalize_freeform_business_answer(item)
+            for item in answers.get("freeform_business_answers") or ()
+        ],
+        "business_fact_patch": _normalize_business_fact_patch(
+            answers.get("business_fact_patch"),
+            answers.get("freeform_business_answers"),
+            request=request,
+        ),
     })
     output = _decision_dir(session_dir, request.get("request_id")) / (
         f"answers-{answer_fingerprint[:16]}.json"
@@ -390,7 +479,243 @@ def _ambiguity_ai_action_coverage(brief):
     return coverage
 
 
-def _ambiguity_questions(brief):
+def _value_authority_questions(request, brief):
+    target_steps = {
+        str(step.get("id") or ""): step
+        for step in (request.get("target") or {}).get("steps") or ()
+        if isinstance(step, dict) and step.get("id")
+    }
+    if not target_steps:
+        target_steps = {
+            str(step.get("id") or ""): step
+            for step in (brief.get("target") or {}).get("steps") or ()
+            if isinstance(step, dict) and step.get("id")
+        }
+    questions = []
+    for action in brief.get("actions") or ():
+        if not isinstance(action, dict) or action.get("role") == "noise":
+            continue
+        step_id = str(action.get("step_id") or "")
+        action_id = str(action.get("id") or "")
+        if not step_id or not action_id or step_id not in target_steps:
+            continue
+        command = (action.get("canonical_action") or {}).get("command") or {}
+        command_kind = str(command.get("kind") or action.get("type") or "")
+        if command_kind not in {"keyboard", "input_text"}:
+            continue
+        if command_kind == "keyboard" and command.get("text_operation") not in {
+            "append",
+            "input",
+            "set",
+        }:
+            continue
+        if command_kind == "keyboard" and any(
+                str(event.get("name") or "").casefold() in {
+                    "back",
+                    "backspace",
+                    "delete",
+                }
+                for event in command.get("key_events") or ()
+                if isinstance(event, dict)
+        ):
+            continue
+        declared_literal = _decision_declared_literal(
+            str(target_steps[step_id].get("text") or "")
+        )
+        if declared_literal is None:
+            continue
+        recorded_sources = _recorded_value_sources_for_decision(
+            brief,
+            step_id,
+            action_id,
+        )
+        if not recorded_sources:
+            continue
+        value_sources = [
+            {
+                "source": {
+                    "kind": "feature_literal",
+                    "reference": "step_text",
+                },
+                "operation": "input_text",
+                "value": declared_literal,
+                "basis": "unique_frozen_feature_literal",
+            },
+            *recorded_sources,
+        ]
+        distinct_values = {
+            str(source.get("value"))
+            for source in value_sources
+            if source.get("value") is not None
+        }
+        if len(distinct_values) < 2:
+            continue
+        options = []
+        for source in value_sources:
+            source_ref = source.get("source") or {}
+            source_kind = str(source_ref.get("kind") or "")
+            value = source.get("value")
+            if value is None:
+                continue
+            if source_kind == "feature_literal":
+                option_id = "use_feature_literal_" + str(
+                    source_ref.get("reference") or "step_text"
+                )
+                label = f"使用 Step 文本中的 {value}"
+            elif source_kind == "recorded_action":
+                option_id = "use_recorded_action_" + str(
+                    source_ref.get("action_id") or action_id
+                )
+                label = f"使用录制输入的 {value}"
+            else:
+                continue
+            fact = {
+                "fact_type": "value_authority",
+                "fact_value": value,
+                "applies_to": {
+                    "scope": "action_value",
+                    "action_id": action_id,
+                },
+                "source": source_ref,
+            }
+            option = {
+                "option_id": option_id,
+                "label": label,
+                "confidence": 1.0,
+                "business_fact": fact,
+                "plan_patch": {
+                    "kind": "business_fact",
+                    "fact": fact,
+                },
+            }
+            if option not in options:
+                options.append(option)
+        if len(options) < 2:
+            continue
+        questions.append({
+            "question_id": _question_id("value_authority", step_id, action_id),
+            "step_id": step_id,
+            "type": "value_authority",
+            "title": "确认输入业务值",
+            "prompt": "请选择生成时应使用哪个业务值。",
+            "blocking": True,
+            "action_ids": [action_id],
+            "evidence_ids": list(action.get("evidence") or []),
+            **_question_screenshots(request, target_steps.get(step_id), action_id),
+            "answer_format": "single_choice_or_freeform",
+            "allow_freeform": True,
+            "facts": {
+                "step_text": str(target_steps[step_id].get("text") or ""),
+                "available_value_sources": value_sources,
+            },
+            "options": options,
+            "verification_rule": "value_authority_matches_business_truth",
+        })
+    return questions
+
+
+def _question_screenshots(request, step, action_id):
+    artifacts = (step or {}).get("artifacts") or {}
+    take = str(artifacts.get("take") or "")
+    action_media_path = artifacts.get("action_media")
+    if not take or not action_media_path:
+        return {}
+    session_dir = _request_session_dir(request)
+    if session_dir is None:
+        return {}
+    try:
+        take_dir = _resolve_session_path(session_dir, take)
+        action_media = _read_json(_resolve_session_path(
+            session_dir,
+            action_media_path,
+        ))
+    except (OSError, ValueError):
+        return {}
+    action = next((
+        item for item in action_media.get("actions") or []
+        if isinstance(item, dict)
+        and str(item.get("action_id") or "") == str(action_id or "")
+    ), None)
+    if not action:
+        return {}
+    screenshots = {}
+    for role in ("before", "after"):
+        frame = action.get(role) or {}
+        frame_path = str(frame.get("path") or "").strip()
+        if frame_path:
+            try:
+                path = (take_dir / frame_path).resolve()
+                path.relative_to(take_dir)
+                path.relative_to(session_dir)
+            except ValueError:
+                continue
+            screenshots[role] = str(path)
+    return {"screenshots": screenshots} if screenshots else {}
+
+
+def _request_session_dir(request):
+    value = (request.get("session") or {}).get("absolute_path")
+    if not value:
+        return None
+    return Path(value).resolve()
+
+
+def _resolve_session_path(session_dir, value):
+    path = (session_dir / str(value)).resolve()
+    path.relative_to(session_dir)
+    return path
+
+
+def _recorded_value_sources_for_decision(brief, step_id, action_id):
+    sources = []
+    for operation in ("input_text", "send_text_keys"):
+        qualification = qualify_value_sources(brief, step_id, operation)
+        for item in qualification.get("sources") or ():
+            if item.get("status") != "available":
+                continue
+            shape = dict(item.get("shape") or {})
+            if str(shape.get("kind") or "") != "recorded_action":
+                continue
+            if str(shape.get("action_id") or "") != str(action_id):
+                continue
+            try:
+                value = resolve_recorded_action_value(
+                    brief,
+                    step_id,
+                    action_id,
+                    operation,
+                )
+            except ValueError:
+                continue
+            source = {"kind": "recorded_action", "action_id": str(action_id)}
+            candidate = {
+                "source": source,
+                "operation": operation,
+                "value": value,
+                "basis": str(item.get("basis") or ""),
+            }
+            if candidate not in sources:
+                sources.append(candidate)
+    return sources
+
+
+def _decision_declared_literal(step_text):
+    quoted = [
+        match.group(2).strip()
+        for match in re.finditer(r"(['\"])(.+?)\1", str(step_text or ""))
+        if match.group(2).strip()
+    ]
+    if len(quoted) == 1:
+        return quoted[0]
+    numeric = re.findall(
+        r"(?<![0-9A-Za-z_])[-+]?\d+(?:\.\d+)?(?![0-9A-Za-z_])",
+        str(step_text or ""),
+    )
+    return numeric[0] if len(numeric) == 1 else None
+
+
+def _ambiguity_questions(request, brief):
+    target_steps = _target_steps_by_id(request, brief)
     questions = []
     for ambiguity in brief.get("ambiguities") or ():
         user_outcomes = [
@@ -402,6 +727,10 @@ def _ambiguity_questions(brief):
             continue
         ambiguity_id = str(ambiguity.get("ambiguity_id") or "")
         step_id = str(ambiguity.get("step_id") or "")
+        action_ids = [
+            str(action_id) for action_id in ambiguity.get("action_ids") or []
+            if action_id
+        ]
         code = str(ambiguity.get("code") or "")
         question_id = _question_id(
             "ambiguity",
@@ -454,8 +783,13 @@ def _ambiguity_questions(brief):
             "blocking": True,
             "ambiguity_id": ambiguity_id,
             "facts": dict(ambiguity.get("facts") or {}),
-            "action_ids": list(ambiguity.get("action_ids") or []),
+            "action_ids": action_ids,
             "evidence_ids": list(ambiguity.get("evidence_ids") or []),
+            **_question_screenshots(
+                request,
+                target_steps.get(step_id),
+                action_ids[0] if action_ids else None,
+            ),
             "answer_format": "single_choice",
             "options": options,
             "verification_rule": "frozen_ambiguity_user_outcome",
@@ -463,10 +797,24 @@ def _ambiguity_questions(brief):
     return questions
 
 
+def _target_steps_by_id(request, brief):
+    result = {
+        str(step.get("id") or ""): step
+        for step in (request.get("target") or {}).get("steps") or ()
+        if isinstance(step, dict) and step.get("id")
+    }
+    if result:
+        return result
+    return {
+        str(step.get("id") or ""): step
+        for step in (brief.get("target") or {}).get("steps") or ()
+        if isinstance(step, dict) and step.get("id")
+    }
+
+
 def _ambiguity_title(code):
     return {
         "pause_state_changed": "确认暂停期间变化的业务归属",
-        "unsupported_scroll": "确认滚动动作是否属于当前 Step",
         "specification_business_conflict": "确认冲突业务规格的权威来源",
         "step_context_business_conflict": "确认Step说明与Feature的权威来源",
         "assertion_business_expectation_required": "确认当前结果是否就是业务期望",
@@ -480,8 +828,6 @@ def _ambiguity_outcome_label(code, outcome):
         ("pause_state_changed", "unrelated_to_step"): "与当前 Step 无关",
         ("pause_state_changed", "step_precondition"): "属于当前 Step 的前置状态",
         ("pause_state_changed", "belongs_to_step"): "属于当前 Step，需要补录动作",
-        ("unsupported_scroll", "belongs_to_step"): "滚动属于当前 Step",
-        ("unsupported_scroll", "ignore_as_noise"): "滚动不属于当前 Step，按噪声忽略",
         (
             "specification_business_conflict",
             "follow_feature_requirement",
@@ -621,6 +967,8 @@ def _pic_questions(pack, step_id):
                 candidate.get("cross_frame_validation") or {}
             ).get("cross_frame_unique_match") is True
         )
+        if not authorized:
+            continue
         options = [{
             "option_id": "deny-pic",
             "label": "不授权 PIC，使用或修复其他定位方式",
@@ -632,18 +980,17 @@ def _pic_questions(pack, step_id):
                 "candidate": candidate,
             },
         }]
-        if authorized:
-            options.append({
-                "option_id": "authorize-pic",
-                "label": "授权当前 Action 使用受控 PIC",
-                "confidence": 0.9,
-                "plan_patch": {
-                    "kind": "pic_authorization",
-                    "authorized": True,
-                    "action_id": action_id,
-                    "candidate": candidate,
-                },
-            })
+        options.append({
+            "option_id": "authorize-pic",
+            "label": "授权当前 Action 使用受控 PIC",
+            "confidence": 0.9,
+            "plan_patch": {
+                "kind": "pic_authorization",
+                "authorized": True,
+                "action_id": action_id,
+                "candidate": candidate,
+            },
+        })
         questions.append({
             "question_id": _question_id("pic", step_id, action_id),
             "step_id": step_id,
@@ -979,6 +1326,29 @@ def _decision_step_summary(step_id, request, brief):
 
 def _decision_observed_summary(question, step, request, brief):
     question_type = str(question.get("type") or "")
+    if question_type == "value_authority":
+        facts = question.get("facts") or {}
+        values = []
+        seen = set()
+        for source in facts.get("available_value_sources") or ():
+            source_ref = source.get("source") or {}
+            source_kind = str(source_ref.get("kind") or "")
+            value = source.get("value")
+            if value is None:
+                continue
+            key = (
+                source_kind,
+                str(source_ref.get("action_id") or source_ref.get("reference") or ""),
+                str(value),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            if source_kind == "feature_literal":
+                values.append(f"Step 文本写的是「{value}」")
+            elif source_kind == "recorded_action":
+                values.append(f"录制输入的是「{value}」")
+        return "，".join(values) + "。" if values else "我看到输入值来源不一致。"
     pause_evidence = _pause_decision_evidence(question, brief)
     if pause_evidence is not None:
         summary = pause_evidence.get("state_diff_summary") or {}
@@ -1078,6 +1448,7 @@ def _decision_uncertainty(question, brief):
         return "我不确定暂停期间的状态变化是当前 Step 的前置准备、业务动作，还是与它无关。"
     return {
         "table_usage": "我不确定这些行是独立执行、连续执行，还是作为整体数据使用。",
+        "value_authority": "我不能替你决定生成时应采用哪一个业务输入值。",
         "pic_authorization": "我不确定你是否接受图片定位的维护成本和误匹配风险。",
         "ambiguity_resolution": "现有证据支持多个业务解释，我不确定哪一个符合你的意图。",
         "specification_business_conflict": (
@@ -1119,6 +1490,11 @@ def _decision_option_effect(question, option, brief):
             if patch.get("authorized")
             else "不使用图片定位，转而修复结构定位或补录证据。"
         )
+    if kind == "business_fact":
+        fact = patch.get("fact") or {}
+        if fact.get("fact_type") == "value_authority":
+            return "该选择只确认当前 Action 的输入业务值；后续 Step 不会被连锁改写。"
+        return "该选择固化为当前 Step 的用户声明业务事实。"
     if kind == "ambiguity_resolution":
         if _pause_decision_evidence(question, brief) is not None:
             outcome = str(
@@ -1248,4 +1624,300 @@ def _answer_fingerprint(pack, answers):
         "pack_fingerprint": pack.get("pack_fingerprint"),
         "revision_seal": pack.get("revision_seal"),
         "answers": answers.get("answers") or [],
+        "additional_business_answers": [
+            _normalize_additional_business_answer(item)
+            for item in answers.get("additional_business_answers") or ()
+        ],
+        "freeform_business_answers": [
+            _normalize_freeform_business_answer(item)
+            for item in answers.get("freeform_business_answers") or ()
+        ],
+        "business_fact_patch": _normalize_business_fact_patch(
+            answers.get("business_fact_patch"),
+            answers.get("freeform_business_answers"),
+            request=None,
+        ),
     })
+
+
+def _validate_additional_business_answers(value, *, request):
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 20:
+        return ["AI新增业务回答必须是最多20项的列表"]
+    step_ids = {
+        str(item.get("id") or "")
+        for item in ((request or {}).get("target") or {}).get("steps") or ()
+        if isinstance(item, dict) and item.get("id")
+    }
+    errors = []
+    seen = set()
+    allowed_keys = {
+        "step_id",
+        "question",
+        "answer",
+    }
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict) or set(item) - allowed_keys:
+            errors.append(f"AI新增业务回答 {index} 包含技术字段或格式无效")
+            continue
+        normalized = _normalize_additional_business_answer(item)
+        if not normalized["step_id"] or normalized["step_id"] not in step_ids:
+            errors.append(f"AI新增业务回答 {index} 引用未知Step")
+        if not normalized["question"] or len(normalized["question"]) > 500:
+            errors.append(f"AI新增业务回答 {index} 问题为空或过长")
+        if not normalized["answer"] or len(normalized["answer"]) > 2000:
+            errors.append(f"AI新增业务回答 {index} 答案为空或过长")
+        identity = _hash(normalized)
+        if identity in seen:
+            errors.append(f"AI新增业务回答 {index} 重复")
+        seen.add(identity)
+    return errors
+
+
+def _normalize_additional_business_answer(value):
+    value = value if isinstance(value, dict) else {}
+    return {
+        "step_id": str(value.get("step_id") or "").strip(),
+        "question": str(value.get("question") or "").strip(),
+        "answer": str(value.get("answer") or "").strip(),
+    }
+
+
+def _validate_freeform_business_answers(value, *, request):
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 20:
+        return ["自由业务回答必须是最多20项的列表"]
+    step_ids = _request_step_ids(request)
+    errors = []
+    seen = set()
+    allowed_keys = {
+        "answer_id",
+        "step_id",
+        "question",
+        "answer",
+    }
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict) or set(item) - allowed_keys:
+            errors.append(f"自由业务回答 {index} 包含技术字段或格式无效")
+            continue
+        normalized = _normalize_freeform_business_answer(item)
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", normalized["answer_id"]):
+            errors.append(f"自由业务回答 {index} answer_id无效")
+        if not normalized["step_id"] or normalized["step_id"] not in step_ids:
+            errors.append(f"自由业务回答 {index} 引用未知Step")
+        if not normalized["question"] or len(normalized["question"]) > 500:
+            errors.append(f"自由业务回答 {index} 问题为空或过长")
+        if not normalized["answer"] or len(normalized["answer"]) > 2000:
+            errors.append(f"自由业务回答 {index} 答案为空或过长")
+        if normalized["answer_id"] in seen:
+            errors.append(f"自由业务回答 {index} answer_id重复")
+        seen.add(normalized["answer_id"])
+    return errors
+
+
+def _normalize_freeform_business_answer(value):
+    value = value if isinstance(value, dict) else {}
+    return {
+        "answer_id": str(value.get("answer_id") or "").strip(),
+        "step_id": str(value.get("step_id") or "").strip(),
+        "question": str(value.get("question") or "").strip(),
+        "answer": str(value.get("answer") or "").strip(),
+    }
+
+
+def _validate_business_fact_patch(value, freeform_answers, *, request):
+    if value is None:
+        return []
+    errors = []
+    try:
+        _business_fact_patch_facts(
+            value,
+            [
+                _normalize_freeform_business_answer(item)
+                for item in freeform_answers or ()
+            ],
+            request=request,
+        )
+    except ValueError as error:
+        errors.append(str(error))
+    return errors
+
+
+def _business_fact_patch_facts(value, freeform_answers, *, request):
+    normalized = _normalize_business_fact_patch(
+        value,
+        freeform_answers,
+        request=request,
+    )
+    return list(normalized.get("facts") or [])
+
+
+def _normalize_business_fact_patch(value, freeform_answers, *, request):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("BusinessFactPatch必须是object")
+    _reject_unknown_keys(
+        value,
+        {"business_fact_patch_version", "patch_type", "facts"},
+        "BusinessFactPatch",
+    )
+    if any((
+        value.get("business_fact_patch_version") != BUSINESS_FACT_PATCH_VERSION,
+        value.get("patch_type") != "business_facts",
+    )):
+        raise ValueError("BusinessFactPatch版本或类型无效")
+    facts = value.get("facts") or []
+    if not isinstance(facts, list) or len(facts) > 20:
+        raise ValueError("BusinessFactPatch facts必须是最多20项的列表")
+    step_ids = _request_step_ids(request)
+    answers = {
+        str(item.get("answer_id") or ""): item
+        for item in freeform_answers or ()
+        if isinstance(item, dict) and item.get("answer_id")
+    }
+    result = []
+    seen = set()
+    for index, item in enumerate(facts, start=1):
+        fact = _normalize_business_fact(item)
+        if not fact:
+            raise ValueError(f"BusinessFactPatch fact {index} 必须是object")
+        if step_ids and fact["step_id"] not in step_ids:
+            raise ValueError(f"BusinessFactPatch fact {index} 引用未知Step")
+        source_answer = answers.get(fact["source_answer_id"])
+        if source_answer is None:
+            raise ValueError(f"BusinessFactPatch fact {index} 引用未知自由回答")
+        if source_answer.get("step_id") != fact["step_id"]:
+            raise ValueError(f"BusinessFactPatch fact {index} 与自由回答Step不一致")
+        identity = _hash(fact)
+        if identity in seen:
+            raise ValueError(f"BusinessFactPatch fact {index} 重复")
+        seen.add(identity)
+        fact = {"fact_id": "business-fact-" + identity[:16], **fact}
+        result.append(fact)
+    return {
+        "business_fact_patch_version": BUSINESS_FACT_PATCH_VERSION,
+        "patch_type": "business_facts",
+        "facts": result,
+    }
+
+
+def _normalize_business_fact(value):
+    if not isinstance(value, dict):
+        return {}
+    _reject_unknown_keys(
+        value,
+        {
+            "step_id",
+            "source_answer_id",
+            "fact_type",
+            "fact_value",
+            "applies_to",
+            "source",
+            "reason",
+        },
+        "BusinessFactPatch fact",
+    )
+    fact_type = str(value.get("fact_type") or "").strip()
+    if fact_type not in BUSINESS_FACT_TYPES:
+        raise ValueError(f"BusinessFactPatch fact_type无效: {fact_type}")
+    fact_value = value.get("fact_value")
+    if fact_type == "value_source":
+        if isinstance(fact_value, dict):
+            _reject_unknown_keys(
+                fact_value,
+                {"kind"},
+                "BusinessFactPatch value_source fact_value",
+            )
+            source_kind = str(fact_value.get("kind") or "").strip()
+        else:
+            source_kind = str(fact_value or "").strip()
+        if source_kind not in BUSINESS_VALUE_SOURCE_KINDS:
+            raise ValueError("BusinessFactPatch value_source fact_value无效")
+        fact_value = source_kind
+    elif isinstance(fact_value, (str, int, float, bool)):
+        fact_value = str(fact_value).strip()
+    else:
+        raise ValueError("BusinessFactPatch fact_value必须是业务标量")
+    if not fact_value or len(str(fact_value)) > 2000:
+        raise ValueError("BusinessFactPatch fact_value为空或过长")
+    applies_to = _normalize_business_fact_applies_to(
+        value.get("applies_to")
+    )
+    source = _normalize_business_fact_source(value.get("source"))
+    reason = str(value.get("reason") or "").strip()
+    if not reason or len(reason) > 1000:
+        raise ValueError("BusinessFactPatch reason为空或过长")
+    return {
+        "step_id": str(value.get("step_id") or "").strip(),
+        "source_answer_id": str(value.get("source_answer_id") or "").strip(),
+        "fact_type": fact_type,
+        "fact_value": fact_value,
+        "applies_to": applies_to,
+        **({"source": source} if source else {}),
+        "reason": reason,
+    }
+
+
+def _normalize_business_fact_applies_to(value):
+    if value is None:
+        return {"scope": "step"}
+    if not isinstance(value, dict):
+        raise ValueError("BusinessFactPatch applies_to必须是object")
+    _reject_unknown_keys(
+        value,
+        {"scope", "action_id", "value_role"},
+        "BusinessFactPatch applies_to",
+    )
+    scope = str(value.get("scope") or "step").strip()
+    if scope not in {"step", "action_value", "expectation"}:
+        raise ValueError("BusinessFactPatch applies_to.scope无效")
+    result = {"scope": scope}
+    action_id = str(value.get("action_id") or "").strip()
+    if action_id:
+        result["action_id"] = action_id
+    value_role = str(value.get("value_role") or "").strip()
+    if value_role:
+        if value_role not in {"input", "expected", "observed"}:
+            raise ValueError("BusinessFactPatch applies_to.value_role无效")
+        result["value_role"] = value_role
+    return result
+
+
+def _normalize_business_fact_source(value):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("BusinessFactPatch source必须是object")
+    kind = str(value.get("kind") or "").strip()
+    fields = {
+        "feature_literal": {"kind", "reference"},
+        "recorded_action": {"kind", "action_id"},
+        "user_declared_literal": {"kind"},
+    }
+    if kind not in fields:
+        raise ValueError(f"BusinessFactPatch source kind无效: {kind}")
+    _reject_unknown_keys(value, fields[kind], "BusinessFactPatch source")
+    result = {"kind": kind}
+    for field in sorted(fields[kind] - {"kind"}):
+        field_value = str(value.get(field) or "").strip()
+        if not field_value:
+            raise ValueError(f"BusinessFactPatch source.{field}为空")
+        result[field] = field_value
+    return result
+
+
+def _request_step_ids(request):
+    return {
+        str(item.get("id") or "")
+        for item in ((request or {}).get("target") or {}).get("steps") or ()
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
+def _reject_unknown_keys(value, allowed, label):
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise ValueError(f"{label} 包含技术字段或未知字段: {unknown}")

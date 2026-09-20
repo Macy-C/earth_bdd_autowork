@@ -7,14 +7,46 @@ single-step debugging.
 import sys
 from config.paths import Paths
 from autowork_core.runtime.behave_runner import run_behave
+from autowork_core.runtime.run_state import activated_report_source_map
+from autowork_core.runtime.scenario_subset import (
+    find_scenario_subset_plan,
+    generated_scenario_subset_feature,
+)
 from autowork_core.runtime.single_step import (
     find_single_step_plan,
     generated_single_step_feature,
 )
 
 
-def main(feature_path=None, settings_overrides=None, verbose=True, formatter=None):
+def main(
+        feature_path=None,
+        settings_overrides=None,
+        verbose=True,
+        formatter=None,
+        scenario_name=None,
+        example_id=None,
+):
     feature_path = feature_path or Paths.TEST_FEATURES_DIR
+    scenario_subset_plan = find_scenario_subset_plan(
+        feature_path,
+        scenario_name=scenario_name,
+        example_id=example_id,
+    )
+    if scenario_subset_plan is not None:
+        _print_scenario_subset_plan(scenario_subset_plan)
+        with generated_scenario_subset_feature(scenario_subset_plan) as generated_path:
+            _print_generated_feature(generated_path)
+            with activated_report_source_map({
+                generated_path: scenario_subset_plan.source_path,
+            }):
+                return run_behave(
+                    generated_path,
+                    step_scope=scenario_subset_plan.step_scope,
+                    settings_overrides=settings_overrides,
+                    verbose=verbose,
+                    formatter=formatter,
+                )
+
     single_step_plan = find_single_step_plan(feature_path)
     if single_step_plan is not None:
         _print_single_step_plan(single_step_plan)
@@ -44,6 +76,17 @@ def _print_single_step_plan(plan):
     if plan.example_id:
         print(f"Example : {plan.example_id}")
     print(f"Target  : Step {plan.step_index} - {plan.target_keyword} {plan.target_name}")
+    print(f"Source  : {plan.source_path}")
+
+
+def _print_scenario_subset_plan(plan):
+    print("Scenario rerun")
+    print(f"Feature : {plan.feature_name}")
+    print(f"Scenario: {plan.scenario_name}")
+    if plan.example_id:
+        print(f"Example : {plan.example_id}")
+    else:
+        print(f"Cases   : {len(plan.cases)}")
     print(f"Source  : {plan.source_path}")
 
 

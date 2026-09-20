@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 from config.paths import Paths
 import yaml
@@ -77,6 +78,25 @@ PIC_MODE_PRESETS = {
 }
 
 
+@dataclass(frozen=True)
+class AppProfile:
+    name: str
+    app_path: str
+    backend: str
+    process_track_mode: str
+    tag: str | None = None
+    normalized_tag: str | None = None
+
+    def as_dict(self):
+        return {
+            "name": self.name,
+            "app_path": self.app_path,
+            "backend": self.backend,
+            "process_track_mode": self.process_track_mode,
+            "tag": self.tag,
+        }
+
+
 def _as_bool(value, default=False):
     if value is None:
         return default
@@ -129,6 +149,15 @@ def _normalize_record_mode(value, default="off"):
 
 def _normalize_config_keys(config):
     return {str(key).strip().upper(): value for key, value in (config or {}).items()}
+
+
+def _normalize_tag(tag):
+    if tag is None:
+        return ""
+    text = str(tag).strip()
+    if text.startswith("@"):
+        text = text[1:]
+    return text.casefold()
 
 
 def _apply_mode_defaults(config, presets, default_mode="balanced"):
@@ -205,6 +234,7 @@ class Settings:
         self.app_path = ""
         self.backend = "uia"
         self.app_process_track_mode = "snapshot"
+        self.sub_app_profiles_by_tag = {}
 
         # db
         self.mysql_conn_config = None
@@ -299,6 +329,9 @@ class Settings:
         self.app_path = app_conf.get("APP_PATH", self.app_path)
         self.backend = str(app_conf.get("BACKEND", self.backend)).strip().lower()
         self.app_process_track_mode = str(app_conf.get("PROCESS_TRACK_MODE", self.app_process_track_mode)).strip().lower()
+        self.sub_app_profiles_by_tag = self._load_sub_app_profiles(
+            data.get("SUB_APP_SETTING")
+        )
 
         # ===================== db =====================
         self.mysql_conn_config = data.get("mysql_conn_config", self.mysql_conn_config)
@@ -311,6 +344,101 @@ class Settings:
     def update(self, **kwargs):
         for k, v in kwargs.items():
             setattr(self, k, v)
+
+    def default_app_profile(self):
+        return AppProfile(
+            name="default",
+            app_path=str(self.app_path),
+            backend=str(self.backend).strip().lower(),
+            process_track_mode=str(self.app_process_track_mode).strip().lower(),
+        )
+
+    def app_profile_for_tags(self, tags, *, scenario_name=None):
+        effective_tags = {
+            normalized_tag
+            for tag in tags or ()
+            if (normalized_tag := _normalize_tag(tag))
+        }
+        matches = [
+            profile
+            for normalized_tag, profile in self.sub_app_profiles_by_tag.items()
+            if normalized_tag in effective_tags
+        ]
+        if not matches:
+            return self.default_app_profile()
+        if len(matches) == 1:
+            return matches[0]
+
+        tag_details = ", ".join(
+            f"@{profile.normalized_tag}" for profile in matches
+        )
+        scenario_detail = (
+            f" for scenario {scenario_name!r}" if scenario_name else ""
+        )
+        raise ValueError(
+            "Scenario matches multiple SUB_APP_SETTING tags"
+            f"{scenario_detail}: {tag_details}"
+        )
+
+    def _load_sub_app_profiles(self, raw_config):
+        if raw_config is None:
+            return {}
+        if not isinstance(raw_config, dict):
+            raise ValueError("SUB_APP_SETTING must be a mapping")
+        if not raw_config:
+            return {}
+
+        profiles_by_tag = {}
+        for raw_name, raw_profile in raw_config.items():
+            profile = self._load_sub_app_profile(raw_name, raw_profile)
+            normalized_tag = profile.normalized_tag
+            if normalized_tag in profiles_by_tag:
+                raise ValueError(
+                    "SUB_APP_SETTING tags must be unique: "
+                    f"@{normalized_tag}"
+                )
+            profiles_by_tag[normalized_tag] = profile
+        return profiles_by_tag
+
+    def _load_sub_app_profile(self, raw_name, raw_profile):
+        if not isinstance(raw_profile, dict):
+            raise ValueError(
+                f"SUB_APP_SETTING.{raw_name} must be a mapping"
+            )
+        profile_config = _normalize_config_keys(raw_profile)
+        tag = str(profile_config.get("TAG", "")).strip()
+        normalized_tag = _normalize_tag(tag)
+        if not normalized_tag:
+            raise ValueError(f"SUB_APP_SETTING.{raw_name}.TAG cannot be empty")
+
+        app_path = str(profile_config.get("APP_PATH", "")).strip()
+        if not app_path:
+            raise ValueError(
+                f"SUB_APP_SETTING.{raw_name}.APP_PATH cannot be empty"
+            )
+        if app_path.casefold() == "runtime":
+            raise ValueError(
+                f"SUB_APP_SETTING.{raw_name}.APP_PATH=runtime is not supported"
+            )
+
+        profile_name = str(raw_name).strip() or normalized_tag
+        backend = str(
+            profile_config.get("BACKEND", self.backend)
+        ).strip().lower()
+        process_track_mode = str(
+            profile_config.get(
+                "PROCESS_TRACK_MODE",
+                self.app_process_track_mode,
+            )
+        ).strip().lower()
+        return AppProfile(
+            name=profile_name,
+            app_path=app_path,
+            backend=backend,
+            process_track_mode=process_track_mode,
+            tag=tag,
+            normalized_tag=normalized_tag,
+        )
 
     @property
     def is_attach_mode(self):
@@ -385,6 +513,10 @@ class Settings:
             "app_path": self.app_path,
             "backend": self.backend,
             "app_process_track_mode": self.app_process_track_mode,
+            "sub_app_profiles": {
+                profile.name: profile.as_dict()
+                for profile in self.sub_app_profiles_by_tag.values()
+            },
             "mysql_conn_config": self.mysql_conn_config,
             "oracle_conn_config": self.oracle_conn_config,
             "postgresql_conn_config": self.postgresql_conn_config,

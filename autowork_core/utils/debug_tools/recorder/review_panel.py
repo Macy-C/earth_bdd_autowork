@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from io import BytesIO
 import os
 from pathlib import Path
@@ -34,6 +35,15 @@ FEEDBACK_LABELS = {
     "我已修改结果": "revised",
     "不采用": "rejected",
 }
+STEP_TREE_DEFAULT_VISIBLE_WIDTH = 660
+STEP_TREE_COLUMN_SPECS = (
+    {"id": "capture", "label": "录制", "width": 64, "minwidth": 52},
+    {"id": "ordinal", "label": "序号", "width": 42, "minwidth": 36},
+    {"id": "keyword", "label": "关键字", "width": 64, "minwidth": 48},
+    {"id": "step", "label": "Step", "width": 260, "minwidth": 180, "stretch": True},
+    {"id": "windows", "label": "窗口", "width": 42, "minwidth": 36},
+    {"id": "evidence", "label": "录制质量", "width": 76, "minwidth": 68},
+)
 
 
 def _feedback_saved_message(label, event):
@@ -129,6 +139,7 @@ class RecorderReviewWindow:
         self.take_combo = None
         self.select_take_button = None
         self.next_action_button = None
+        self.regenerate_job_button = None
         self.tools_button = None
         self.tools_menu = None
         self.feedback_frame = None
@@ -170,8 +181,10 @@ class RecorderReviewWindow:
         return self
 
     def _build_ui(self):
+        self.window.rowconfigure(3, weight=1)
+        self.window.columnconfigure(0, weight=1)
         header = ttk.Frame(self.window)
-        header.pack(fill="x", padx=12, pady=(12, 6))
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
         ttk.Label(
             header,
             text="录制与生成",
@@ -181,7 +194,7 @@ class RecorderReviewWindow:
         ttk.Button(header, text="关闭", command=self.close).pack(side="right")
 
         status = ttk.Frame(self.window)
-        status.pack(fill="x", padx=12, pady=(0, 6))
+        status.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
         ttk.Label(
             status,
             textvariable=self.summary_var,
@@ -205,13 +218,19 @@ class RecorderReviewWindow:
         ).pack(fill="x", pady=(3, 0))
 
         actions = ttk.Frame(self.window)
-        actions.pack(fill="x", padx=12, pady=(0, 8))
+        actions.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
         self.next_action_button = ttk.Button(
             actions,
             text="下一步",
             command=self.run_recommended_action,
         )
         self.next_action_button.pack(side="left")
+        self.regenerate_job_button = ttk.Button(
+            actions,
+            text="重新生成 Copilot 请求",
+            command=self.copy_regenerated_generation_command,
+        )
+        self.regenerate_job_button.pack(side="left", padx=(6, 0))
         self.timeline_button = ttk.Button(
             actions,
             text="校正与补录",
@@ -229,21 +248,13 @@ class RecorderReviewWindow:
             label="打开任务目录",
             command=self.open_session_dir,
         )
-        self.tools_menu.add_separator()
-        self.tools_menu.add_command(
-            label="重试生成",
-            command=self.retry_generation_job,
-        )
-        self.tools_menu.add_command(
-            label="终止未开始的生成任务",
-            command=self.retire_generation_job,
-        )
         self.tools_button.configure(menu=self.tools_menu)
         profile_frame = ttk.Frame(actions)
         profile_frame.pack(side="left", padx=(8, 0))
         ttk.Label(profile_frame, text="生成方式").pack(side="left")
         for profile_id, label, enabled in (
-            ("generation_first", "专心生成", True),
+            ("generation_first", "全场景生成", True),
+            ("maintenance_existing_steps", "维护已有步骤（暂未开放）", False),
         ):
             button = ttk.Radiobutton(
                 profile_frame,
@@ -262,7 +273,7 @@ class RecorderReviewWindow:
         ).pack(side="left", fill="x", expand=True, padx=(12, 0))
 
         workspace = ttk.Panedwindow(self.window, orient="horizontal")
-        workspace.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        workspace.grid(row=3, column=0, sticky="nsew", padx=12, pady=(0, 8))
 
         left = ttk.Frame(workspace)
         left.rowconfigure(0, weight=1)
@@ -277,70 +288,27 @@ class RecorderReviewWindow:
         frame.grid(row=0, column=0, sticky="nsew")
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        columns = (
-            "capture",
-            "ordinal",
-            "keyword",
-            "step",
-            "takes",
-            "windows",
-            "evidence",
-            "generation",
-        )
+        columns = tuple(spec["id"] for spec in STEP_TREE_COLUMN_SPECS)
         self.tree = ttk.Treeview(
             frame,
             columns=columns,
             show="headings",
             selectmode="browse",
         )
-        headings = (
-            ("capture", "录制", 80),
-            ("ordinal", "序号", 55),
-            ("keyword", "关键字", 100),
-            ("step", "Step", 390),
-            ("takes", "版本", 55),
-            ("windows", "窗口", 55),
-            ("evidence", "录制质量", 90),
-            ("generation", "下一步", 120),
-        )
-        for column, label, width in headings:
-            self.tree.heading(column, text=label)
+        for spec in STEP_TREE_COLUMN_SPECS:
+            column = spec["id"]
+            self.tree.heading(column, text=spec["label"])
             self.tree.column(
                 column,
-                width=width,
-                minwidth=40,
-                stretch=column == "step",
+                width=spec["width"],
+                minwidth=spec["minwidth"],
+                stretch=bool(spec.get("stretch")),
             )
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.bind("<<TreeviewSelect>>", self._on_step_selected)
-
-        take_bar = ttk.Frame(left)
-        take_bar.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        ttk.Label(take_bar, text="查看录制版本").pack(side="left")
-        self.take_combo = ttk.Combobox(
-            take_bar,
-            state="readonly",
-            width=54,
-            textvariable=self.take_var,
-        )
-        self.take_combo.pack(side="left", padx=6)
-        self.take_combo.bind(
-            "<<ComboboxSelected>>",
-            self._on_take_selected,
-        )
-        self.select_take_button = ttk.Button(
-            take_bar,
-            text="用于生成",
-            command=self.select_current_take,
-        )
-        self.select_take_button.pack(side="left")
-        ttk.Label(
-            take_bar,
-            text="切换不会删除其他录制版本",
-        ).pack(side="left", padx=10)
 
         self.detail_notebook = ttk.Notebook(right)
         self.detail_notebook.grid(row=0, column=0, sticky="nsew")
@@ -492,9 +460,10 @@ class RecorderReviewWindow:
         self.question_open_button.pack(side="left")
         self.question_submit_button = ttk.Button(
             question_actions,
-            text="提交全部回答",
+            text="交给 Copilot 提问",
             command=self.submit_decision_batch,
         )
+        self.question_submit_button.configure(state="disabled")
         self.question_submit_button.pack(side="left", padx=(8, 0))
         ttk.Label(
             question_actions,
@@ -645,15 +614,17 @@ class RecorderReviewWindow:
             textvariable=self.status_var,
             anchor="w",
             wraplength=1180,
-        ).pack(fill="x", padx=12, pady=(0, 10))
+        ).grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
 
     def refresh(self):
         self.status_var.set("正在加载当前录制与生成状态...")
-        self._reload_model()
+        self._reload_model(readiness=None)
 
     def _apply_model(self, model, step_id):
         selected = self.selected_step_id() or step_id
         self.model = model
+        if self.status_var.get() == "正在加载当前录制与生成状态...":
+            self.status_var.set("当前录制与生成状态已加载。")
         self.tree.delete(*self.tree.get_children())
         for step in self.model.steps:
             selected_take = next(
@@ -669,10 +640,8 @@ class RecorderReviewWindow:
                     step.ordinal,
                     step.keyword,
                     step.text,
-                    len(step.takes),
                     selected_take.window_count if selected_take else 0,
                     _evidence_status_label(step.evidence_status),
-                    _generation_status_label(step.generation_status),
                 ),
             )
         if selected and self.tree.exists(selected):
@@ -817,30 +786,42 @@ class RecorderReviewWindow:
             if take.selected:
                 selected_label = label
         values = list(self.take_map)
-        self.take_combo.configure(values=values)
+        if self.take_combo is not None:
+            self.take_combo.configure(values=values)
         self.take_var.set(selected_label or (values[0] if values else ""))
 
     def select_current_take(self):
+        if self._review_write_running():
+            self.status_var.set("当前修改正在保存，请稍候。")
+            return
         step_id = self.selected_step_id()
         take_id = self.take_map.get(self.take_var.get())
         if not step_id or not take_id:
-            self.status_var.set("请选择 Step 和录制版本。")
+            self.status_var.set("请选择 Step 和当前录制。")
             return
-        try:
-            self.session.select_take(step_id, take_id)
-        except Exception as error:
-            self.status_var.set(
-                f"切换录制版本失败: {type(error).__name__}: {error}"
-            )
-            return
-        self.last_request_path = None
-        self.status_var.set("用于生成的录制版本已更新，正在更新 Copilot 任务。")
-        self._reload_model()
-        self._notify_context_change()
+        self.operations.submit(
+            self.job_operation_key,
+            self.session.select_take,
+            step_id,
+            take_id,
+            context={
+                "action": "select_take",
+                "step_id": step_id,
+                "take_id": take_id,
+            },
+        )
+        self.status_var.set("正在切换当前录制证据...")
+        self._update_controls()
+        self._schedule_job_operation_poll()
 
     def _notify_context_change(self):
         if self.on_context_change is not None:
-            self.on_context_change(self.selected_step_id())
+            viewed_take = self.selected_take_entry()
+            self.on_context_change(
+                self.selected_step_id(),
+                model=self.model,
+                take_id=viewed_take.take_id if viewed_take else None,
+            )
 
     def open_timeline(self, focus_event_ids=None):
         take = self.selected_take_entry()
@@ -926,7 +907,7 @@ class RecorderReviewWindow:
             readiness = mutation_result.get("readiness")
         else:
             readiness = self.session.refresh_after_timeline_edit(take_dir)
-        self._reload_model()
+        self._reload_model(readiness=readiness)
         return readiness
 
     def _restore_or_schedule_request(self):
@@ -937,13 +918,23 @@ class RecorderReviewWindow:
                 self.request_refresh_error = None
                 self._update_controls()
             return
-        request = self.request_service.latest(step_ids)
-        if request is not None:
-            self.last_request_path = self.session.session_dir / request["request_path"]
-            workflow = self.request_service.workflow_state(step_ids)
-            if workflow.get("status") != "stale":
-                self._update_controls()
-                return
+        model = getattr(self, "model", None)
+        generation = model.generation if model else None
+        request_path = getattr(generation, "request_path", None)
+        if (
+                getattr(generation, "request_id", None)
+                and request_path
+                and getattr(generation, "workflow_status", None) != "stale"
+        ):
+            path = Path(request_path)
+            self.last_request_path = (
+                path
+                if path.is_absolute()
+                else self.session.session_dir / path
+            )
+            self.request_refresh_error = None
+            self._update_controls()
+            return
         self.last_request_path = None
         self._schedule_request_refresh(step_ids)
 
@@ -973,7 +964,7 @@ class RecorderReviewWindow:
             return
         self.request_refresh_running = True
         self.operations.submit(
-            f"{self.request_operation_prefix}scenario",
+            self._request_refresh_operation_key(),
             self._ensure_latest_request,
             step_ids,
             context=(sequence, step_ids),
@@ -998,13 +989,16 @@ class RecorderReviewWindow:
     def _poll_request_refresh_result(self):
         self.request_refresh_poll_after_id = None
         results = self.operations.drain(
-            key_prefix=self.request_operation_prefix,
+            key=self._request_refresh_operation_key(),
         )
         if not results:
-            if self.operations.list_active(
-                    key_prefix=self.request_operation_prefix,
-            ):
+            self.request_refresh_running = bool(self.operations.list_active(
+                key=self._request_refresh_operation_key(),
+            ))
+            if self.request_refresh_running:
                 self._schedule_request_result_poll()
+            elif not self.closed:
+                self._update_controls()
             return
         for task in results:
             sequence, step_ids = task.context
@@ -1020,16 +1014,12 @@ class RecorderReviewWindow:
             if is_current and error is None:
                 self.request_refresh_error = None
                 request_path = self.session.session_dir / request["request_path"]
-                current = self.request_service.latest(step_ids)
-                if current and current.get("request_id") == request.get("request_id"):
-                    self.last_request_path = request_path
-                    workflow = self.request_service.workflow_state(step_ids)
-                    self._reload_model()
-                    self.status_var.set(
-                        f"{self._scenario_scope_label()} Copilot 任务已自动更新"
-                        f"（{_request_status_label(workflow)}）: "
-                        f"{request_path}"
-                    )
+                self.last_request_path = request_path
+                self._reload_model()
+                self.status_var.set(
+                    f"{self._scenario_scope_label()} Copilot 任务已自动更新: "
+                    f"{request_path}"
+                )
             elif is_current:
                 self.last_request_path = None
                 self.request_refresh_error = error
@@ -1038,14 +1028,17 @@ class RecorderReviewWindow:
                     f"{type(error).__name__}: {error}"
                 )
         self.request_refresh_running = bool(self.operations.list_active(
-            key_prefix=self.request_operation_prefix,
+            key=self._request_refresh_operation_key(),
         ))
         if not self.closed:
             self._update_controls()
         if self.request_refresh_running or self.operations.has_results(
-                key_prefix=self.request_operation_prefix,
+                key=self._request_refresh_operation_key(),
         ):
             self._schedule_request_result_poll()
+
+    def _request_refresh_operation_key(self):
+        return f"{self.request_operation_prefix}scenario"
 
     def close(self):
         if self.closed:
@@ -1107,7 +1100,16 @@ class RecorderReviewWindow:
         self._schedule_request_refresh(step_ids, delay_ms=0)
         self._update_controls()
 
-    def copy_generation_command(self):
+    def copy_generation_command(self, *, force_new=False):
+        if self.generation_command_running:
+            self.status_var.set("正在准备 Copilot 任务，请稍候。")
+            return
+        if (
+                getattr(self, "request_refresh_running", False)
+                or getattr(self, "request_refresh_after_id", None) is not None
+        ):
+            self.status_var.set("录制内容正在更新，请等待 Copilot 任务准备完成。")
+            return
         step_ids = self.scenario_step_ids()
         if not step_ids:
             self.status_var.set("当前范围没有可生成 Step；请恢复或选择至少一个 Step。")
@@ -1127,6 +1129,7 @@ class RecorderReviewWindow:
         )
         self.generation_command_sequence += 1
         sequence = self.generation_command_sequence
+        command_sent_at = datetime.now().isoformat(timespec="milliseconds")
         self.generation_command_running = True
         try:
             self.operations.submit(
@@ -1134,6 +1137,8 @@ class RecorderReviewWindow:
                 self._create_generation_command,
                 step_ids,
                 profile_id,
+                command_sent_at,
+                force_new,
                 context=(sequence, tuple(step_ids)),
             )
         except Exception as error:
@@ -1142,24 +1147,68 @@ class RecorderReviewWindow:
                 f"准备 Copilot 任务失败: {type(error).__name__}: {error}"
             )
             return
-        self.status_var.set("正在准备 Copilot 任务...")
+        if self._review_write_running():
+            self.status_var.set("当前修改正在保存，请稍候。")
+            return
+        self.status_var.set(
+            "正在重新生成 Copilot 请求..."
+            if force_new
+            else "正在准备 Copilot 任务..."
+        )
         self._schedule_generation_command_poll()
 
-    def _create_generation_command(self, step_ids, profile_id):
-        command = self.request_service.generation_command(
+    def copy_regenerated_generation_command(self):
+        self.copy_generation_command(force_new=True)
+
+    def _create_generation_command(
+            self,
             step_ids,
-            profile_id=profile_id,
+            profile_id,
+            command_sent_at,
+            force_new,
+        ):
+        prepare_handoff = getattr(
+            self.request_service,
+            "prepare_generation_handoff",
+            None,
+        )
+        handoff = (
+            prepare_handoff(
+                step_ids,
+                profile_id=profile_id,
+                command_sent_at=command_sent_at,
+                force_new=force_new,
+            )
+            if callable(prepare_handoff)
+            else {
+                "status": "command_ready",
+                "command": self.request_service.generation_command(
+                    step_ids,
+                    profile_id=profile_id,
+                    command_sent_at=command_sent_at,
+                    force_new=force_new,
+                ),
+            }
         )
         auto_repair = getattr(
             self.request_service,
             "last_auto_repair_audit",
             None,
         ) or {}
-        request = self.request_service.latest(step_ids)
+        request = handoff.get("request") or self.request_service.latest(step_ids)
         return {
-            "command": command,
+            "status": handoff.get("status") or "command_ready",
+            "command": handoff.get("command"),
+            "question_count": int(handoff.get("question_count") or 0),
             "request": request,
+            "generation_workspace_projection": handoff.get(
+                "generation_workspace_projection"
+            ) or {},
+            "workspace_projection_summary": handoff.get(
+                "workspace_projection_summary"
+            ) or {},
             "auto_repair": auto_repair,
+            "force_new": bool(force_new),
         }
 
     def _schedule_generation_command_poll(self):
@@ -1176,10 +1225,16 @@ class RecorderReviewWindow:
             key=self.generation_command_operation_key,
         )
         if result is None:
-            if self.operations.list_active(
+            self.generation_command_running = bool(
+                self.operations.list_active(
                     key=self.generation_command_operation_key,
-            ):
+                )
+            )
+            if self.generation_command_running:
                 self._schedule_generation_command_poll()
+            elif not self.closed:
+                self.status_var.set("Copilot 任务准备已取消，请重试。")
+                self._update_controls()
             return
         sequence, step_ids = result.context or (None, ())
         is_current = all((
@@ -1211,8 +1266,14 @@ class RecorderReviewWindow:
         self.parent.clipboard_clear()
         self.parent.clipboard_append(value.get("command") or "")
         auto_repair = value.get("auto_repair") or {}
+        action_text = (
+            f"已重新生成{self._scenario_scope_label()}的 Copilot 请求"
+            if value.get("force_new")
+            else f"已准备{self._scenario_scope_label()}的 Copilot 请求"
+        )
         self.status_var.set(
-            f"已创建{self._scenario_scope_label()}的 Generation Job"
+            action_text
+            +
             f"（{len(step_ids)} 个 Step）；"
             + (
                 f"已自动修复 {auto_repair.get('applied_count')} 项目标证据；"
@@ -1220,7 +1281,7 @@ class RecorderReviewWindow:
                 else ""
             )
             +
-            "已复制 /recorder-generate Job 命令，粘贴到 Copilot Chat 即可继续。"
+            "已复制 Copilot 命令；请选择 Recorder Generation Agent 后粘贴继续。"
         )
         self._reload_model()
 
@@ -1243,19 +1304,16 @@ class RecorderReviewWindow:
                     "当前证据缺少可恢复事实，请回到录制工具重录此 Step。"
                 )
             return
-        if action == "v3_adjust":
-            if self.question_frame is not None:
-                self.detail_notebook.select(self.question_frame)
-            self.status_var.set(
-                "请一次完成全部业务确认；提交后才能交给 Copilot。"
-            )
-            return
         if action in {
             "generate",
             "v3_fast",
             "v3_plan",
             "v3_forensic",
+            "v3_business_questions",
+            "retry_generation",
         }:
+            self.copy_generation_command()
+        elif action == "answer_business_questions":
             self.copy_generation_command()
         elif action in {"refresh_request", "retry_request"}:
             self.prepare_request()
@@ -1263,74 +1321,6 @@ class RecorderReviewWindow:
             self.show_generation_result()
         else:
             self.status_var.set("当前 Step 尚未完成录制。")
-
-    def retry_generation_job(self):
-        generation = self.model.generation if self.model else None
-        history = getattr(generation, "job_history", ()) if generation else ()
-        terminal = next((item for item in history if not item.is_current), None)
-        if terminal is None:
-            self.status_var.set("当前没有可重试的已结束生成任务。")
-            return
-        self._run_job_lifecycle(
-            "retry",
-            terminal.job_id,
-            terminal.profile_id,
-        )
-
-    def retire_generation_job(self):
-        generation = self.model.generation if self.model else None
-        if generation is None or not generation.job_id or generation.job_phase != "ready":
-            self.status_var.set("只有尚未开始的生成任务可以在此终止。")
-            return
-        self._run_job_lifecycle("retire", generation.job_id, None)
-
-    def _run_job_lifecycle(self, action, job_id, profile_id):
-        history = (
-            self.model.generation.job_history
-            if self.model and self.model.generation else ()
-        )
-        job = next((item for item in history if item.job_id == job_id), None)
-        if job is None:
-            self.status_var.set("Generation Job历史已变化，请刷新后重试。")
-            return
-        if not job.job_path:
-            self.status_var.set("无法解析Generation Job路径。")
-            return
-        workflow = self.request_service.workflow_state(self.scenario_step_ids())
-        epoch = (workflow.get("job_execution") or {}).get("epoch")
-        if action == "retire" and epoch is None:
-            self.status_var.set("Generation Job状态已变化，请刷新后重试。")
-            return
-        try:
-            self.operations.submit(
-                self.job_operation_key,
-                self._execute_job_lifecycle,
-                action,
-                job.job_path,
-                profile_id,
-                epoch,
-                context=action,
-            )
-        except Exception as error:
-            self.status_var.set(f"Generation Job操作失败: {type(error).__name__}: {error}")
-            return
-        self.status_var.set("正在更新 Generation Job...")
-        self._schedule_job_operation_poll()
-
-    def _execute_job_lifecycle(
-            self,
-            action,
-            job_path,
-            profile_id,
-            epoch,
-        ):
-        if action == "retry":
-            return self.request_service.retry_job(job_path, profile_id=profile_id)
-        return self.request_service.retire_job(
-            job_path,
-            expected_epoch=epoch,
-            reason="operator_retired_from_workbench",
-        )
 
     def _schedule_job_operation_poll(self):
         if self.closed or self.job_operation_after_id is not None:
@@ -1346,63 +1336,101 @@ class RecorderReviewWindow:
         if result is None:
             if self.operations.list_active(key=self.job_operation_key):
                 self._schedule_job_operation_poll()
+            elif not self.closed:
+                self.status_var.set("当前修改已取消，请重试。")
+                self._update_controls()
             return
+        context = result.context or {}
+        action = context.get("action") if isinstance(context, dict) else context
         if result.status == "completed" and result.error is None:
-            self._reload_model()
-            self.status_var.set(
-                "已创建新的 Generation Job。"
-                if result.context == "retry"
-                else "未开始的 Generation Job 已终止。"
-            )
+            if action == "select_take":
+                self.last_request_path = None
+                self.status_var.set(
+                    "当前录制证据已更新，正在更新 Copilot 任务。"
+                )
+                self._reload_model(readiness=result.value)
+            elif action == "decision":
+                self.decision_selections = {}
+                should_resume = bool(getattr(
+                    self,
+                    "resume_generation_after_decision",
+                    False,
+                ))
+                self.resume_generation_after_decision = False
+                self.decision_questions = []
+                self.status_var.set(
+                    "业务确认已提交，正在继续同一个生成任务。"
+                    if should_resume
+                    else "业务确认已提交，生成任务正在重新检查。"
+                )
+                self._reload_model()
+                if should_resume:
+                    self.copy_generation_command()
+            elif action == "feedback":
+                self.feedback_note_var.set("")
+                self.status_var.set(_feedback_saved_message(
+                    context.get("label"),
+                    result.value,
+                ))
+                self._reload_model()
+            else:
+                self._reload_model()
+                self.status_var.set("未开始的 Copilot 请求已终止。")
         else:
             error = result.error
+            operation_label = {
+                "select_take": "切换当前录制证据",
+                "decision": "提交业务确认",
+                "feedback": "保存结果确认",
+            }.get(action, "Copilot 请求操作")
             self.status_var.set(
-                "Generation Job操作失败: "
+                f"{operation_label}失败: "
                 f"{type(error).__name__}: {error}"
                 if error is not None
-                else "Generation Job操作未完成。"
+                else f"{operation_label}未完成。"
             )
+        self._update_controls()
 
     def record_transaction_feedback(self):
+        if self._review_write_running():
+            self.status_var.set("当前修改正在保存，请稍候。")
+            return
         step_ids = self.scenario_step_ids()
         if not step_ids:
             self.status_var.set("当前场景没有目标 Step。")
             return
+        label = self.feedback_var.get()
+        status = FEEDBACK_LABELS.get(label)
+        self.operations.submit(
+            self.job_operation_key,
+            self._save_transaction_feedback,
+            step_ids,
+            status,
+            self.feedback_note_var.get().strip(),
+            context={"action": "feedback", "label": label},
+        )
+        self.status_var.set("正在保存结果确认...")
+        self._update_controls()
+        self._schedule_job_operation_poll()
+
+    def _save_transaction_feedback(self, step_ids, status, note):
         request = self.request_service.latest(step_ids)
         if request is None:
-            self.status_var.set(
+            raise ValueError(
                 "当前场景的 Copilot 任务仍在更新，请等待完成后再反馈。"
             )
-            return
         latest = latest_transaction(
             self.session.session_dir,
             request_id=request.get("request_id"),
             completed_only=True,
         )
         if latest is None:
-            self.status_var.set(
+            raise ValueError(
                 "当前场景还没有完成的 Copilot 生成报告；"
                 "生成完成后重新打开审阅即可反馈。"
             )
-            return
         report_path, report = latest
-        status = FEEDBACK_LABELS.get(self.feedback_var.get())
-        try:
-            event = save_transaction_feedback(
-                report_path,
-                status,
-                self.feedback_note_var.get().strip(),
-            )
-        except Exception as error:
-            self.status_var.set(
-                f"保存结果确认失败: {type(error).__name__}: {error}"
-            )
-            return
-        self.feedback_note_var.set("")
-        self.status_var.set(_feedback_saved_message(
-            self.feedback_var.get(),
-            event,
-        ))
+        return save_transaction_feedback(report_path, status, note)
 
     def open_project_memory(self):
         memory_dir = (
@@ -1506,7 +1534,8 @@ class RecorderReviewWindow:
                 iid=f"question-{index}",
                 values=(
                     question.step_text or question.step_id or "当前场景",
-                    question.title or question.prompt,
+                    f"{index + 1}/{len(self.decision_questions)} · "
+                    f"{question.title or question.prompt}",
                 ),
             )
         if self.question_tree.get_children():
@@ -1581,36 +1610,11 @@ class RecorderReviewWindow:
         button = self.question_submit_button
         if button is None:
             return
-        blocking = [
-            question
-            for question in self.decision_questions
-            if question.blocking
-        ]
-        complete = bool(blocking) and all(
-            self.decision_selections.get(question.question_id)
-            in {option.option_id for option in question.options}
-            for question in blocking
-        )
-        button.configure(state="normal" if complete else "disabled")
+        button.configure(state="disabled")
 
     def submit_decision_batch(self):
-        step_ids = self.scenario_step_ids()
-        if not step_ids:
-            self.status_var.set("当前范围没有可回答的业务问题。")
-            return
-        try:
-            self.request_service.answer_decision_batch(
-                step_ids,
-                self.decision_selections,
-            )
-        except Exception as error:
-            self.status_var.set(
-                f"提交业务确认失败: {type(error).__name__}: {error}"
-            )
-            return
-        self.decision_selections = {}
-        self.status_var.set("业务确认已提交，生成任务正在重新检查。")
-        self._reload_model()
+        self.status_var.set("业务确认已移到 Copilot 生成前一次完成。")
+        self.copy_generation_command()
 
     def _render_question_media(self, question):
         self.question_image_ref = None
@@ -1735,11 +1739,31 @@ class RecorderReviewWindow:
         if result is None:
             self.result_summary_var.set("当前 Scenario 尚无生成结果。")
             return
+        locator_reuse = getattr(result, "locator_reuse", None)
+        locator_summary = (
+            f"已复用控件 {locator_reuse.reused_count}；"
+            f"新增控件 {locator_reuse.added_count}；"
+            f"有 {locator_reuse.maintenance_count} 项待维护；"
+            if locator_reuse is not None
+            else ""
+        )
+        maintenance_detail = next((
+            issue.detail
+            for issue in getattr(result, "unresolved_issues", ()) or ()
+            if issue.code == "locator_reuse_maintenance_required"
+            and issue.detail
+        ), "")
+        issue_summary = _generation_issue_summary(result)
         self.result_summary_var.set(
             f"验证层级：{(self.model.generation.verification.label if self.model.generation.verification else '未知')}；"
             f"生成状态：{_result_status_label(result.status)}；"
+            f"生成时限：{_service_level_label(result)}；"
+            f"生成进度：{_generation_progress_label(result)}；"
             f"修改文件 {len(result.changed_files)}；"
             f"未通过检查 {len(result.failed_checks)}；"
+            f"{locator_summary}"
+            f"{maintenance_detail}"
+            f"{issue_summary}"
             f"当前文件：{_workspace_materialization_label(getattr(result, 'workspace_materialization', None))}；"
             f"下一步：{result.recommended_label}"
         )
@@ -1775,7 +1799,7 @@ class RecorderReviewWindow:
             self._set_detail_tab_visible(
                 question_frame,
                 "业务确认",
-                bool(decision_questions),
+                False,
             )
         self._set_detail_tab_visible(
             self.result_frame,
@@ -1796,15 +1820,6 @@ class RecorderReviewWindow:
                 and verification.implementation_validated
             ),
         )
-        if (
-            generation is not None
-            and getattr(generation, "workflow_status", None)
-            == "needs_adjustment"
-            and decision_questions
-            and question_frame is not None
-        ):
-            self.detail_notebook.select(question_frame)
-
     def _sync_xpath_technical_details(self):
         frame = getattr(self, "xpath_details_frame", None)
         tree = getattr(self, "xpath_tree", None)
@@ -1849,7 +1864,7 @@ class RecorderReviewWindow:
             except (IndexError, ValueError):
                 item = None
         text = (
-            "当前录制版本没有 XPath 技术详情。"
+            "当前录制没有 XPath 技术详情。"
             if item is None
             else _xpath_technical_detail_text(item)
         )
@@ -1940,9 +1955,10 @@ class RecorderReviewWindow:
         repair = diagnostic.repair if diagnostic is not None else None
         repair_labels = {
             "timeline": "去校正",
-            "rerecord": "补录此 Step",
+            "rerecord": "重新录制此 Step",
+            "recapture": "重新录制此 Step",
         }
-        actionable = repair in {"timeline", "rerecord"}
+        actionable = repair in {"timeline", "rerecord", "recapture"}
         self.repair_button.configure(
             text=repair_labels.get(repair, "Copilot 会自动处理"),
             state="normal" if actionable else "disabled",
@@ -1981,7 +1997,7 @@ class RecorderReviewWindow:
         repair = diagnostic.repair
         if repair == "timeline":
             self.locate_selected_diagnostic()
-        elif repair == "rerecord":
+        elif repair in {"rerecord", "recapture"}:
             if self.on_rerecord is not None:
                 self.on_rerecord(self.session, self.selected_step_id())
             else:
@@ -2002,13 +2018,14 @@ class RecorderReviewWindow:
             text="检查与补录" if has_editable_take else "录制当前 Step",
             state="normal" if step_id is not None else "disabled",
         )
-        self.select_take_button.configure(
-            state="normal"
-            if viewed_take is not None
-            and viewed_take.status == "completed"
-            and viewed_take.take_id != selected_take_id
-            else "disabled"
-        )
+        if self.select_take_button is not None:
+            self.select_take_button.configure(
+                state="normal"
+                if viewed_take is not None
+                and viewed_take.status == "completed"
+                and viewed_take.take_id != selected_take_id
+                else "disabled"
+            )
         action, label, detail = self._recommended_action()
         self.next_action_button.configure(
             text=(
@@ -2021,7 +2038,17 @@ class RecorderReviewWindow:
                 }
                 else label
             ),
-            state="normal" if action != "pending" else "disabled",
+            state=(
+                "normal"
+                if (
+                    action != "pending"
+                    and not self.generation_command_running
+                    and not self.request_refresh_running
+                    and self.request_refresh_after_id is None
+                    and not self._review_write_running()
+                )
+                else "disabled"
+            ),
         )
         self.next_action_var.set(detail)
         generation = self.model.generation if self.model else None
@@ -2037,13 +2064,37 @@ class RecorderReviewWindow:
                     else "disabled"
                 )
             )
+        regenerate_button = getattr(self, "regenerate_job_button", None)
+        if regenerate_button is not None:
+            regenerate_button.configure(
+                state=(
+                    "normal"
+                    if (
+                        step_id is not None
+                        and not self.generation_command_running
+                    )
+                    and not self.request_refresh_running
+                    and self.request_refresh_after_id is None
+                    and not self._review_write_running()
+                    else "disabled"
+                )
+            )
         self._update_evidence_summary()
         self._refresh_diagnostics_if_step_changed()
+
+    def _review_write_running(self):
+        operations = getattr(self, "operations", None)
+        operation_key = getattr(self, "job_operation_key", None)
+        return bool(
+            operations is not None
+            and operation_key
+            and operations.list_active(key=operation_key)
+        )
 
     def _update_evidence_summary(self):
         take = self.selected_take_entry()
         if take is None:
-            self.evidence_summary_var.set("录制质量：请选择一个已完成的录制版本。")
+            self.evidence_summary_var.set("录制质量：请选择一个已完成的录制。")
             return
         evidence = take.evidence_summary
         if evidence is None:
@@ -2058,11 +2109,17 @@ class RecorderReviewWindow:
                 task_status = "；正在根据最新录制重新准备"
             elif generation.request_path:
                 task_status = "；生成任务已准备"
+        locator_status = ""
+        if evidence.complete_action_count < evidence.action_count:
+            locator_status = (
+                f"；定位已验证 {evidence.complete_action_count}/"
+                f"{evidence.action_count}"
+            )
         self.evidence_summary_var.set(
             "录制证据："
             f"已关联事件 {evidence.linked_event_count}/"
-            f"{evidence.event_count}；完整动作 "
-            f"{evidence.complete_action_count}/{evidence.action_count}"
+            f"{evidence.event_count}；已记录动作 {evidence.action_count}"
+            f"{locator_status}"
             f"{task_status}"
         )
 
@@ -2083,7 +2140,7 @@ class RecorderReviewWindow:
         if current_step != getattr(self, "diagnostic_step_id", None):
             self._refresh_diagnostics()
 
-    def _reload_model(self):
+    def _reload_model(self, *, readiness=None):
         if self.closed:
             return
         self.model_refresh_sequence += 1
@@ -2095,15 +2152,20 @@ class RecorderReviewWindow:
             self._query_workbench_model,
             self.query_service,
             step_id,
+            readiness,
             context=(sequence, step_id),
             pass_token=True,
         )
         self._schedule_model_refresh_poll()
 
     @staticmethod
-    def _query_workbench_model(token, query_service, step_id):
+    def _query_workbench_model(token, query_service, step_id, readiness):
         token.raise_if_cancelled()
-        model = query_service.get_workbench(step_id)
+        model = (
+            query_service.get_workbench(step_id, readiness=readiness)
+            if readiness is not None
+            else query_service.get_workbench(step_id)
+        )
         token.raise_if_cancelled()
         return model
 
@@ -2121,10 +2183,13 @@ class RecorderReviewWindow:
             key=self.model_refresh_operation_key,
         )
         if result is None:
-            if self.operations.list_active(
-                    key=self.model_refresh_operation_key
-            ):
+            self.model_refresh_running = bool(self.operations.list_active(
+                key=self.model_refresh_operation_key
+            ))
+            if self.model_refresh_running:
                 self._schedule_model_refresh_poll()
+            elif not self.closed:
+                self._update_controls()
             return
         sequence, step_id = result.context or (None, None)
         self.model_refresh_running = bool(self.operations.list_active(
@@ -2214,6 +2279,89 @@ def _result_status_label(status):
         "aborted": "已取消",
         "aborting": "正在取消",
     }.get(str(status), "待确认")
+
+
+def _service_level_label(result):
+    status = getattr(result, "service_level_status", None)
+    target = getattr(result, "service_level_target_seconds", None)
+    duration = getattr(result, "service_level_duration_ms", None)
+    observed = getattr(result, "service_level_observed_duration_ms", None)
+    coverage = getattr(result, "service_level_coverage", None)
+    target_text = f"目标{target}秒" if target is not None else "目标未知"
+    if status == "within_target" and duration is not None:
+        return f"达标（{duration / 1000:.3f}秒，{target_text}）"
+    if status == "exceeded" and duration is not None:
+        return f"已超时（{duration / 1000:.3f}秒，{target_text}）"
+    if status == "exceeded" and coverage == "lower_bound" and observed is not None:
+        return f"已超时（至少{observed / 1000:.3f}秒，{target_text}）"
+    return f"计时不完整（{target_text}）"
+
+
+def _generation_progress_label(result):
+    stage = getattr(result, "generation_progress_stage", None)
+    phase = getattr(result, "generation_progress_phase", None)
+    wait_ms = getattr(result, "generation_progress_max_wait_ms", None)
+    wait_kind = getattr(result, "generation_progress_max_wait_tool_kind", None)
+    wait_segment = getattr(result, "generation_progress_max_wait_segment", None)
+    candidate_count = getattr(
+        result,
+        "generation_progress_candidate_file_count",
+        None,
+    )
+    window_count = getattr(
+        result,
+        "generation_progress_candidate_window_count",
+        None,
+    )
+    parts = []
+    if stage:
+        parts.append(_generation_progress_stage_label(stage, phase))
+    if candidate_count is not None:
+        window_text = (
+            f"，索引{window_count}段"
+            if window_count is not None
+            else ""
+        )
+        parts.append(f"候选{candidate_count}个文件{window_text}")
+    if wait_ms is not None and (wait_segment or wait_kind):
+        wait_label = (
+            _agent_wait_segment_label(wait_segment)
+            if wait_segment
+            else _agent_wait_kind_label(wait_kind)
+        )
+        parts.append(
+            f"最大等待{wait_label} {wait_ms / 1000:.3f}秒"
+        )
+    return "，".join(parts) if parts else "暂无账本"
+
+
+def _generation_progress_stage_label(stage, phase=None):
+    labels = {
+        "completed": "已完成",
+        "failed": "失败",
+    }
+    if stage in labels:
+        return labels[stage]
+    return str(phase or stage)
+
+
+def _agent_wait_kind_label(kind):
+    return {
+        "typed_patch_submit": "选择提交",
+        "candidate_index_read": "索引读取",
+        "source_reads": "源码读取",
+        "editor_edits": "review编辑",
+        "after_native_edit": "验证请求",
+        "manifest_read": "manifest读取",
+    }.get(str(kind), str(kind))
+
+
+def _agent_wait_segment_label(segment):
+    return {
+        "editor_edits_done_to_after_native_edit_request": (
+            "review编辑后验证请求"
+        ),
+    }.get(str(segment), str(segment))
 
 
 def _decision_question_text(question):
@@ -2430,11 +2578,28 @@ def _generation_summary_text(generation):
         materialization = _workspace_materialization_label(
             getattr(result, "workspace_materialization", None)
         )
+        locator_reuse = getattr(result, "locator_reuse", None)
+        locator_text = (
+            f"；已复用控件 {locator_reuse.reused_count}，"
+            f"新增控件 {locator_reuse.added_count}，"
+            f"待维护 {locator_reuse.maintenance_count}"
+            if locator_reuse is not None
+            else ""
+        )
+        issue_text = _generation_issue_summary(result, separator="，")
         return (
             f"生成：{(verification.label if verification else _generation_status_label(generation.display_status))}；"
             f"修改文件 {len(result.changed_files)}，"
             f"失败检查 {len(result.failed_checks)}"
+            f"{issue_text}"
             f"；当前文件 {materialization}"
+            f"{locator_text}"
+            f"{history_text}{feedback_text}"
+        )
+    if generation.workflow_status == "failed":
+        return (
+            "生成：上次 Copilot 请求未产生生成报告；"
+            "可重新交给 Copilot"
             f"{history_text}{feedback_text}"
         )
     return (
@@ -2456,6 +2621,16 @@ def _workspace_materialization_label(materialization):
         "not_applicable": "不适用",
     }
     return labels.get(status, "未知")
+
+
+def _generation_issue_summary(result, *, separator="；"):
+    issues = tuple(getattr(result, "unresolved_issues", ()) or ())
+    if not issues:
+        return ""
+    first = next((issue for issue in issues if issue.detail), issues[0])
+    title = str(getattr(first, "title", "") or "生成保留了待处理项")
+    detail = str(getattr(first, "detail", "") or title)
+    return f"{separator}待处理占位 {len(issues)}：{detail}"
 
 
 def _workspace_materialization_file_statuses(materialization):

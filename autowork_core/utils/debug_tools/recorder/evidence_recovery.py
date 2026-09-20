@@ -12,7 +12,6 @@ RECONCILABLE_REVIEW_CODES = {
     "weak_step_semantics",
     "fallback_ocr",
     "fallback_pos",
-    "weak_target_quality",
     "pause_state_changed",
     "provisional_window",
     "window_closed_during_take",
@@ -78,6 +77,18 @@ def enrich_request_recovery(request, session_dir):
 
 def assess_review_recovery(take_dir, step_plan, review):
     code = str(review.get("code") or "unknown")
+    if code == "weak_target_quality":
+        return {
+            "status": "technical_repair_required",
+            "confidence": "high",
+            "strategy": "verified_target_binding",
+            "hard_blocker": False,
+            "reason": (
+                "目标身份和稳定定位属于技术证据，不能由业务问答补出；"
+                "只有系统验证的冻结候选可以自动修复，否则必须补录当前 Step。"
+            ),
+            "inventory": collect_evidence_inventory(take_dir),
+        }
     if code in RECONCILABLE_REVIEW_CODES:
         return {
             "status": "user_confirmable",

@@ -188,22 +188,6 @@ class SessionProjectionBuilder:
                 context["step_user_context"] = step_user_context
             if take_entry:
                 take_dir = self.session_dir / take_entry["path"]
-                projection_store = ProjectionStore(take_dir)
-                projection = projection_store.current()
-                if projection is None:
-                    raise ValueError(
-                        f"Take 缺少有效 Projection 5.7: {take_entry['path']}"
-                    )
-                locator_path = projection.path(
-                    "locator_candidates_effective"
-                )
-                if locator_path.exists():
-                    bundle = yaml.safe_load(
-                        locator_path.read_text(encoding="utf-8")
-                    ) or {}
-                    _merge_named_drafts(roots, bundle.get("roots") or {})
-                    _merge_named_drafts(locators, bundle.get("locators") or {})
-                    unresolved.extend(bundle.get("unresolved") or [])
                 artifacts = {"take": take_entry["path"]}
                 raw_artifact_paths = {
                     "take_metadata": "take.json",
@@ -211,6 +195,7 @@ class SessionProjectionBuilder:
                     "raw_events": "raw-events.jsonl",
                     "raw_events_seal": "raw-events.seal.json",
                     "capture_completion": "capture-completion.json",
+                    "media_index": "media-index.json",
                     "actions_auto": "actions.auto.json",
                     "timeline_edits": "timeline-edits.jsonl",
                     "tree_diff": "ui/tree-diff.json",
@@ -224,7 +209,22 @@ class SessionProjectionBuilder:
                 for key, relative_path in raw_artifact_paths.items():
                     if (take_dir / relative_path).exists():
                         artifacts[key] = f"{take_entry['path']}/{relative_path}"
-                projected_keys = {
+                projection_store = ProjectionStore(take_dir)
+                projection = projection_store.current()
+                if projection is None:
+                    context["projection_status"] = "missing"
+                else:
+                    locator_path = projection.path(
+                        "locator_candidates_effective"
+                    )
+                    if locator_path.exists():
+                        bundle = yaml.safe_load(
+                            locator_path.read_text(encoding="utf-8")
+                        ) or {}
+                        _merge_named_drafts(roots, bundle.get("roots") or {})
+                        _merge_named_drafts(locators, bundle.get("locators") or {})
+                        unresolved.extend(bundle.get("unresolved") or [])
+                    projected_keys = {
                         "events_effective": "events_effective",
                         "actions": "actions_effective",
                         "actions_effective": "actions_effective",
@@ -242,20 +242,20 @@ class SessionProjectionBuilder:
                         "semantic_pack": "semantic_pack",
                         "pic_template_audit": "pic_template_audit",
                     }
-                for key, projection_key in projected_keys.items():
-                    path = projection.path(projection_key)
-                    if path is not None and path.exists():
-                        artifacts[key] = path.relative_to(
-                            self.session_dir
-                        ).as_posix()
-                for key in projection.artifacts:
-                    if not key.startswith("pic_template:"):
-                        continue
-                    path = projection.path(key)
-                    if path is not None and path.exists():
-                        artifacts[key] = path.relative_to(
-                            self.session_dir
-                        ).as_posix()
+                    for key, projection_key in projected_keys.items():
+                        path = projection.path(projection_key)
+                        if path is not None and path.exists():
+                            artifacts[key] = path.relative_to(
+                                self.session_dir
+                            ).as_posix()
+                    for key in projection.artifacts:
+                        if not key.startswith("pic_template:"):
+                            continue
+                        path = projection.path(key)
+                        if path is not None and path.exists():
+                            artifacts[key] = path.relative_to(
+                                self.session_dir
+                            ).as_posix()
                 context["artifacts"] = artifacts
                 semantic_path = artifacts.get("semantic_pack")
                 if semantic_path and (self.session_dir / semantic_path).is_file():

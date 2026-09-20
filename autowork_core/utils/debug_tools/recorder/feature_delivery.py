@@ -16,6 +16,9 @@ from behave.parser import Parser
 from autowork_core.utils.debug_tools.recorder.catalog import (
     load_recording_catalog,
 )
+from autowork_core.utils.debug_tools.recorder.bundle_validator import (
+    validate_ai_bundle,
+)
 from autowork_core.utils.debug_tools.recorder.feature_plan import (
     load_feature_plan,
 )
@@ -29,6 +32,7 @@ from autowork_core.utils.debug_tools.recorder.recording_portability import (
     RecordingPackageError,
     export_recording_runs,
     import_recording_package,
+    inspect_recording_package_manifests,
     validate_exportable_recording_run,
 )
 from autowork_core.utils.debug_tools.recorder.scope_binding import (
@@ -37,7 +41,7 @@ from autowork_core.utils.debug_tools.recorder.scope_binding import (
 from config.paths import Paths
 
 
-FEATURE_DELIVERY_VERSION = "1.0"
+FEATURE_DELIVERY_VERSION = "1.1"
 FEATURE_DELIVERY_BATCH_VERSION = "1.0"
 FEATURE_DELIVERY_MANIFEST = "feature-delivery.json"
 FEATURE_MEMBER = "feature/source.feature"
@@ -218,6 +222,14 @@ def export_feature_delivery(
                 "size": len(source_bytes),
                 "scenario_count": len(plan.scenarios),
                 "recorded_scenario_count": len(runs),
+                "complete_scenario_count": sum(
+                    bool(item["scenario_recording_complete"])
+                    for item in runs
+                ),
+                "partial_scenario_count": sum(
+                    not item["scenario_recording_complete"]
+                    for item in runs
+                ),
             },
             "runs": [
                 {
@@ -227,7 +239,11 @@ def export_feature_delivery(
                     "example_id": item["example_id"],
                     "updated_at": item["updated_at"],
                     "recorded_step_count": item["recorded_step_count"],
+                    "missing_step_count": item["missing_step_count"],
                     "total_step_count": item["total_step_count"],
+                    "scenario_recording_complete": item[
+                        "scenario_recording_complete"
+                    ],
                 }
                 for item in runs
             ],
@@ -242,7 +258,13 @@ def export_feature_delivery(
                 "feature_included": True,
                 "generation_state_included": False,
                 "partial_recording_allowed": True,
-                "all_scenarios_recorded": len(runs) == len(plan.scenarios),
+                "all_scenarios_recorded": bool(
+                    len(runs) == len(plan.scenarios)
+                    and all(
+                        item["scenario_recording_complete"]
+                        for item in runs
+                    )
+                ),
                 "export_scope": (
                     "feature"
                     if selected_scenario_ids is None
@@ -250,6 +272,7 @@ def export_feature_delivery(
                 ),
             },
         }
+        _validate_delivery_run_progress(delivery["runs"], evidence_path)
         temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
         try:
             with zipfile.ZipFile(
@@ -381,7 +404,12 @@ def export_feature_deliveries(feature_paths, recording_root, output_dir):
     }
 
 
-def preview_feature_delivery(package_path, project_root):
+def preview_feature_delivery(
+    package_path,
+    project_root,
+    *,
+    target_feature_path=None,
+):
     package_path = Path(package_path).resolve()
     project_root = Path(project_root).resolve()
     if not package_path.is_file():
@@ -428,29 +456,58 @@ def preview_feature_delivery(package_path, project_root):
         evidence_info = infos[EVIDENCE_MEMBER]
         if evidence_info.file_size != int(evidence["size"]):
             raise FeatureDeliveryError("内层录屏包大小与交付清单不一致")
-        digest = hashlib.sha256()
-        with archive.open(evidence_info, "r") as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-        if digest.hexdigest() != evidence["sha256"]:
-            raise FeatureDeliveryError("内层录屏包SHA-256与交付清单不一致")
+        with tempfile.TemporaryDirectory(
+                prefix=".feature-delivery-preview-",
+        ) as staging_value:
+            evidence_path = Path(staging_value) / "recording-package.zip"
+            digest = hashlib.sha256()
+            with archive.open(evidence_info, "r") as stream, \
+                    evidence_path.open("wb") as output:
+                while chunk := stream.read(1024 * 1024):
+                    output.write(chunk)
+                    digest.update(chunk)
+            if digest.hexdigest() != evidence["sha256"]:
+                raise FeatureDeliveryError(
+                    "内层录屏包SHA-256与交付清单不一致"
+                )
+            _validate_delivery_run_progress(
+                delivery["runs"],
+                evidence_path,
+            )
 
     source_relpath = _safe_project_relative(feature["source_relpath"])
-    target = _project_feature_target(project_root, source_relpath)
+    target = None
     conflict_summary = None
-    if not os.path.lexists(target):
-        target_status = "create"
-    elif not target.is_file():
+    matches = _project_features_with_id(project_root, feature["id"])
+    if len(matches) > 1:
         target_status = "conflict"
-        conflict_summary = "目标路径存在，但不是普通Feature文件。"
-    elif target.read_bytes() == source_bytes:
-        target_status = "reuse"
-    else:
-        target_status = "conflict"
-        conflict_summary = _feature_conflict_summary(
-            target.read_bytes(),
-            source_bytes,
+        conflict_summary = "本地存在多个相同Feature ID的文件：" + "，".join(
+            path.relative_to(project_root).as_posix()
+            for path in matches
         )
+    elif len(matches) == 1:
+        target = matches[0]
+        source_relpath = target.relative_to(project_root).as_posix()
+        if target.read_bytes() == source_bytes:
+            target_status = "reuse"
+        else:
+            target_status = "conflict"
+            conflict_summary = (
+                "本地同ID Feature与录制包中的Feature内容不同。"
+                "请先确认Feature差异后再导入。\n"
+                + _feature_conflict_summary(target.read_bytes(), source_bytes)
+            )
+    elif target_feature_path is None:
+        target_status = "needs_target"
+        target = _project_feature_target(project_root, source_relpath)
+    else:
+        target = _selected_feature_target(project_root, target_feature_path)
+        source_relpath = target.relative_to(project_root).as_posix()
+        if os.path.lexists(target):
+            target_status = "conflict"
+            conflict_summary = "目标位置已存在文件，请选择新的Feature保存位置。"
+        else:
+            target_status = "create"
     return {
         "feature_delivery_version": FEATURE_DELIVERY_VERSION,
         "delivery_id": delivery["delivery_id"],
@@ -458,8 +515,12 @@ def preview_feature_delivery(package_path, project_root):
         "package_sha256": _sha256(package_path),
         "package_size": package_path.stat().st_size,
         "feature": feature,
-        "source_relpath": source_relpath.as_posix(),
-        "target_path": str(target),
+        "source_relpath": (
+            source_relpath.as_posix()
+            if isinstance(source_relpath, Path)
+            else str(source_relpath)
+        ),
+        "target_path": str(target) if target is not None else "",
         "target_status": target_status,
         "conflict_summary": conflict_summary,
         "run_count": len(delivery["runs"]),
@@ -468,7 +529,13 @@ def preview_feature_delivery(package_path, project_root):
     }
 
 
-def import_feature_delivery(package_path, project_root, recording_root=None):
+def import_feature_delivery(
+    package_path,
+    project_root,
+    recording_root=None,
+    *,
+    target_feature_path=None,
+):
     package_path = Path(package_path).resolve()
     project_root = Path(project_root).resolve()
     recording_root = Path(
@@ -479,10 +546,19 @@ def import_feature_delivery(package_path, project_root, recording_root=None):
         recording_root.relative_to(project_root)
     except ValueError as error:
         raise FeatureDeliveryError("录屏根目录必须位于目标项目内") from error
-    preview = preview_feature_delivery(package_path, project_root)
+    preview = preview_feature_delivery(
+        package_path,
+        project_root,
+        target_feature_path=target_feature_path,
+    )
+    if preview["target_status"] == "needs_target":
+        raise FeatureDeliveryError(
+            "本地没有同ID Feature，请选择Feature保存位置后再导入"
+        )
     if preview["target_status"] == "conflict":
         raise FeatureDeliveryError(
-            "目标Feature已存在且内容不同，首版导入禁止覆盖"
+            preview.get("conflict_summary")
+            or "目标Feature存在冲突，不能导入"
         )
     target = Path(preview["target_path"])
     installed = False
@@ -559,17 +635,20 @@ def _selected_feature_runs(plan, recording_root, *, scenario_ids=None):
         if not candidates:
             continue
         entry, run_path = candidates[0]
+        manifest = _read_run_manifest(run_path)
+        progress = _run_manifest_step_progress(manifest)
         selected.append({
-            "session_id": str(entry.get("session_id") or ""),
+            "session_id": str(manifest.get("session_id") or ""),
             "scenario_id": scenario.id,
             "scenario_name": scenario.name,
             "example_id": scenario.example_id,
-            "updated_at": str(entry.get("updated_at") or ""),
-            "recorded_step_count": sum(
-                (item or {}).get("status") == "completed"
-                for item in (entry.get("steps") or ())
-            ),
-            "total_step_count": len(expected_steps),
+            "updated_at": str(manifest.get("updated_at") or ""),
+            "recorded_step_count": progress["recorded_step_count"],
+            "missing_step_count": progress["missing_step_count"],
+            "total_step_count": progress["total_step_count"],
+            "scenario_recording_complete": progress[
+                "scenario_recording_complete"
+            ],
             "path": run_path,
         })
     if not selected:
@@ -584,38 +663,33 @@ def exportable_feature_recording_run(
         expected_step_ids,
         expected_business_fingerprint,
     ):
-    readiness = entry.get("readiness") or {}
-    steps = entry.get("steps") or ()
-    recorded_steps = {
-        str(item.get("id") or "")
-        for item in steps
-        if isinstance(item, dict) and item.get("id")
-    }
-    completed_steps = {
-        str(item.get("id") or "")
-        for item in steps
-        if isinstance(item, dict)
-        and item.get("id")
-        and item.get("status") == "completed"
-    }
-    if any((
-        readiness.get("bundle_valid") is not True,
-        readiness.get("recording_complete") is not True,
-        readiness.get("semantic_ready") is not True,
-        not recorded_steps,
-        not recorded_steps <= set(expected_step_ids),
-        completed_steps != recorded_steps,
-    )):
-        return None
+    expected_steps = {str(item) for item in expected_step_ids if item}
     recording_root = Path(recording_root).resolve()
     try:
         relative = _safe_run_relative(entry.get("path"))
         run_path = (recording_root / relative).resolve()
         run_path.relative_to(recording_root)
-        manifest = json.loads(
-            (run_path / "manifest.json").read_text(encoding="utf-8")
-        )
+        manifest = _read_run_manifest(run_path)
         validate_exportable_recording_run(run_path, manifest)
+        readiness = validate_ai_bundle(run_path)
+        progress = _run_manifest_step_progress(manifest)
+        if any((
+            str(manifest.get("session_id") or "")
+            != str(entry.get("session_id") or ""),
+            readiness.get("bundle_valid") is not True,
+            readiness.get("semantic_ready") is not True,
+            progress["scenario_step_ids"] != expected_steps,
+            not progress["declared_step_ids"],
+            not progress["declared_step_ids"] <= expected_steps,
+            not progress["completed_step_ids"],
+            progress["completed_step_ids"]
+            != progress["completed_with_take_ids"],
+            (
+                progress["scenario_recording_complete"]
+                and readiness.get("recording_complete") is not True
+            ),
+        )):
+            return None
         recorded_fingerprint = recording_business_fingerprint(
             manifest.get("feature") or {},
             manifest.get("scenario") or {},
@@ -635,15 +709,97 @@ def exportable_feature_recording_run(
     )
 
 
+def _read_run_manifest(run_path):
+    try:
+        value = json.loads(
+            (Path(run_path) / "manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise FeatureDeliveryError(
+            f"Recorder Run manifest无法读取: {run_path}"
+        ) from error
+    if not isinstance(value, dict):
+        raise FeatureDeliveryError(
+            f"Recorder Run manifest格式无效: {run_path}"
+        )
+    return value
+
+
+def _run_manifest_step_progress(manifest):
+    scenario_step_ids = {
+        str(item.get("id") or "")
+        for item in ((manifest.get("scenario") or {}).get("steps") or ())
+        if isinstance(item, dict) and item.get("id")
+    }
+    steps = [
+        item
+        for item in (manifest.get("steps") or ())
+        if isinstance(item, dict)
+    ]
+    declared = {
+        str((item.get("plan") or {}).get("id") or "")
+        for item in steps
+        if (item.get("plan") or {}).get("id")
+    }
+    completed = {
+        str((item.get("plan") or {}).get("id") or "")
+        for item in steps
+        if (item.get("plan") or {}).get("id")
+        and item.get("status") == "completed"
+    }
+    completed_with_take = {
+        str((item.get("plan") or {}).get("id") or "")
+        for item in steps
+        if (item.get("plan") or {}).get("id")
+        and item.get("status") == "completed"
+        and item.get("selected_take")
+    }
+    if any((
+        not scenario_step_ids,
+        not declared <= scenario_step_ids,
+        not completed <= scenario_step_ids,
+        completed != completed_with_take,
+    )):
+        raise ValueError("Scenario Step范围无效")
+    return {
+        "scenario_step_ids": scenario_step_ids,
+        "declared_step_ids": declared,
+        "completed_step_ids": completed,
+        "completed_with_take_ids": completed_with_take,
+        "recorded_step_count": len(completed_with_take),
+        "missing_step_count": len(scenario_step_ids - completed_with_take),
+        "total_step_count": len(scenario_step_ids),
+        "scenario_recording_complete": (
+            completed_with_take == scenario_step_ids
+        ),
+    }
+
+
 def _validate_delivery_manifest(delivery):
     if not isinstance(delivery, dict):
         raise FeatureDeliveryError("Feature交付清单必须是object")
     feature = delivery.get("feature") or {}
     evidence = delivery.get("evidence") or {}
     runs = delivery.get("runs") or []
-    recorded_scenario_count = feature.get(
-        "recorded_scenario_count",
-        len(runs),
+    policy = delivery.get("policy")
+    if not isinstance(policy, dict):
+        raise FeatureDeliveryError("Feature交付清单字段无效")
+    scenario_count = _delivery_count(feature.get("scenario_count"))
+    recorded_scenario_count = _delivery_count(
+        feature.get("recorded_scenario_count")
+    )
+    complete_scenario_count = _delivery_count(
+        feature.get("complete_scenario_count")
+    )
+    partial_scenario_count = _delivery_count(
+        feature.get("partial_scenario_count")
+    )
+    evidence_run_count = _delivery_count(
+        evidence.get("run_count")
+    )
+    all_scenarios_recorded = bool(
+        scenario_count == len(runs)
+        and complete_scenario_count == scenario_count
     )
     if any((
         delivery.get("feature_delivery_version") != FEATURE_DELIVERY_VERSION,
@@ -656,11 +812,47 @@ def _validate_delivery_manifest(delivery):
         not str(feature.get("source_relpath") or ""),
         not str(feature.get("source_hash") or ""),
         not str(feature.get("sha256") or ""),
-        int(feature.get("scenario_count") or 0) < len(runs),
-        int(recorded_scenario_count) != len(runs),
+        scenario_count < len(runs),
+        recorded_scenario_count != len(runs),
+        complete_scenario_count + partial_scenario_count
+        != recorded_scenario_count,
         evidence.get("member") != EVIDENCE_MEMBER,
-        int(evidence.get("run_count") or 0) != len(runs),
+        evidence_run_count != len(runs),
         not str(evidence.get("sha256") or ""),
+        policy.get("feature_included") is not True,
+        policy.get("generation_state_included") is not False,
+        policy.get("partial_recording_allowed") is not True,
+        policy.get("export_scope") not in {"feature", "scenarios"},
+        not isinstance(policy.get("all_scenarios_recorded"), bool),
+        policy.get("all_scenarios_recorded") != all_scenarios_recorded,
+    )):
+        raise FeatureDeliveryError("Feature交付清单字段无效")
+    for item in runs:
+        if not isinstance(item, dict):
+            raise FeatureDeliveryError("Feature交付清单字段无效")
+        recorded_step_count = _delivery_count(
+            item.get("recorded_step_count")
+        )
+        missing_step_count = _delivery_count(
+            item.get("missing_step_count")
+        )
+        total_step_count = _delivery_count(item.get("total_step_count"))
+        complete = item.get("scenario_recording_complete")
+        if any((
+            recorded_step_count <= 0,
+            total_step_count <= 0,
+            recorded_step_count + missing_step_count != total_step_count,
+            not isinstance(complete, bool),
+            complete != (missing_step_count == 0),
+        )):
+            raise FeatureDeliveryError("Feature交付清单字段无效")
+    if any((
+        complete_scenario_count != sum(
+            item["scenario_recording_complete"] for item in runs
+        ),
+        partial_scenario_count != sum(
+            not item["scenario_recording_complete"] for item in runs
+        ),
     )):
         raise FeatureDeliveryError("Feature交付清单字段无效")
     session_ids = [str(item.get("session_id") or "") for item in runs]
@@ -672,6 +864,78 @@ def _validate_delivery_manifest(delivery):
         len(set(scenario_ids)) != len(scenario_ids),
     )):
         raise FeatureDeliveryError("Feature交付清单Run身份重复或缺失")
+
+
+def _delivery_count(value):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise FeatureDeliveryError("Feature交付清单字段无效")
+    return value
+
+
+def _validate_delivery_run_progress(delivery_runs, evidence_path):
+    try:
+        evidence_runs = {
+            item["session_id"]: item["manifest"]
+            for item in inspect_recording_package_manifests(evidence_path)
+        }
+        if len(evidence_runs) != len(delivery_runs):
+            raise ValueError("Run数量不一致")
+        for delivery_run in delivery_runs:
+            session_id = str(delivery_run.get("session_id") or "")
+            manifest = evidence_runs.get(session_id)
+            if manifest is None:
+                raise ValueError("Run身份不一致")
+            scenario = manifest.get("scenario") or {}
+            if str(scenario.get("id") or "") != str(
+                    delivery_run.get("scenario_id") or ""):
+                raise ValueError("Scenario身份不一致")
+            progress = _manifest_step_progress(manifest)
+            if any((
+                progress["recorded_step_count"]
+                != delivery_run.get("recorded_step_count"),
+                progress["missing_step_count"]
+                != delivery_run.get("missing_step_count"),
+                progress["total_step_count"]
+                != delivery_run.get("total_step_count"),
+                progress["scenario_recording_complete"]
+                != delivery_run.get("scenario_recording_complete"),
+            )):
+                raise ValueError("Step进度不一致")
+    except (
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            RecordingPackageError,
+            zipfile.BadZipFile,
+    ) as error:
+        raise FeatureDeliveryError(
+            "交付清单与内层录屏证据进度不一致"
+        ) from error
+
+
+def _manifest_step_progress(manifest):
+    scenario_step_ids = {
+        str(item.get("id") or "")
+        for item in ((manifest.get("scenario") or {}).get("steps") or ())
+        if item.get("id")
+    }
+    completed_step_ids = {
+        str((item.get("plan") or {}).get("id") or "")
+        for item in manifest.get("steps") or ()
+        if item.get("status") == "completed" and item.get("selected_take")
+    }
+    if not scenario_step_ids or not completed_step_ids <= scenario_step_ids:
+        raise ValueError("Scenario Step范围无效")
+    return {
+        "recorded_step_count": len(completed_step_ids),
+        "missing_step_count": len(scenario_step_ids - completed_step_ids),
+        "total_step_count": len(scenario_step_ids),
+        "scenario_recording_complete": (
+            completed_step_ids == scenario_step_ids
+        ),
+    }
 
 
 def _safe_project_relative(value):
@@ -689,6 +953,46 @@ def _safe_project_relative(value):
     ):
         raise FeatureDeliveryError(f"Feature项目相对路径无效: {value!r}")
     return Path(*path.parts)
+
+
+def _project_features_with_id(project_root, feature_id):
+    feature_id = str(feature_id or "").casefold()
+    if not feature_id:
+        return []
+    project_root = Path(project_root).resolve()
+    feature_root = project_root / "Bdd"
+    if not feature_root.is_dir():
+        return []
+    matches = []
+    for candidate in sorted(feature_root.rglob("*.feature")):
+        if candidate.is_symlink():
+            continue
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(project_root)
+        except ValueError:
+            continue
+        try:
+            source_text = resolved.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        if persistent_feature_id(source_text) == feature_id:
+            matches.append(resolved)
+    return matches
+
+
+def _selected_feature_target(project_root, target_feature_path):
+    target = Path(target_feature_path)
+    if not target.is_absolute():
+        target = Path(project_root).resolve() / target
+    target = target.resolve()
+    if target.suffix.casefold() != ".feature":
+        raise FeatureDeliveryError("Feature保存位置必须是.feature文件")
+    try:
+        relative = target.relative_to(Path(project_root).resolve())
+    except ValueError as error:
+        raise FeatureDeliveryError("Feature保存位置必须位于当前项目内") from error
+    return _project_feature_target(project_root, relative)
 
 
 def _load_delivery_feature_plan(feature_path):

@@ -33,6 +33,9 @@ from autowork_core.utils.debug_tools.recorder.code_reuse_index import (
 from autowork_core.utils.debug_tools.recorder.identity import (
     locator_candidate_id as expected_locator_candidate_id,
 )
+from autowork_core.utils.debug_tools.recorder.generation_locator_policy import (
+    top_level_root_uses_pos_only,
+)
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 from autowork_core.utils.debug_tools.recorder.value_authority import (
     declared_example_arguments,
@@ -44,11 +47,12 @@ from autowork_core.utils.debug_tools.recorder.value_authority import (
 from autowork_core.utils.bus import normalize
 
 
-PLAN_VERSION = "4.2"
+PLAN_VERSION = "4.4"
 SUPPORTED_PLAN_VERSIONS = {PLAN_VERSION}
 PLAN_ORIGINS = {
     "external_ai",
     "deterministic_surrogate",
+    "system_baseline",
     "human_authored",
 }
 MAX_MEMORY_TRACE_ITEMS = 6
@@ -332,7 +336,22 @@ def compile_generation_intent(intent, brief):
                 candidate = matches[0]
                 validation = candidate.get("validation") or {}
                 locator = candidate.get("locator") or {}
-                if any((
+                locator_kind = str(locator.get("by") or "child")
+                if locator_kind == "pos":
+                    if any((
+                        locator_candidate_id != expected_locator_candidate_id(
+                            locator,
+                            candidate.get("reason"),
+                        ),
+                        validation.get("status") not in {"fallback", "unique"},
+                        validation.get("target_matches") is not True,
+                    )):
+                        raise ValueError(
+                            f"Step {step_id} 操作 {op}的POS locator candidate"
+                            "未通过冻结目标验证"
+                        )
+                    operation["locator_candidate_id"] = locator_candidate_id
+                elif any((
                     locator_candidate_id != expected_locator_candidate_id(
                         locator,
                         candidate.get("reason"),
@@ -341,7 +360,7 @@ def compile_generation_intent(intent, brief):
                     validation.get("target_matches") is not True,
                     str(locator.get("root") or "")
                     != str(target.get("root_name") or ""),
-                    locator.get("by", "child") not in {"child", "xpath"},
+                    locator_kind not in {"child", "xpath"},
                 )):
                     raise ValueError(
                         f"Step {step_id} 操作 {op}的locator candidate"
@@ -569,6 +588,9 @@ def normalize_generation_plan(request, plan):
                 "target_action_id": str(
                     operation.get("target_action_id") or ""
                 ).strip() or None,
+                "locator_candidate_id": str(
+                    operation.get("locator_candidate_id") or ""
+                ).strip() or None,
                 "value_action_ids": _unique_strings(
                     operation.get("value_action_ids")
                 ),
@@ -652,19 +674,41 @@ def normalize_generation_plan(request, plan):
             for item in plan.get("decision_trace") or []
             if isinstance(item, dict)
         ],
+        "business_facts": [
+            dict(item)
+            for item in plan.get("business_facts") or []
+            if isinstance(item, dict)
+        ],
         "pic_authorizations": [
             dict(item)
             for item in plan.get("pic_authorizations") or []
             if isinstance(item, dict)
         ],
-        "memory_trace": _normalize_memory_trace(
-            plan.get("memory_trace"),
+        **(
+            {
+                "memory_trace": _normalize_memory_trace(
+                    plan.get("memory_trace"),
+                )
+            }
+            if "memory_trace" in plan
+            else {}
         ),
         "ambiguity_resolutions": [
             _normalize_ambiguity_resolution(item)
             for item in plan.get("ambiguity_resolutions") or []
             if isinstance(item, dict)
         ],
+        **(
+            {
+                "implementation_candidate_files": (
+                    _normalize_implementation_candidate_files(
+                        plan.get("implementation_candidate_files")
+                    )
+                )
+            }
+            if plan.get("implementation_candidate_files")
+            else {}
+        ),
         "uncertainties": [
             item
             for item in plan.get("uncertainties") or []
@@ -723,6 +767,11 @@ def apply_decision_constraints(plan, compiled_patch):
         plan.get("decision_trace") or [],
         compiled_patch.get("decision_trace") or [],
         "question_id",
+    )
+    plan["business_facts"] = _merge_by_key(
+        plan.get("business_facts") or [],
+        compiled_patch.get("business_facts") or [],
+        "fact_id",
     )
     plan["ambiguity_resolutions"] = _merge_by_key(
         plan.get("ambiguity_resolutions") or [],
@@ -801,6 +850,24 @@ def validate_decision_conformance(plan, compiled_patch):
     missing = sorted(expected_decisions - actual_decisions)
     if missing:
         errors.append(f"Plan 缺少 Decision trace: {missing}")
+    expected_business_facts = {
+        item.get("fact_id"): item
+        for item in compiled_patch.get("business_facts") or []
+        if item.get("fact_id")
+    }
+    actual_business_facts = {
+        item.get("fact_id"): item
+        for item in plan.get("business_facts") or []
+        if item.get("fact_id")
+    }
+    missing_facts = sorted(
+        set(expected_business_facts) - set(actual_business_facts)
+    )
+    if missing_facts:
+        errors.append(f"Plan 缺少 Business facts: {missing_facts}")
+    for fact_id, expected in expected_business_facts.items():
+        if actual_business_facts.get(fact_id) != expected:
+            errors.append(f"Plan 未保留 Business fact: {fact_id}")
     expected_resolutions = {
         item.get("ambiguity_id"): item
         for item in compiled_patch.get("ambiguity_resolutions") or []
@@ -908,8 +975,11 @@ def validate_generation_plan(
         for step in (plan.get("steps") or {}).values()
     )
     if require_window_ownership and has_operations:
-        errors.extend(_validate_window_owners(window_owners, brief))
-        errors.extend(_validate_child_view_candidates(window_owners, brief))
+        errors.extend(_validate_window_owners(
+            window_owners,
+            brief,
+            plan=plan,
+        ))
     method_resolutions = {}
     action_handling = {}
     for step_id, step in (plan.get("steps") or {}).items():
@@ -1279,7 +1349,81 @@ def validate_generation_plan(
     errors.extend(_validate_memory_trace(plan, brief))
     errors.extend(_validate_annotation_trace(plan, brief))
     errors.extend(_validate_pic_region_roots(plan))
+    errors.extend(_validate_implementation_candidate_files(plan))
     return errors
+
+
+def _normalize_implementation_candidate_files(value):
+    result = []
+    seen = set()
+    for item in value or ():
+        if not isinstance(item, dict):
+            continue
+        path = _implementation_candidate_file_path(item.get("path"))
+        if not path or path in seen:
+            continue
+        content = item.get("content")
+        if not isinstance(content, str):
+            continue
+        record = {"path": path, "content": content}
+        if item.get("sha256") is not None:
+            record["sha256"] = str(item.get("sha256") or "")
+        result.append(record)
+        seen.add(path)
+    return result
+
+
+def _validate_implementation_candidate_files(plan):
+    files = plan.get("implementation_candidate_files")
+    if files is None:
+        return []
+    if not isinstance(files, list):
+        return ["implementation_candidate_files 必须是数组"]
+    errors = []
+    seen = set()
+    for item in files:
+        if not isinstance(item, dict):
+            errors.append("implementation_candidate_files item 必须是object")
+            continue
+        unknown = sorted(set(item) - {"path", "content", "sha256"})
+        if unknown:
+            errors.append(
+                "implementation_candidate_files 包含未知字段: "
+                f"{unknown}"
+            )
+        path = _implementation_candidate_file_path(item.get("path"))
+        if not path:
+            errors.append(
+                "implementation_candidate_files path必须是项目相对路径"
+            )
+        elif path in seen:
+            errors.append(f"implementation_candidate_files path重复: {path}")
+        else:
+            seen.add(path)
+        if not isinstance(item.get("content"), str):
+            errors.append(
+                f"implementation_candidate_files content必须是string: {path}"
+            )
+        sha256 = item.get("sha256")
+        if sha256 is not None and not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(sha256 or ""),
+        ):
+            errors.append(f"implementation_candidate_files sha256无效: {path}")
+    return errors
+
+
+def _implementation_candidate_file_path(value):
+    text = str(value or "").replace("\\", "/")
+    parts = text.split("/")
+    if (
+        not text
+        or text.startswith("/")
+        or re.match(r"^[A-Za-z]:", text)
+        or any(part in {"", ".."} for part in parts)
+    ):
+        return None
+    return "/".join(parts)
 
 
 def _validate_unresolved_issues(step_id, step, plan, brief, action_ids):
@@ -1331,12 +1475,47 @@ def _validate_unresolved_issues(step_id, step, plan, brief, action_ids):
                 "utf-8"
             )
         ).hexdigest()[:16]
+        source_action_ids = [
+            str(action_id)
+            for action_id in ambiguity.get("action_ids") or ()
+            if action_id
+        ]
+        step_action_ids = [
+            str(action.get("id") or "")
+            for action in brief.get("actions") or ()
+            if isinstance(action, dict)
+            and str(action.get("step_id") or "") == str(step_id)
+            and action.get("role") != "noise"
+        ]
+        ordered_action_ids = [
+            action_id
+            for action_id in step_action_ids
+            if action_id in set(source_action_ids)
+        ]
         issue_actions = set(issue.get("action_ids") or ())
+        classification = _issue_placeholder_classification(
+            issue.get("issue_type")
+        )
         if any((
             issue.get("issue_id") != expected_id,
             str(issue.get("step_id") or "") != str(step_id),
             issue.get("issue_type") != ambiguity.get("code"),
-            issue_actions != set(action_ids),
+            issue.get("issue_domain") != classification["issue_domain"],
+            issue.get("severity") != classification["severity"],
+            issue.get("reuse_policy") != "not_eligible_for_strong_reuse",
+            issue_actions != set(ordered_action_ids),
+            list(issue.get("source_action_ids") or ()) != source_action_ids,
+            issue.get("action_order") != next(
+                (
+                    index
+                    for index, action_id in enumerate(
+                        step_action_ids,
+                        start=1,
+                    )
+                    if action_id in issue_actions
+                ),
+                None,
+            ),
         )):
             errors.append(
                 f"Step {step_id} unresolved_issue与冻结ambiguity不一致: "
@@ -1346,6 +1525,29 @@ def _validate_unresolved_issues(step_id, step, plan, brief, action_ids):
         covered.update(issue_actions)
         valid_issue_count += 1
     return errors, covered, bool(valid_issue_count)
+
+
+def _issue_placeholder_classification(issue_type):
+    value = str(issue_type or "").casefold()
+    if "framework" in value or "contract" in value:
+        return {"issue_domain": "framework_defect", "severity": "blocking"}
+    if any(token in value for token in (
+        "business",
+        "specification",
+        "expectation",
+        "context_conflict",
+    )):
+        return {"issue_domain": "business_unresolved", "severity": "blocking"}
+    if any(token in value for token in (
+        "evidence",
+        "keyboard",
+        "locator",
+        "target",
+        "text_value",
+        "visual_state",
+    )):
+        return {"issue_domain": "technical_evidence_gap", "severity": "blocking"}
+    return {"issue_domain": "ai_implementation_gap", "severity": "action_required"}
 
 
 def _validate_action_relationships(
@@ -1527,7 +1729,19 @@ def _is_auxiliary_relationship_action(action):
         return False
     if str(action.get("role") or "").casefold() == "assertion":
         return False
-    if ((action.get("semantics") or {}).get("effect") or {}):
+    effect = ((action.get("semantics") or {}).get("effect") or {})
+    if any((
+        effect.get("changes"),
+        effect.get("after_state"),
+        effect.get("windows_opened"),
+        effect.get("windows_closed"),
+        effect.get("result") not in {
+            None,
+            "",
+            "no_semantic_change_observed",
+            "visual_state_recorded",
+        },
+    )):
         return False
     expectation = (
         (action.get("canonical_action") or {}).get(
@@ -2350,10 +2564,10 @@ def _validate_action_ambiguity_coverage(
         )
         if compatibility["status"] == "incompatible":
             continue
-        if target_name and _evidence_locator_name(
+        if target_name and target_name not in _evidence_locator_names(
             operation.get("target"),
             locator_evidence_aliases,
-        ) != target_name:
+        ):
             continue
         if action_type in {"scroll", "drag"} and any(
             (operation.get("parameters") or {}).get(name) != value
@@ -2396,10 +2610,10 @@ def _validate_assertion_ambiguity_coverage(
             operation.get("op") == candidate.get("operation")
             and (
                 not candidate.get("target")
-                or _evidence_locator_name(
+                or normalize(str(candidate.get("target") or "")) in _evidence_locator_names(
                     operation.get("target"),
                     locator_evidence_aliases,
-                ) == normalize(str(candidate.get("target") or ""))
+                )
             )
             and (
                 not (
@@ -2430,10 +2644,10 @@ def _validate_assertion_ambiguity_coverage(
             }
             and (
                 not target_name
-                or _evidence_locator_name(
+                or normalize(target_name) in _evidence_locator_names(
                     operation.get("target"),
                     locator_evidence_aliases,
-                ) == normalize(target_name)
+                )
             )
             and str(
                 (operation.get("parameters") or {}).get(
@@ -2640,6 +2854,10 @@ def _normalize_window_owners(value):
                 "ownership_candidate_id": str(
                     view.get("ownership_candidate_id") or ""
                 ).strip() or None,
+                "step_id": str(view.get("step_id") or "").strip() or None,
+                "action_ids": [
+                    str(item) for item in view.get("action_ids") or () if item
+                ],
                 "locator_file": str(
                     view.get("locator_file") or ""
                 ).strip() or None,
@@ -2655,6 +2873,9 @@ def _normalize_window_owners(value):
                 ),
             }
         owners[str(owner_id)] = {
+            "owner_kind": str(
+                owner.get("owner_kind") or ""
+            ).strip() or None,
             "evidence_root": (
                 normalize(str(
                     owner.get("evidence_root")
@@ -2675,6 +2896,9 @@ def _normalize_window_owners(value):
             ).strip() or None,
             "root_locator_file": str(
                 owner.get("root_locator_file") or ""
+            ).strip() or None,
+            "locator_file": str(
+                owner.get("locator_file") or ""
             ).strip() or None,
             "resolution": _normalize_owner_resolution(
                 owner.get("resolution")
@@ -2826,11 +3050,25 @@ def _validate_implementation_resolution(
     return errors
 
 
-def _validate_window_owners(owners, brief):
+def _validate_window_owners(owners, brief, *, plan=None):
     errors = []
     if not owners:
         return ["新 Generation Plan 缺少 window_owners"]
     for owner_id, owner in owners.items():
+        owner_kind = str(owner.get("owner_kind") or "")
+        if owner_kind == "rootless_pos":
+            errors.extend(_validate_rootless_pos_owner(
+                owner_id,
+                owner,
+                brief,
+                plan=plan,
+            ))
+            continue
+        if owner_kind:
+            errors.append(
+                f"window_owner {owner_id} owner_kind无效: {owner_kind}"
+            )
+            continue
         for field in (
             "root_locator",
             "page_object",
@@ -2964,14 +3202,22 @@ def _validate_window_owners(owners, brief):
                 errors.append(
                     f"view_owner {owner_id}.{view_id} 缺少 active_locator"
                 )
-            view_root = normalize(str(view.get("root_locator") or ""))
-            active_locator = normalize(str(
-                view.get("active_locator") or ""
-            ).lstrip("$").removeprefix("loc:"))
-            if view_root and view_root != active_locator:
+            if view.get("root_locator"):
                 errors.append(
-                    f"view_owner {owner_id}.{view_id} root_locator "
-                    "必须等于active_locator"
+                    f"view_owner {owner_id}.{view_id} 不能声明独立 root_locator"
+                )
+            view_evidence_root = normalize(str(
+                view.get("evidence_root") or ""
+            ))
+            owner_evidence_root = normalize(str(
+                owner.get("evidence_root") or ""
+            ))
+            if (
+                view_evidence_root
+                and view_evidence_root != owner_evidence_root
+            ):
+                errors.append(
+                    f"view_owner {owner_id}.{view_id} 必须共享父 automation Root"
                 )
             if (
                 root_package is None
@@ -2997,113 +3243,83 @@ def _validate_window_owners(owners, brief):
     return errors
 
 
-def _validate_child_view_candidates(owners, brief):
+def _validate_rootless_pos_owner(owner_id, owner, brief, *, plan=None):
     errors = []
-    candidates = [
-        item
-        for item in (brief.get("window_ownership") or {}).get(
-            "ownership_candidates"
-        ) or ()
-        if (item or {}).get("kind") == "child_view"
-    ]
-    candidates_by_id = {
-        str(item.get("candidate_id") or ""): item
-        for item in candidates
-        if item.get("candidate_id")
-    }
-    for owner_id, owner in (owners or {}).items():
-        for view_id, view in (owner.get("views") or {}).items():
-            if not (view or {}).get("root_locator"):
-                continue
-            candidate_id = str(
-                (view or {}).get("ownership_candidate_id") or ""
-            )
-            candidate = candidates_by_id.get(candidate_id)
-            if (
-                candidate is None
-                or normalize(str(candidate.get("child_root") or ""))
-                != normalize(str((view or {}).get("evidence_root") or ""))
-            ):
-                errors.append(
-                    "semantic_shape_error: 独立 root WindowView 必须引用"
-                    "匹配的 child_view ownership candidate: "
-                    f"view={owner_id}.{view_id} candidate={candidate_id}"
-                )
-    owner_roots = {
-        normalize(str(owner.get("evidence_root") or "")): owner_id
-        for owner_id, owner in (owners or {}).items()
-        if owner.get("evidence_root")
-    }
-    view_roots = {
-        normalize(str((view or {}).get("evidence_root") or "")): (
-            owner_id,
-            view_id,
-            view,
+    resolution = owner.get("resolution") or {}
+    evidence_root = str(owner.get("evidence_root") or "")
+    public_name = str(owner.get("public_name") or "")
+    page_object = _project_path(owner.get("page_object"))
+    locator_file = _project_path(owner.get("locator_file"))
+    if any((
+            not evidence_root,
+            not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", public_name),
+            resolution.get("strategy") != "create_new",
+            resolution.get("candidate_id"),
+            not resolution.get("reason"),
+            owner.get("root_locator"),
+            owner.get("root_locator_file"),
+            owner.get("views"),
+    )):
+        errors.append(f"window_owner {owner_id} rootless_pos 形态无效")
+    if page_object != PurePosixPath(
+            f"Bdd/page_obj/{public_name}/page.py"
+    ):
+        errors.append(
+            f"window_owner {owner_id} rootless_pos page_object未由public_name派生"
         )
-        for owner_id, owner in (owners or {}).items()
-        for view_id, view in (owner.get("views") or {}).items()
-        if (view or {}).get("evidence_root")
+    if locator_file != PurePosixPath(
+            f"Bdd/locators/{public_name}/pos.yaml"
+    ):
+        errors.append(
+            f"window_owner {owner_id} rootless_pos locator_file未由public_name派生"
+        )
+    windows = {
+        str(item.get("root_name") or ""): item
+        for item in ((brief or {}).get("window_ownership") or {}).get(
+            "windows"
+        ) or ()
+        if isinstance(item, dict) and item.get("root_name")
     }
-    candidates_by_child = {}
-    for candidate in candidates:
-        child_root = normalize(str(candidate.get("child_root") or ""))
-        if child_root:
-            candidates_by_child.setdefault(child_root, []).append(candidate)
-    for child_root, child_candidates in candidates_by_child.items():
-        if child_root in view_roots:
-            owner_id, _view_id, view = view_roots[child_root]
-            if not view.get("root_locator"):
+    actions = {
+        (
+            str(action.get("step_id") or ""),
+            str(action.get("id") or ""),
+        ): action
+        for action in (brief or {}).get("actions") or ()
+        if isinstance(action, dict)
+        and action.get("step_id")
+        and action.get("id")
+    }
+    selected_targets = []
+    for step_id, step in ((plan or {}).get("steps") or {}).items():
+        for operation in (step or {}).get("operations") or ():
+            if str(operation.get("window_owner") or "") != str(owner_id):
+                continue
+            action_id = str(operation.get("target_action_id") or "")
+            action = actions.get((str(step_id), action_id)) or {}
+            target = action.get("target") or {}
+            if any((
+                    not target,
+                    str(target.get("root_name") or "") != evidence_root,
+                    operation.get("view_owner"),
+                    operation.get("implementation_location")
+                    != "step_inline_base_api",
+            )):
                 errors.append(
-                    "semantic_shape_error: child_view WindowView 缺少 "
-                    f"root_locator: child={child_root}"
-                )
-            selected_id = str(view.get("ownership_candidate_id") or "")
-            selected = [
-                candidate
-                for candidate in child_candidates
-                if str(candidate.get("candidate_id") or "") == selected_id
-            ]
-            if len(selected) != 1:
-                errors.append(
-                    "semantic_shape_error: WindowView 缺少或引用未知 "
-                    "ownership candidate: "
-                    f"child={child_root} candidate={selected_id}"
+                    f"window_owner {owner_id} rootless_pos操作范围无效"
                 )
                 continue
-            expected_parent = normalize(str(
-                selected[0].get("parent_root") or ""
+            selected_targets.append((
+                target,
+                operation.get("locator_candidate_id"),
             ))
-            actual_parent = normalize(str(
-                (owners.get(owner_id) or {}).get("evidence_root") or ""
-            ))
-            if expected_parent != actual_parent:
-                errors.append(
-                    "semantic_shape_error: WindowView ownership candidate "
-                    "与父 owner 不一致: "
-                    f"candidate={selected_id} expected={expected_parent} "
-                    f"actual={actual_parent}"
-                )
-            continue
-        if child_root in owner_roots:
-            owner = owners[owner_roots[child_root]]
-            decision = owner.get("ownership_decision") or {}
-            dismissed = set(decision.get("dismissed_candidate_ids") or ())
-            required = {
-                str(candidate.get("candidate_id") or "")
-                for candidate in child_candidates
-                if candidate.get("candidate_id")
-            }
-            if (
-                required <= dismissed
-                and decision.get("selected_kind") == "window_page"
-                and str(decision.get("reason") or "").strip()
-            ):
-                continue
-            errors.append(
-                "semantic_shape_error: child_view ownership candidate "
-                "未采用为 WindowView: "
-                f"candidates={sorted(required)} child={child_root}"
-            )
+    if not top_level_root_uses_pos_only(
+            windows.get(evidence_root),
+            selected_targets,
+    ):
+        errors.append(
+            f"window_owner {owner_id} rootless_pos未由冻结纯POS目标证明"
+        )
     return errors
 
 
@@ -3167,11 +3383,8 @@ def _owner_evidence_roots(
         roots.add(aliases.get(root_name, root_name))
     for view in (owner.get("views") or {}).values():
         evidence_root = normalize(str(view.get("evidence_root") or ""))
-        active_locator = normalize(str(view.get("active_locator") or ""))
         if evidence_root:
             roots.add(evidence_root)
-        if active_locator:
-            roots.add(aliases.get(active_locator, active_locator))
     return roots - {""}
 
 
@@ -3190,31 +3403,64 @@ def _locator_evidence_aliases(
         name = normalize(str(locator.get("name") or ""))
         if not name:
             continue
-        evidence_name = normalize(str(
-            locator.get("evidence_name") or name
-        ))
+        explicit_alias = bool(
+            locator.get("evidence_name") or locator.get("evidence_names")
+        )
+        evidence_names = _locator_declared_evidence_names(locator, name)
+        if not evidence_names:
+            evidence_names = (name,)
         previous = aliases.get(name)
-        if previous is not None and previous != evidence_name:
+        if previous is not None and set(previous) != set(evidence_names):
             errors.append(
                 f"Step {step_id} locator {name} evidence_name 冲突"
             )
             continue
-        aliases[name] = evidence_name
-        if not locator.get("evidence_name"):
+        aliases[name] = (
+            evidence_names[0]
+            if len(evidence_names) == 1
+            else evidence_names
+        )
+        if not explicit_alias:
             continue
         kind = str(locator.get("kind") or "").casefold()
         allowed = evidence_roots if kind == "top_level" else evidence_locators
-        if evidence_name not in allowed:
-            errors.append(
-                f"Step {step_id} locator {name} 引用未知冻结 evidence_name: "
-                f"{evidence_name}"
-            )
+        for evidence_name in evidence_names:
+            if evidence_name not in allowed:
+                errors.append(
+                    f"Step {step_id} locator {name} 引用未知冻结 evidence_name: "
+                    f"{evidence_name}"
+                )
     return aliases, errors
 
 
 def _evidence_locator_name(value, aliases):
+    names = _evidence_locator_names(value, aliases)
+    return names[0] if names else normalize(str(value or ""))
+
+
+def _evidence_locator_names(value, aliases):
     name = normalize(str(value or ""))
-    return aliases.get(name, name)
+    mapped = aliases.get(name, name)
+    if isinstance(mapped, (list, tuple, set)):
+        return tuple(item for item in mapped if item)
+    return (mapped,) if mapped else ()
+
+
+def _locator_declared_evidence_names(locator, fallback_name):
+    values = []
+    if locator.get("evidence_name"):
+        values.append(locator.get("evidence_name"))
+    if isinstance(locator.get("evidence_names"), list):
+        values.extend(locator.get("evidence_names") or [])
+    result = []
+    for value in values:
+        normalized = normalize(str(value or ""))
+        if normalized and normalized not in result:
+            result.append(normalized)
+    if result:
+        return tuple(result)
+    fallback = normalize(str(fallback_name or ""))
+    return (fallback,) if fallback else ()
 
 
 def _validate_ocr_candidate_binding(
@@ -3228,10 +3474,10 @@ def _validate_ocr_candidate_binding(
         for item in operation.get("action_ids") or ()
         if item
     }
-    operation_target = _evidence_locator_name(
+    operation_targets = set(_evidence_locator_names(
         operation.get("target"),
         locator_evidence_aliases,
-    )
+    ))
     parameters = operation.get("parameters") or {}
     candidates = [
         candidate
@@ -3272,7 +3518,7 @@ def _validate_ocr_candidate_binding(
     )
     if any(
         candidate.get("operation") == operation.get("op")
-        and normalize(str(candidate.get("target") or "")) == operation_target
+        and normalize(str(candidate.get("target") or "")) in operation_targets
         and (candidate.get("parameters") or {}) == parameters
         for candidate in candidates
     ):
@@ -3298,7 +3544,10 @@ def _validate_operation_evidence_alias(
         if isinstance(item, dict)
         and normalize(str(item.get("name") or "")) == target
     ), None)
-    if not declaration or not declaration.get("evidence_name"):
+    if not declaration or not (
+            declaration.get("evidence_name")
+            or declaration.get("evidence_names")
+    ):
         return []
     referenced_actions = {
         str(item)
@@ -3323,8 +3572,8 @@ def _validate_operation_evidence_alias(
         normalize(str(source.get(action_id) or ""))
         for action_id in referenced_actions
     } - {""}
-    evidence_name = normalize(str(declaration.get("evidence_name") or ""))
-    if evidence_name in allowed:
+    evidence_names = _locator_declared_evidence_names(declaration, target)
+    if any(evidence_name in allowed for evidence_name in evidence_names):
         return []
     ownership = (
         "target_action_id"
@@ -3334,7 +3583,7 @@ def _validate_operation_evidence_alias(
     return [
         f"Step {step_id} 操作 {operation.get('op')} target={target} "
         f"evidence_name 未由{ownership}的冻结 action 支持: "
-        f"{evidence_name}"
+        f"{', '.join(evidence_names)}"
     ]
 
 
@@ -4174,6 +4423,15 @@ def _normalize_memory_entries(values):
 
 
 def _validate_memory_trace(plan, brief):
+    available = {
+        str(item.get("memory_id"))
+        for item in (brief.get("memory_digest") or {}).get("items") or []
+        if item.get("memory_id")
+    }
+    if available and "memory_trace" not in plan:
+        return [
+            "Plan memory_trace在Brief包含memory items时必填"
+        ]
     trace = plan.get("memory_trace") or {}
     applied = trace.get("applied") or []
     dismissed = trace.get("dismissed") or []
@@ -4188,11 +4446,6 @@ def _validate_memory_trace(plan, brief):
             "Plan memory_trace.dismissed 超出上限: "
             f"{len(dismissed)} > {MAX_MEMORY_TRACE_ITEMS}"
         )
-    available = {
-        str(item.get("memory_id"))
-        for item in (brief.get("memory_digest") or {}).get("items") or []
-        if item.get("memory_id")
-    }
     applied_ids = {
         str(item.get("memory_id"))
         for item in applied
@@ -4332,6 +4585,7 @@ def _plan_origin_is_valid(confirmation_source, plan_origin):
         return False
     allowed = {
         "ai_generated": {"external_ai", "deterministic_surrogate"},
+        "system_generated": {"system_baseline"},
         "user_adjustment": {"human_authored"},
     }
     return plan_origin in allowed.get(str(confirmation_source or ""), set())

@@ -21,3 +21,6 @@ venv/
 
 artifacts/
 framework_validation/output/
+.copilot/recorder-drafts/
+.copilot/recorder-routing/
+.copilot/recorder-runtime/

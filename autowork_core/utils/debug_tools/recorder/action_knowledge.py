@@ -10,7 +10,7 @@ from autowork_core.utils.debug_tools.recorder.value_authority import (
 )
 
 
-ACTION_KNOWLEDGE_VERSION = "1.2"
+ACTION_KNOWLEDGE_VERSION = "1.3"
 KNOWN_STANDARD_CONTROL_TYPES = frozenset({
     "Button",
     "CheckBox",
@@ -137,6 +137,42 @@ def operation_compatibility(operation_name, action):
         ),
         "insufficient_frozen_facts",
     )
+
+
+def action_operation_qualifications(action):
+    grouped = {
+        "compatible": [],
+        "unknown": [],
+        "incompatible": {},
+    }
+    for name in sorted(plan_operation_names()):
+        assessment = operation_compatibility(name, action)
+        status = assessment["status"]
+        if status == "incompatible":
+            grouped["incompatible"].setdefault(
+                assessment["basis"],
+                [],
+            ).append(name)
+        else:
+            grouped[status].append(name)
+    return {
+        "compatible": grouped["compatible"],
+        "unknown": grouped["unknown"],
+        "incompatible": [
+            {
+                "basis": basis,
+                "operations": operations,
+            }
+            for basis, operations in sorted(
+                grouped["incompatible"].items()
+            )
+        ],
+        "policy": {
+            "compatible_is_runtime_proof": False,
+            "unknown_is_rejected": False,
+            "only_incompatible_is_rejected": True,
+        },
+    }
 
 
 def _compatibility(status, reason, basis):

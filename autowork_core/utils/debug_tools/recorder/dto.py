@@ -37,6 +37,8 @@ class XPathTechnicalDetailDTO:
     generation_status: str
 
 
+    feature_source_relpath: str = ""
+    scenario_id: str = ""
 @dataclass(frozen=True)
 class ObservationDTO:
     annotation_id: str
@@ -112,6 +114,8 @@ class LibraryRunDTO:
     path: str
     directory_path: str | None
     search_text: str
+    feature_source_relpath: str = ""
+    scenario_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,7 @@ class FeatureScenarioDTO:
     export_updated_at: str | None
     run_path: str | None = None
     issue: str | None = None
+    step_statuses: tuple[tuple, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -292,6 +297,13 @@ class ImplementationSummaryDTO:
 
 
 @dataclass(frozen=True)
+class LocatorReuseSummaryDTO:
+    reused_count: int = 0
+    added_count: int = 0
+    maintenance_count: int = 0
+
+
+@dataclass(frozen=True)
 class StageOutcomeDTO:
     status: str
     source: str
@@ -337,9 +349,26 @@ class GenerationResultDTO:
     recommended_action: str = "review_result"
     recommended_label: str = "查看生成结果"
     implementation: ImplementationSummaryDTO | None = None
+    locator_reuse: LocatorReuseSummaryDTO | None = None
+    unresolved_issues: tuple[IssueDTO, ...] = ()
     stages: GenerationStageSummaryDTO | None = None
     execution_status: str | None = None
     workspace_materialization: WorkspaceMaterializationDTO | None = None
+    service_level_status: str | None = None
+    service_level_target_seconds: int | None = None
+    service_level_duration_ms: int | None = None
+    service_level_observed_duration_ms: int | None = None
+    service_level_coverage: str | None = None
+    service_level_timing_source: str | None = None
+    generation_progress_phase: str | None = None
+    generation_progress_stage: str | None = None
+    generation_progress_next_action: str | None = None
+    generation_progress_candidate_file_count: int | None = None
+    generation_progress_candidate_window_count: int | None = None
+    generation_progress_agent_wait_status: str | None = None
+    generation_progress_max_wait_ms: int | None = None
+    generation_progress_max_wait_tool_kind: str | None = None
+    generation_progress_max_wait_segment: str | None = None
 
 
 @dataclass(frozen=True)

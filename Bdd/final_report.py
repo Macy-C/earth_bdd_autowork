@@ -28,15 +28,15 @@ DEFAULT_FINAL_REPORT_JSON = DEFAULT_FINAL_REPORT_TEXT
 
 def create_final_report():
     return _create(
-        DEFAULT_INPUT_REPORT_JSON,
+        report_json=DEFAULT_INPUT_REPORT_JSON,
            final_report_json=DEFAULT_FINAL_REPORT_JSON,
     )
 
 
 def merge_final_report():
     return _merge(
-        DEFAULT_INPUT_REPORT_JSON,
-            final_report_json=DEFAULT_FINAL_REPORT_JSON,
+        report_json=DEFAULT_INPUT_REPORT_JSON,
+        final_report_json=DEFAULT_FINAL_REPORT_JSON,
         allow_add=False,
         # 目标不唯一时再填写：
         # feature_file=r"Bdd\test_features\calc\calc.feature",

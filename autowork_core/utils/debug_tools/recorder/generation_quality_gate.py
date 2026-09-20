@@ -13,6 +13,9 @@ from autowork_core.utils.debug_tools.recorder.generation_plan import (
 from autowork_core.utils.debug_tools.recorder.generation_job import (
     generation_job_lease_is_valid,
 )
+from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
+    IMPLEMENTATION_MANIFEST_VERSION,
+)
 from autowork_core.utils.debug_tools.recorder.request_repository import (
     request_identity_is_valid,
 )
@@ -248,7 +251,7 @@ def _transaction_passed(report, request, plan_artifact):
     if (
         (report.get("implementation_manifest") or {}).get(
             "implementation_manifest_version"
-        ) == "1.12"
+        ) == IMPLEMENTATION_MANIFEST_VERSION
         and (report.get("terminal_snapshot_audit") or {}).get("status")
         != "passed"
     ):

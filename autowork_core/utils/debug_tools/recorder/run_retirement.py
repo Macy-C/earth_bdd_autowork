@@ -21,8 +21,15 @@ from autowork_core.utils.debug_tools.recorder.knowledge_store import (
 from autowork_core.utils.debug_tools.recorder.project_memory import (
     load_memory_events,
 )
+from autowork_core.utils.debug_tools.recorder.transaction_integrity import (
+    transaction_result_fingerprint,
+)
 from autowork_core.utils.debug_tools.recorder.run_lock import active_run_lock
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
+from autowork_core.utils.debug_tools.recorder.workflow_state import (
+    _retired_job_entry,
+    write_workflow_state,
+)
 
 
 RETIREMENT_VERSION = "1.0"
@@ -34,6 +41,103 @@ class RunRetirementError(RuntimeError):
 
 class RunKnowledgeRequiredError(RunRetirementError):
     pass
+
+
+def cleanup_legacy_running_generation(session_dir, *, reason=""):
+    session_dir = Path(session_dir).resolve()
+    inspection = inspect_run_retirement(session_dir)
+    workflow_root = session_dir / "ai" / "workflow"
+    active_transactions = set(_active_workflow_transaction_ids(session_dir))
+    running_reports = _running_transaction_report_entries(session_dir)
+    blocked_reports = {
+        entry["transaction_id"]
+        for entry in running_reports
+        if entry["transaction_id"] in active_transactions
+    }
+    cleaned = []
+    cleaned_transactions = []
+    blocked = []
+    for entry in running_reports:
+        transaction_id = entry["transaction_id"]
+        if transaction_id in blocked_reports:
+            blocked.append(transaction_id)
+            continue
+        _supersede_orphan_running_transaction_report(
+            entry["path"],
+            entry["report"],
+            reason=reason,
+        )
+        cleaned_transactions.append(transaction_id)
+    for path in workflow_root.glob("*.json"):
+        try:
+            state = _read_json(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if state.get("status") != "running":
+            continue
+        active = state.get("active_transaction") or {}
+        transaction_id = str(active.get("transaction_id") or "")
+        if transaction_id and transaction_id in blocked_reports:
+            blocked.append(transaction_id)
+            continue
+        errors = [
+            *[str(item) for item in state.get("errors") or ()],
+            "legacy_running_generation_cleaned",
+        ]
+        current_job = state.get("current_job") or {}
+        if current_job:
+            retired = list(state.get("retired_jobs") or [])
+            retired.append(_retired_job_entry(
+                current_job,
+                status="failed",
+                execution=state.get("job_execution") or {},
+                reason="legacy_running_generation_cleaned",
+                last_job_result=state.get("last_job_result"),
+                errors=errors,
+            ))
+        else:
+            retired = list(state.get("retired_jobs") or [])
+        state.update({
+            "status": "failed",
+            "next_action": "review_generation_failure",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "current_job": None,
+            "job_execution": None,
+            "retired_jobs": retired,
+            "active_transaction": None,
+            "legacy_cleanup": {
+                "cleanup_version": "1.0",
+                "reason": str(reason or "用户清理遗留生成状态"),
+            },
+            "errors": errors,
+        })
+        write_workflow_state(session_dir, state)
+        cleaned.append(str(state.get("request_id") or path.stem))
+    if blocked:
+        raise RunRetirementError(
+            "存在仍在运行的生成事务，不能作为遗留状态清理: "
+            + ", ".join(blocked)
+        )
+    return {
+        "status": "cleaned" if cleaned or cleaned_transactions else "no_changes",
+        "cleaned_workflows": cleaned,
+        "cleaned_transactions": cleaned_transactions,
+        "before": inspection,
+        "after": inspect_run_retirement(session_dir),
+    }
+
+
+def _supersede_orphan_running_transaction_report(path, report, *, reason=""):
+    report = dict(report or {})
+    superseded_at = datetime.now().isoformat(timespec="seconds")
+    report["status"] = "superseded"
+    report["superseded_at"] = superseded_at
+    report["superseded_reason"] = str(
+        reason or "legacy_orphan_running_transaction_cleaned"
+    )
+    report["completion_fingerprint"] = None
+    report["result_fingerprint"] = transaction_result_fingerprint(report)
+    write_json_atomic(path, report)
 
 
 def inspect_run_retirement(session_dir):
@@ -190,15 +294,10 @@ def retire_recording_session(
 
 
 def _running_transactions(session_dir):
-    result = []
-    root = session_dir / "ai" / "generation-transactions"
-    for path in root.glob("transaction-*/report.json"):
-        try:
-            report = _read_json(path)
-        except (OSError, ValueError, json.JSONDecodeError):
-            continue
-        if report.get("status") == "running":
-            result.append(str(report.get("transaction_id") or path.parent.name))
+    result = [
+        entry["transaction_id"]
+        for entry in _running_transaction_report_entries(session_dir)
+    ]
     workflow_root = session_dir / "ai" / "workflow"
     for path in workflow_root.glob("*.json"):
         try:
@@ -210,6 +309,50 @@ def _running_transactions(session_dir):
             if value not in result:
                 result.append(value)
     return sorted(result)
+
+
+def _running_transaction_reports(session_dir):
+    return [
+        entry["transaction_id"]
+        for entry in _running_transaction_report_entries(session_dir)
+    ]
+
+
+def _running_transaction_report_entries(session_dir):
+    result = []
+    root = session_dir / "ai" / "generation-transactions"
+    for path in root.glob("transaction-*/report.json"):
+        try:
+            report = _read_json(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if report.get("status") == "running":
+            result.append({
+                "transaction_id": str(
+                    report.get("transaction_id") or path.parent.name
+                ),
+                "path": path,
+                "report": report,
+            })
+    return sorted(result, key=lambda item: item["transaction_id"])
+
+
+def _active_workflow_transaction_ids(session_dir):
+    result = []
+    workflow_root = session_dir / "ai" / "workflow"
+    for path in workflow_root.glob("*.json"):
+        try:
+            state = _read_json(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if state.get("status") != "running":
+            continue
+        transaction_id = str(
+            (state.get("active_transaction") or {}).get("transaction_id") or ""
+        )
+        if transaction_id:
+            result.append(transaction_id)
+    return sorted(set(result))
 
 
 def _event_belongs_to_session(event, session_id, session_path):

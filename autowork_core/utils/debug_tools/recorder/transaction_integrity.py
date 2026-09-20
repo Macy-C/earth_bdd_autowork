@@ -4,12 +4,27 @@ import hashlib
 import json
 
 
+TRANSACTION_VERSION = "3.3"
+
+
 TRANSACTION_TRANSPORT_FIELDS = {
+    "acceptance_summary",
+    "category",
     "completion_fingerprint",
+    "delivery_summary",
+    "delivery_visibility",
+    "failure_summary",
+    "generation_timing_ledger",
+    "health_issues",
+    "host_delivery_observation",
     "job_lifecycle_timing",
     "job_transition",
+    "last_job_result",
     "report_path",
     "result_fingerprint",
+    "service_level",
+    "stages",
+    "workspace_projection_summary",
 }
 
 
@@ -27,10 +42,22 @@ def transaction_result_fingerprint(report):
         key: item
         for key, item in dict(report or {}).items()
         if key not in {
+            "health_issues",
+            "acceptance_summary",
+            "category",
+            "delivery_summary",
+            "delivery_visibility",
+            "failure_summary",
+            "generation_timing_ledger",
+            "host_delivery_observation",
             "job_lifecycle_timing",
             "job_transition",
+            "last_job_result",
             "report_path",
             "result_fingerprint",
+            "service_level",
+            "stages",
+            "workspace_projection_summary",
         }
     }
     return _fingerprint(value)

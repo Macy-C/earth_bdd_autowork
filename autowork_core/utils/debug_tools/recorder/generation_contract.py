@@ -25,16 +25,53 @@ from autowork_core.utils.debug_tools.recorder.ai_context_envelope import (
     compact_ai_context_envelope_contract,
 )
 from autowork_core.utils.debug_tools.recorder.generation_design import (
+    GENERATION_AMBIGUITY_CHOICE_PATCH_VERSION,
+    GENERATION_ASSERTION_CHOICE_PATCH_VERSION,
+    GENERATION_METHOD_CHOICE_PATCH_VERSION,
+    GENERATION_NAMING_PATCH_VERSION,
+    GENERATION_OPERATION_CHOICE_PATCH_VERSION,
+    GENERATION_VALUE_SOURCE_CHOICE_PATCH_VERSION,
     compact_generation_design_contract,
 )
 from autowork_core.utils.debug_tools.recorder.implementation_manifest import (
     compact_implementation_manifest_contract,
 )
+from autowork_core.utils.debug_tools.recorder.implementation_materializer import (
+    MATERIALIZATION_CANDIDATE_VERSION,
+)
+from autowork_core.utils.debug_tools.recorder.generation_task_bundle import (
+    GENERATION_TASK_BUNDLE_VERSION,
+    GENERATION_TASK_FRAGMENT_VERSION,
+    MAX_ACTIONS_PER_FRAGMENT,
+    MAX_BUNDLE_INDEX_BYTES,
+    MAX_FRAGMENT_BYTES,
+)
+from autowork_core.utils.debug_tools.recorder.generation_diff import (
+    GENERATION_DIFF_VERSION,
+    GENERATION_DIFF_SUMMARY_VERSION,
+)
+from autowork_core.utils.debug_tools.recorder.generation_capsule import (
+    GENERATION_CAPSULE_VERSION,
+)
+from autowork_core.utils.debug_tools.recorder.generation_job import (
+    GENERATION_JOB_LEASE_VERSION,
+    GENERATION_JOB_VERSION,
+)
+from autowork_core.utils.debug_tools.recorder.generation_job_result import (
+    GENERATION_JOB_RESULT_VERSION,
+)
+from autowork_core.utils.debug_tools.recorder.generation_profile import (
+    GENERATION_PROFILE_REGISTRY_VERSION,
+    GENERATION_PROFILE_VERSION,
+)
+from autowork_core.utils.debug_tools.recorder.transaction_integrity import (
+    TRANSACTION_VERSION,
+)
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-GENERATION_CONTRACT_VERSION = "6.30"
-FRAMEWORK_CONTRACT_VERSION = "3.6"
+GENERATION_CONTRACT_VERSION = "6.96"
+FRAMEWORK_CONTRACT_VERSION = "3.7"
 GENERATION_CONTRACT_LEASE_VERSION = "1.0"
 
 ALLOWED_BASE_PAGE_APIS = contract_api_groups()
@@ -50,24 +87,259 @@ def build_generation_contract(manifest):
         "schema_version": SCHEMA_VERSION,
         "generation_contract_version": GENERATION_CONTRACT_VERSION,
         "generation_file_lease_version": "2.0",
+        "generation_profile_contract": {
+            "registry_version": GENERATION_PROFILE_REGISTRY_VERSION,
+            "profile_version": GENERATION_PROFILE_VERSION,
+        },
+        "generation_job_contract": {
+            "version": GENERATION_JOB_VERSION,
+            "lease_version": GENERATION_JOB_LEASE_VERSION,
+            "service_level_version": "1.0",
+            "workload_unit": "bdd_step",
+            "large_job_step_threshold": 100,
+            "max_supported_step_count": 600,
+            "direct_design": "retired_from_product_entrypoint",
+            "naming_patch": "minimal_ai_patch_for_system_baseline_name_blanks",
+            "ambiguity_choice_patch": "minimal_ai_patch_for_frozen_ai_ambiguity_outcomes",
+            "assertion_choice_patch": "minimal_ai_patch_for_frozen_assertion_candidate_keys",
+            "method_choice_patch": "minimal_ai_patch_for_frozen_page_method_candidates",
+            "operation_choice_patch": "minimal_ai_patch_for_frozen_operation_choice_sets",
+            "value_source_choice_patch": "minimal_ai_patch_for_frozen_available_value_sources",
+            "business_review": "job_bound_user_authority_workset_before_generation",
+            "business_questions": "business_review_answer_batch_ai_ambiguity_in_job",
+            "business_question_interaction": (
+                "advance_job_business_review_then_single_answer_batch"
+            ),
+            "business_question_display": (
+                "compact_cli_declared_options_with_verified_media_links"
+            ),
+            "business_question_media": (
+                "verified_workspace_links_or_explicit_unavailable"
+            ),
+            "business_fact_patch": "job_bound_freeform_business_facts_only",
+            "deny_only_pic": "system_default_deny_not_user_question",
+            "typed_patch_submission": "atomic_overrides_before_baseline_compile",
+            "host_guard": "no_external_output_reads_and_current_job_actions_only",
+            "candidate_preflight": (
+                "complete_system_bundle_staged_before_transaction_and_system_materialization"
+            ),
+            "candidate_delivery": (
+                "system_materializer_with_implementation_diff"
+            ),
+            "terminal_failure": "primary_owner_stage_before_health_warnings",
+            "invalid_ai_design": "revise_same_design_same_job",
+            "run_job_phase": "implementation_only",
+            "input_capsule": {
+                "version": GENERATION_CAPSULE_VERSION,
+                "rule": (
+                    "Job generation inputs, including the bound Feature, are "
+                    "sealed before AI generation; "
+                    "live workspace is checked only by the commit gate."
+                ),
+            },
+            "current_content_projection": {
+                "version": "1.0",
+                "rule": (
+                    "Each newly admitted Job binds a current workspace content "
+                    "projection to the same input snapshot fingerprint as the "
+                    "Generation Capsule; it is the upstream fact source for "
+                    "existing assets, generated assets, and required structure "
+                    "files. Stage 2 makes Implementation Manifest consume the "
+                    "projection for package markers, read-only reuse, and asset "
+                    "resolution. Stage 3 makes Candidate Preflight materialize "
+                    "only the projection-defined workspace slice for source files, "
+                    "read-only structure files, and direct local import dependencies. "
+                    "Stage 4 makes Job Result and entrypoint projections show the "
+                    "bound projection fingerprint plus reuse/modify/new/missing/"
+                    "user-modified summary counts without exposing file lists."
+                ),
+            },
+            "timeout_behavior": "continue_same_job_and_report",
+            "timing_coverage": {
+                "agent_hook": "complete_host_observation",
+                "manual_cli": "incomplete",
+            },
+        },
+        "generation_result_contract": {
+            "job_result_version": GENERATION_JOB_RESULT_VERSION,
+            "transaction_version": TRANSACTION_VERSION,
+            "implementation_diff_version": GENERATION_DIFF_VERSION,
+            "implementation_diff_summary_version": GENERATION_DIFF_SUMMARY_VERSION,
+        },
+        "generation_placeholder_policy": {
+            "version": "1.0",
+            "terminal_failure_only_for": [
+                "job_identity_or_cas_mismatch",
+                "request_brief_plan_or_contract_integrity",
+                "write_scope_or_protected_path_violation",
+                "transaction_result_tamper",
+                "pic_authorization_violation",
+                "system_candidate_invalid",
+            ],
+            "typed_placeholder_for": [
+                "non_security_generation_gap",
+                "locator_or_reuse_uncertainty",
+                "pos_or_ocr_fallback_uncertainty",
+                "window_close_uncertainty",
+                "top_level_root_without_criteria_pos_fallback",
+                "unsupported_scroll_review",
+                "unsupported_assertion_implementation",
+                "invalid_technical_value_binding",
+                "control_final_state_uncertainty",
+                "local_implementation_gap",
+                "plan_conformance_gap",
+            ],
+            "efficiency_rule": (
+                "After full-scenario generation starts, only super blockers "
+                "may stop the Job. Empty top-level popup roots with valid POS "
+                "use low-confidence coordinates; without POS they use typed "
+                "placeholder. Non-security locator, window-close, "
+                "scroll review, unsupported assertion, technical binding, "
+                "control-state, reuse, or implementation uncertainty becomes "
+                "a typed placeholder or low-confidence implementation and is "
+                "reported in the final Job Result; no repeated AI confirmation "
+                "loop, Job replacement, or rerecord attempt during generation."
+            ),
+        },
         "generation_design_contract": {
             "version": design_contract["design_version"],
             "fingerprint": _hash_value(design_contract),
+            "role": "internal_plan_input_model",
+            "product_entry": "retired",
         },
+        "generation_naming_patch_contract": {
+            "version": GENERATION_NAMING_PATCH_VERSION,
+            "patch_type": "naming",
+            "fields": ["target_names", "business_names"],
+            "submit_command": "advance-job --target-name",
+            "scope": "only unresolved public-name blanks from the system baseline",
+        },
+        "generation_ambiguity_choice_patch_contract": {
+            "version": GENERATION_AMBIGUITY_CHOICE_PATCH_VERSION,
+            "patch_type": "ambiguity_choice",
+            "fields": ["choices.ambiguity_id", "choices.outcome"],
+            "submit_command": "advance-job --ambiguity-choice",
+            "scope": (
+                "only AI-authority frozen plan_coverage outcomes that do "
+                "not require candidate, value, locator, method, or Plan "
+                "structure changes"
+            ),
+        },
+        "generation_assertion_choice_patch_contract": {
+            "version": GENERATION_ASSERTION_CHOICE_PATCH_VERSION,
+            "patch_type": "assertion_choice",
+            "fields": ["choices.ambiguity_id", "choices.candidate_key"],
+            "submit_command": "advance-job --assertion-choice",
+            "scope": (
+                "only frozen assertion implementation candidate keys from "
+                "assertion_implementation ambiguity facts; operations, "
+                "parameters, values, and provenance are re-resolved from the "
+                "frozen candidate"
+            ),
+        },
+        "generation_method_choice_patch_contract": {
+            "version": GENERATION_METHOD_CHOICE_PATCH_VERSION,
+            "patch_type": "method_choice",
+            "fields": ["choices.step_id", "choices.candidate_id"],
+            "submit_command": "advance-job --method-choice",
+            "scope": (
+                "only frozen Page method candidate_id for a Step whose "
+                "baseline operations exactly match the candidate call_sequence; "
+                "method bodies, operations, values, windows, locators, and "
+                "proof remain system-owned"
+            ),
+        },
+        "generation_operation_choice_patch_contract": {
+            "version": GENERATION_OPERATION_CHOICE_PATCH_VERSION,
+            "patch_type": "operation_choice",
+            "fields": [
+                "choices.step_id",
+                "choices.action_id",
+                "choices.choice_key",
+            ],
+            "submit_command": "advance-job --operation-choice",
+            "scope": (
+                "only choice_key values from the frozen OperationChoiceSet "
+                "for a Step/Action; operation strings, values, windows, "
+                "locators, methods, and proof remain system-owned"
+            ),
+        },
+        "generation_value_source_choice_patch_contract": {
+            "version": GENERATION_VALUE_SOURCE_CHOICE_PATCH_VERSION,
+            "patch_type": "value_source_choice",
+            "fields": [
+                "choices.step_id",
+                "choices.action_id",
+                "choices.operation",
+                "choices.source.kind",
+                "choices.source.reference/action_id",
+            ],
+            "submit_command": "advance-job --value-source-choice",
+            "scope": (
+                "only status=available value_source qualification shapes "
+                "for a frozen Step/Action/operation; values and provenance "
+                "are re-resolved by the compiler"
+            ),
+        },
+        "generation_decision_authority_matrix": (
+            _generation_decision_authority_matrix()
+        ),
         "implementation_manifest_contract": {
             "version": implementation_contract[
                 "implementation_manifest_version"
             ],
             "fingerprint": _hash_value(implementation_contract),
         },
+        "implementation_candidate_contract": {
+            "version": MATERIALIZATION_CANDIDATE_VERSION,
+            "workspace_write_owner": "system_materializer",
+            "prepare_writes_workspace": False,
+            "advance_job_writes_system_owned_workspace": True,
+            "query": "job-implementation-candidate",
+            "normal_delivery_write_channel": "system_materializer",
+            "normal_review_channel": "implementation_diff",
+            "candidate_index_role": "internal_diagnostic_only",
+            "native_edit_operation": "retired_from_product_delivery",
+            "file_operation_field": "lines[].op",
+            "manifest_operation_field": "files[].operation",
+            "create_file_tool": None,
+            "replace_file_tool": None,
+            "manifest_field": "candidate_manifest",
+            "index_field": "candidate_index",
+            "line_window_field": "candidate_index.recommended_read",
+            "editable_list_field": "candidate_index.lines",
+            "source_file_field": "candidate_index.source_root + lines[].source",
+            "target_file_field": "lines[].target",
+            "verification": "target_sha256_must_equal_expected_sha256",
+            "delivery_review": "implementation_diff",
+            "shell_or_python_workspace_write": False,
+            "candidate_query_mode": "internal_diagnostic_compact_index_without_all",
+            "preflight": "passed_before_system_materialization",
+        },
         "ai_context_envelope_contract": {
             "version": envelope_contract["ai_context_envelope_version"],
             "fingerprint": envelope_contract["contract_fingerprint"],
         },
+        "generation_task_bundle_contract": {
+            "version": GENERATION_TASK_BUNDLE_VERSION,
+            "fragment_version": GENERATION_TASK_FRAGMENT_VERSION,
+            "max_actions_per_fragment": MAX_ACTIONS_PER_FRAGMENT,
+            "max_fragment_bytes": MAX_FRAGMENT_BYTES,
+            "max_default_index_bytes": MAX_BUNDLE_INDEX_BYTES,
+            "ordinary_static_service_level_target_seconds": 300,
+            "large_static_service_level_target_seconds": 1800,
+            "applies_to": "large_jobs_only",
+            "query": "job-task-bundle",
+            "rules": [
+                "Fragment JSON bytes, index metadata, Job, Request, Brief, Profile, and Contract identities are content-bound.",
+                "Fragments are read-only context pages; they never own independent designs, leases, attempts, or submissions.",
+                "Paged TaskBundle context never prevents the system baseline attempt; fragments are read only after advance-job still returns design_required.",
+            ],
+        },
         "framework_contract": framework_contract,
         "purpose": (
             "Generate evidence-traceable BDD code through an immutable "
-            "Generation Job with frontloaded Decisions and fail-closed "
+            "Generation Job with one optional post-claim business answer batch and fail-closed "
             "Plan/Transaction validation."
         ),
         "entrypoint": "ai/generation-jobs/<request-id>/job-<fingerprint>.json",
@@ -76,19 +348,15 @@ def build_generation_contract(manifest):
                 "python -m autowork_core.utils.debug_tools.recorder."
                 "generation_workflow inspect-job <job-path>"
             ),
-            "start": (
+            "settle": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow start-job <job-path> --expected-epoch <epoch>"
+                "generation_workflow settle-job <job-path>"
             ),
-            "retry": (
+            "advance": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow retry-job <job-path>"
+                "generation_workflow advance-job <job-path>"
             ),
-            "retire": (
-                "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow retire-job <job-path> --expected-epoch <epoch> "
-                "--reason <reason> [--claim-id <claim-id>]"
-            ),
+            "submit_answers": "retired: Workbench submits Request Decision Answers before Job claim",
             "evidence": (
                 "python -m autowork_core.utils.debug_tools.recorder."
                 "generation_workflow job-evidence <job-path> "
@@ -97,7 +365,12 @@ def build_generation_contract(manifest):
             "design_context": (
                 "python -m autowork_core.utils.debug_tools.recorder."
                 "generation_workflow job-design-context <job-path> "
-                "[--step-id <step-id>]"
+                "[--step-id <step-id>] # only after generate-job returns design_required"
+            ),
+            "task_bundle": (
+                "python -m autowork_core.utils.debug_tools.recorder."
+                "generation_workflow job-task-bundle <job-path> "
+                "[--fragment-id <fragment-id>]"
             ),
             "compare_takes": (
                 "python -m autowork_core.utils.debug_tools.recorder."
@@ -112,40 +385,25 @@ def build_generation_contract(manifest):
                 "python -m autowork_core.utils.debug_tools.recorder."
                 "generation_workflow design-contract"
             ),
-            "design": (
+            "generate": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow design-job <job-path> --claim-id <claim-id> "
-                "--expected-epoch <epoch> --design-file <design.json>"
-            ),
-            "prepare": (
-                "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow prepare-job <job-path> --claim-id <claim-id> "
-                "--expected-epoch <epoch>"
+                "generation_workflow advance-job <job-path> "
+                "[--target-name <step-id/action-id=name> | --ambiguity-choice <ambiguity=outcome> | --assertion-choice <ambiguity=candidate> | --method-choice <step=candidate> | --operation-choice <step/action=choice> | --value-source-choice <step/action/operation=source>]"
             ),
             "implementation_packet": (
                 "python -m autowork_core.utils.debug_tools.recorder."
                 "generation_workflow job-implementation-packet <report-path> "
                 "[--step-id <step-id> | --path <path>]"
             ),
-            "validate_implementation": (
+            "implementation_candidate": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow validate-job-implementation <report-path> "
-                "--claim-id <claim-id> --expected-epoch <epoch>"
+                "generation_workflow job-implementation-candidate "
+                "<report-path>"
             ),
-            "finish": (
+            "implementation_diff": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow finish-job <report-path> --claim-id <claim-id> "
-                "--expected-epoch <epoch>"
-            ),
-            "abort": (
-                "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow abort-job <report-path> --claim-id <claim-id> "
-                "--expected-epoch <epoch> --reason <reason>"
-            ),
-            "runtime_reconcile": (
-                "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow reconcile-job-runtime <job-path> "
-                "--claim-id <claim-id> --expected-epoch <epoch>"
+                "generation_workflow job-code-diff <report-path> "
+                "[--offset <byte-offset>] [--limit <bytes>]"
             ),
             "risk_modes": ["fast", "clarify", "forensic", "blocked"],
             "workflow_states": [
@@ -166,21 +424,71 @@ def build_generation_contract(manifest):
                 "AI reads content-addressed Plan Context 1.1 by default; the full immutable GenerationPlan remains backend identity and expands only through the plan query.",
                 "Completed regeneration may reuse its bound Request and Plan; its own prior transaction result does not stale the Request, while newer feedback or other relevant memory still requires rematerialization.",
                 "Semantic Reconciler must classify all default evidence before fast generation.",
-                "AI submits GenerationDesignV1 semantic and implementation choices; the deterministic compiler creates one revision-bound GenerationPlanV4.2 with Scenario Model, target/value provenance, typed ambiguity, window, method resolution, runtime bindings, and Generation Contract and Job leases.",
+                "Evidence completeness is a pre-entry gate: an evidence gap cannot create an active Generation Job.",
+                "Workbench submission gate only blocks incomplete target Steps, hard evidence/readiness blockers, request refresh, and Job creation failures; user-authority Decision questions are handled after the Job is submitted to Copilot.",
+                "advance-job projects pending Decision Pack user-authority/authorization questions directly as one business_answers_required batch before full generation; business_review_required, business_option_answers_required, submit-business-review, and submit-business-answers are retired from the normal product path.",
+                "Authority questions are asked once through one vscode_askQuestions call with clickable options and returned per-question allowFreeformInput flags; selected options and allowed freeform answers are submitted through submit-business-review-answers and backend validation turns accepted facts into Decision Answers and Plan business_facts constraints.",
+                "submit-business-answers, submit-business-facts, and submit-business-review are lower-level migration/helper commands, not normal-path answer transports.",
+                "AI-authority business ambiguities remain in the Job and are resolved by typed patch or Plan selection; they must not become Workbench answer blockers.",
+                "The Agent never owns Decision answer binding or persistence; unanswered user-authority questions stop before full generation and backend Decision Pack validates the Job-bound submission.",
+                "Only questions requiring user authority or authorization enter the Answers batch; a PIC candidate without an authorized alternative is denied by system policy and never becomes a user question.",
+                "Every pre-generation answer question projects a user-facing askQuestions payload; askQuestions is allowed only when the current Job control projects business_questions and never during typed patch or technical uncertainty stages.",
+                "advance-job first uses system-owned baseline facts to compile GenerationPlanV4.2; naming_patch_required, ambiguity_choice_required/AmbiguityChoicePatchV1, assertion_choice_required/AssertionChoicePatchV1, method_choice_required/MethodChoicePatchV1, operation_choice_required/OperationChoicePatchV1, and value_source_choice_required/ValueSourceChoicePatchV1 are collected into typed_patch_requirement_batch 1.0 when possible so the Agent submits all complete direct typed arguments in one command; untyped design_required is blocked as a classification defect because complete GenerationDesign product entry is retired.",
+                "Single and mixed typed patches share one atomic compiler path: naming overrides and every typed choice are applied before the baseline is built, then the complete Design is validated once.",
+                "Every typed patch required response carries typed_patch_requirements 1.0, and multi-gap responses carry typed_patch_requirement_batch 1.0 with requirement_id, complete, facts, choices, submit_arguments, optional recommended_arguments, forbidden_fields, missing_fields, and deduplicated allowed_queries; complete=true forbids expanding job-design-context, and unbounded job-design-context is blocked while a typed patch is active.",
+                "Only complete=false plus an explicit allowed_query may authorize a bounded follow-up query. Missing typed_patch_requirements, a missing batch for multiple gaps, or complete=false without allowed_query is a framework defect, not Agent discretion.",
+                "Recorder workflow JSON is protocol data and must not be delegated to execution_subagent or any summary-only runner. A summary missing next_commands, typed batch, candidate files, or terminal result is a protocol output defect; the Agent may use only returned Job-bound candidate manifest/diff page queries, never chat resource files or external terminal-output files, and must not rerun bare advance-job.",
+                "Terminal completed/failed advance-job and generate-job output is a fixed result envelope: terminal_result is the user-facing result object, implementation_diff_summary.files is a bounded file-stat preview, next_commands.diff_review is the complete review entry, and workspace projection, delivery/visibility duplicate summaries, job lifecycle, stages, raw changed_files, full report, Plan, Manifest, and candidate payloads are omitted from the normal terminal envelope.",
+                "When typed_patch_requirement_batch is complete and every requirement has recommendation.classification=system_verified_unique, advance-job submits that batch itself before returning to the Agent; returned complete batches remain AI-decision boundaries. The Agent must submit returned direct typed arguments in one advance-job command after at most one concise stage-level progress message, without repeated explanation or querying job-design-context; if recommended=true, next_commands.primary is already fully filled and compact output omits requirements by default. A complete batch without next_commands.primary is a framework defect: stop, do not rerun bare advance-job, inspect CLI help, or reconstruct commands.",
+                "Host Control denies vscode_askQuestions, retired submit-job-answers, chat-session-resources, external terminal-output reads, job-implementation-candidate --all, full manifest reads on the normal path, and unbound source reads in every generation phase; candidate index and native-edit source reads are internal diagnostics, not the normal system-owned delivery path.",
+                "While a typed Design marker is active, Host Control denies project source/rule/memory reads and unbounded workflow commands; only the current host result, advance-job, and an explicitly bounded Step query remain available.",
                 "Generation Contract binds the exact GenerationDesign and Implementation Manifest contract versions and fingerprints; either schema change requires Request rematerialization.",
-                "Inspect is side-effect-free for transaction state; prepare opens the running transaction lease.",
+                "Every newly admitted Generation Job persists generation_workspace_projection as the current content package: it is bound to the same generation_input_snapshot_fingerprint as the Capsule and records existing assets, generated-result presence, and required package markers. Implementation Manifest consumes it for current_content_projection, package marker create/reuse, read_only_reuse, and asset_resolution; Candidate Preflight consumes it to materialize the projection-defined workspace slice, including source files, read-only structure files, and direct local import dependencies, while snapshot drift fails closed. Job Result and normal entrypoints expose workspace_projection_summary with the same projection_fingerprint and compact reuse/modify/new/missing/user_modified counts; retired terminal results are audit evidence only, and a generated file is reusable only if it still exists in the current workspace projection.",
+                "Implementation Packet freezes every Step page_binding, including all cross-WindowPage operation owners; the renderer rejects unbound receiver expressions.",
+                "Before a complete system-owned candidate gets a Transaction/file lease or system-materialization commit, Candidate Preflight reconstructs Capsule sources in a private staging root and reuses Python, locator, Step-scope, and Plan-to-Code validators.",
+                "Candidate Preflight failure publishes terminal system_candidate_invalid with implementation owner evidence and leaves Bdd unchanged; the Agent may not hand-edit or replay that candidate.",
+                "Replacing a current Generation Job archives that Job's frozen Brief before any fresh Brief/Decision Pack is written; retired Jobs must remain inspectable without depending on the mutable request brief path.",
+                "System materialization owns normal candidate text boundaries, including platform line endings and a stable final newline; the Agent must not copy system-owned candidate content, recalculate hashes, normalize newlines, delete/recreate existing targets, or repair SHA mismatches by shell commands.",
+                "Inspect is side-effect-free for transaction state; advance-job is the normal Agent entrypoint for claim progression, transaction preparation, validation, and finish.",
+                "advance-job runs system-owned deterministic stages in one command until it reaches an AI-decision, terminal, or failure boundary; advance_summary.deterministic_progression lists the internal orchestration stages that were already executed, and the Agent must not split settle/start/prepare/validate/finish into manual sub-commands.",
                 "Successful Job commands return the authoritative job_transition for the next claim/epoch CAS operation; callers never infer an epoch increment.",
-                "job-implementation-packet reads only the current running Job's matching prepared Transaction, Manifest, and committed file lease.",
-                "Prepare deterministically derives and freezes ImplementationManifestV1.12 from the validated Plan, Brief, and generation-root snapshot; AI edits only ai_editable_changes and treats system_owned_changes and read_only_reuse as immutable.",
+                "The static service-level timer includes time before the first tool call only when a trusted host adapter supplies command_sent_at; without it, the current CLI may report exceeded from an over-target agent-time lower bound but can never report within_target.",
+                "User-perceived generation time includes host command errors, repeated rule reads, terminal rendering, and all Agent preamble work; Workbench-pasted full commands are the normal Agent entry and runtime hints are fallback-only when the full command is unavailable.",
+                "Recorder Host Control records an observation-only agent wait ledger for bound UserPromptSubmit, PreToolUse, PostToolUse, and Stop events; Job Result projects it under generation_timing_ledger.agent_tool_timing without including it in Result, Transaction, Plan, or Job identity.",
+                "Job Result, compact CLI output, and Workbench DTOs project generation_progress as user-visible progress: delivery_write_channel, changed count, review_channel, and system materialization status are the normal delivery facts; candidate index file/window counts and waits among candidate_index_read, source_reads, editor_edits, and after_native_edit are internal diagnostic attribution only. Silence and SLA status are not completion proof.",
+                "The editor_edits_done_to_after_native_edit_request wait segment is attribution-only legacy evidence: Hook observes waits but never auto-runs after_native_edit. Undone, partial, or SHA-mismatched materialization fails closed through Transaction validation and must not be repaired by shell/Python writes.",
+                "If the current terminal Job Result is completed and its Transaction, Contract, Code Manifest, and code snapshots still match, admission returns that completed result instead of creating a new Design Job.",
+                "Service-level exceedance never terminates, replaces, retires, or resets the Job; the same Job continues to a terminal result.",
+                "A failed terminal projection reports the authoritative Job Result category, first failed owner stage, and owner reason before service-level health warnings.",
+                "After full-scenario generation starts, only trust-boundary failures and an internally invalid deterministic system candidate terminate the Job. Other representable non-security gaps, including POS/OCR fallback uncertainty and non-hard window-close uncertainty, become typed issue placeholders or low-confidence implementations rather than user questions, rerecord prompts, or Agent repair loops.",
+                "Typed issue placeholders are system-owned fast degradation: the system must not spend repeated AI confirmation or query loops before choosing the placeholder path; each placeholder covers only its frozen Action IDs and renders an ordered unresolved_generation_issue call, while other Actions in the same Step continue through the validated Plan.",
+                "Paged TaskBundle fragments are read-only context and never create independent attempts, leases, submissions, timing scopes, or a default full-Design path; advance-job attempts the system baseline before AI reads fragments.",
+                "job-implementation-packet and job-implementation-candidate read only the current running Job's matching prepared Transaction, Manifest, candidate, and committed file lease.",
+                "A running Transaction whose Generation Contract or current Implementation Manifest derivation is stale is superseded inside the same Job: the old file lease is released, the Job remains in implementation, and advance-job prepares a fresh content-addressed candidate instead of failing or serving the old candidate.",
+                "Normal advance-job materializes preflight-passed system-owned candidates with the system materializer, records implementation_receipt.delivery_write_channel=system_materializer, validates target SHA, publishes implementation_diff review, and finishes the same Transaction without Agent Bdd edits. job-implementation-candidate, candidate_index, native_edit source files, native_edit_plan, and edit_batches are internal diagnostics, not the normal product path. A repeated candidate_mismatch is a host delivery defect, not an Agent debugging loop.",
+                "When candidate_index is present for diagnostics, compact advance-job output hides full editable path arrays, including candidate_files, native_edit_candidate_files, ai_editable_changes, and system_owned_files; normal next_commands must not emit candidate index reads, native-edit source reads, agent_editor_edit, or after_native_edit.",
+                "An unapplied, partially applied, modified, or undone candidate_file fails validation; explicit system materialization must validate its journal and receipt before finish.",
+                "advance-job deterministically derives and freezes ImplementationManifestV1.16 from the validated Plan, Brief, and generation-root snapshot; AI semantically owns choices, system materialization owns system-owned writes, candidate artifacts are internal diagnostics, and read_only_reuse remains immutable.",
+                "A current-recording-verified Locator reuse retains its existing key exactly; the Manifest protects that key when the same YAML adds another verified control. Unproven, stale, conflicting, or generated-suffix reuse becomes a typed maintenance placeholder, not a rerecord request.",
                 "Action Knowledge 1.2 projects Step/Action-scoped value_source qualification for AI-named operations without exposing values or ranking operations; the compiler re-resolves every source.",
+                "When one value_source qualification is status=available for a frozen operation, the system baseline selects it and the compiler re-resolves the value; AI must not expand it into full GenerationDesign.",
+                "When multiple status=available value_source qualifications remain for a frozen Step/Action/operation, advance-job returns value_source_choice_required; AI submits only the selected source shape and never a value or provenance.",
                 "Code Reuse Index 2.2 exposes only linear direct Page-operation call_sequence as exact-reuse proof; nested, conditional, helper, or otherwise non-linear methods do not receive exact sequence proof.",
                 "Exact Page method reuse verifies the content-addressed candidate, ordered operation/target sequence, and generated Step method call arguments; locator read-only status requires a frozen locator/window-root candidate.",
-                "Only user-authority ambiguity uses one revision-bound Decision Pack batch; AI submits one complete Design and the system compiles Plan structure and proof.",
+                "A single frozen Step behavior reuse candidate with complete ordered Action mappings is selected by the system baseline; it must not force full GenerationDesign just because a placeholder outcome also exists.",
+                "A single frozen Page method reuse candidate with content-addressed source hash and exact ordered operation/target call_sequence is selected by the system baseline when no value mapping is required.",
+                "Multiple frozen Page method candidates with exact operation/target call_sequence matches use method_choice_required; AI submits only one candidate_id and never a method body, operation, value, locator, window, or proof.",
+                "A single implement_with_frozen_evidence outcome backed by frozen target evidence is selected by the system baseline; a parallel placeholder outcome alone must not force full GenerationDesign.",
+                "A single frozen assertion implementation candidate is consumed by the system baseline; AI must not expand it into full GenerationDesign when target and parameters are already frozen.",
+                "Multiple frozen assertion implementation candidates use assertion_choice_required; AI submits only one candidate_key and never operation, parameters, expected values, or provenance.",
+                "Only user-authority ambiguity uses one revision-bound Decision Pack batch; after naming_patch_required, AI submits only stable public names; after ambiguity_choice_required, AI submits only frozen ambiguity outcome choices; after assertion_choice_required, AI submits only frozen assertion candidate keys; after method_choice_required, AI submits only frozen Page method candidate ids; after operation_choice_required, AI submits only frozen operation choice keys; after value_source_choice_required, AI submits only frozen available source shapes; remaining untyped design_required is blocked and never prepares a complete GenerationDesign draft.",
                 "Design covers every target Step; the system derives Scenario roles/support, owners/paths, locators, Action/Evidence closure, each exact annotation_ids set, Plan trace, and transaction lease.",
                 "Forensic reads only required_forensic_evidence before adjustment.",
                 "Finish runs revision, Annotation lease, Python, locator, Step scope, policy, controlled-PIC, evidence, and Plan-to-Code validation automatically.",
+                "A successful Transaction publishes one content-addressed implementation diff plus implementation_diff_summary file-level additions/deletions; for generated new files it records git_diff_visibility intent-to-add status so VS Code/Git can show source-control new-file diffs without staging content. The system materializer reports delivery_write_channel=system_materializer and review_channel=implementation_diff as the normal user-facing code delivery for system-owned writes, not pasted diff text or Agent/native edit claims.",
                 "Every newly created nested Bdd/page_obj package contains an import-free __init__.py marker; it may be empty or docstring-only and never contains imports or re-exports.",
                 "The default Brief exposes frozen facts and evidence-bound constraints, not semantic operation recommendations. AI forms operation candidates before querying Action Knowledge; only objectively incompatible target/runtime combinations are rejected, while unknown requires investigation or runtime validation.",
+                "When the system baseline cannot derive a direct operation, OperationChoiceSet freezes the AI-visible operation boundary with choice_key, Step/Action, target fingerprint, compatibility status, basis, and value-source requirement; AI submits only the choice_key.",
             ],
         },
         "read_order": [
@@ -216,9 +524,15 @@ def build_generation_contract(manifest):
             },
             {
                 "artifact": "job-implementation-packet",
-                "required": True,
-                "access": "after_prepare",
-                "purpose": "Job-bound Manifest packet projection with authorized implementation syntax for the requested Step or file.",
+                "required": False,
+                "access": "diagnostic_or_explicit_file_context_after_prepare",
+                "purpose": "Job-bound Manifest packet projection for diagnostics or an explicitly requested Step/file context; not part of the normal Agent delivery path.",
+            },
+            {
+                "artifact": "job-implementation-candidate",
+                "required": False,
+                "access": "internal_diagnostic_after_prepare",
+                "purpose": "Preflight-passed content-addressed candidate index for diagnostics. The normal system-owned path does not use Agent file edits: advance-job writes with delivery_write_channel=system_materializer, validates, and publishes review_channel=implementation_diff. candidate_index.path, candidate_index.source_root plus lines[].source, lines[].target, lines[].op, candidate_manifest, native_edit_plan, and edit_batches are not the product path. --all, external output files, full manifest reads on the normal path, unlisted source path reads, per-file terminal content queries, and helper parsing commands are forbidden.",
             },
             {
                 "artifact": "inspect.ai_capabilities",
@@ -472,13 +786,13 @@ def build_generation_contract(manifest):
                 "Use XPath only when validation status is unique and target_matches is true.",
                 "Use OCR only with a recorded Region and visual corroboration.",
                 "Use POS only as the final fallback and preserve all four coordinate values.",
+                "A top-level popup without stable Root criteria may use a rootless BasePage plus isolated pos.yaml only when every selected Action has a frozen POS locator; it has no WindowView, Root locator, structural locator, or reuse owner and emits the POS fallback issue.",
                 "PIC is default-deny and may be proposed only after structured locator failure and a passed cross-frame template audit.",
                 "Generate a PIC locator only from a running transaction's passed pic_authorization_audit; copy exactly template_source to Bdd/data/target_data_path and use the frozen locator_name, Region locator, and threshold.",
                 "Never call direct PIC APIs in generated Python; normal planned actions consume the authorized named PIC locator.",
                 "An authorized PIC Region locator must reference the same sole top-level Root declared by its Plan window_owner.",
                 "Root may reference only a top-level window; Region references Child/XPath.",
-                "A WindowPage locator package has exactly one top-level Root; same-window View YAML files declare no top-level Root and reference only that package Root.",
-                "Only a frozen child_view ownership candidate may authorize a WindowView root_locator. Its YAML is an isolated window package with exactly one matching top-level Root; child locators reference only that Root.",
+                "A WindowPage locator package has exactly one top-level Root; same-window View YAML files follow the existing WindowView model.",
                 "Use WindowPage for one stable business top-level Window. Use WindowView for owned subpages; a transient child HWND does not by itself create another business Page.",
                 "Observed runtime window titles remain evidence and are not promoted automatically into Root locator criteria.",
                 "Declare every long-lived top-level Root in locator YAML; generated code must not call set_root.",
@@ -507,7 +821,7 @@ def build_generation_contract(manifest):
                 "rules": [
                     "Keep top-level Root locators separate from element locators.",
                     "Reuse or add top-level Root definitions in YAML instead of registering runtime Roots in generated Python.",
-                    "A planned WindowView root_locator requires its own single-root locator YAML and must equal the View active_locator; ordinary WindowViews remain in the parent WindowPage package.",
+                    "A planned WindowView always shares its parent WindowPage Root; its YAML declares no top-level Root and active_locator names a child locator in that View.",
                     "Compile every generated locator with compile_locators before acceptance.",
                 ],
             },
@@ -516,7 +830,7 @@ def build_generation_contract(manifest):
                 "rules": [
                     "Use existing BasePage APIs before introducing a custom action.",
                     "A WindowPage exposes each planned WindowView through one direct property annotated with -> ViewClass and returning self.get_view(ViewClass), with ViewClass directly imported from the Plan view_object module.",
-                    "A WindowView declares root_locator only when the Plan supplies one from a frozen child_view candidate, and the class value must match the Plan exactly.",
+                    "A generated WindowView never declares an independent root_locator; it loads its locator file into the parent WindowPage package.",
                     "Do not create a Feature/Scenario-named Page merely to wrap recorded action order.",
                     "Form operation candidates from business intent and frozen facts before querying Action Knowledge; query only named candidates in deliberation order.",
                     "Action Knowledge separates capability facts, possibly incomplete maintainer guidance, and static assessment. Guidance never authorizes or blocks a Plan; static compatible is not runtime proof. Explain the choice and preserve frozen Slider bounds when set_slider_value is used.",
@@ -597,9 +911,8 @@ def build_generation_contract(manifest):
         "plan_contract": {
             "command": (
                 "python -m autowork_core.utils.debug_tools.recorder."
-                "generation_workflow design-job <job-path> --claim-id <claim-id> "
-                "--expected-epoch <epoch> "
-                "--design-file <design.json>"
+                "generation_workflow generate-job <job-path> "
+                "[typed patch arguments only]"
             ),
             "protocol": "ai/plans/<request-id>/plan-*.json",
             "evidence_recovery": "ai/recovery/<request-id>.json",
@@ -677,7 +990,7 @@ def build_generation_contract(manifest):
             "Every default-selected Evidence ID must be claim-cited, explicitly used, or explicitly skipped with a reason; context consumption coverage must equal 1.0.",
             "Validate page_method operations inside their declared WindowPage/WindowView method and step_inline_base_api operations inside the matching Gherkin Step through canonical Page/View bindings; preserve global operation order and compile each window locator package atomically.",
             "For new PlanV4.2 code, validate canonical direct imports and typed get_page assignments; accept only page[.view].method for page_method or planned BasePage APIs for step_inline_base_api.",
-            "Validate each window_owner resolution against the frozen Brief candidate when reusing; an explained create_new override remains advisory and is reported as a warning.",
+            "Validate each window_owner resolution against the frozen Brief candidate when reusing; an explained create_new override of an explicit reuse_existing suggestion remains advisory and is reported as a warning, while ambiguous owner candidates remain context for generated-owner maintenance.",
             "Validate each implementation_resolution as reuse, modify, or create against the frozen method candidate and transaction change set.",
             "Reject newly generated set_root calls and inline locator dictionaries; preserve pre-existing code through a policy baseline.",
         ],
@@ -707,6 +1020,160 @@ def build_generation_contract(manifest):
     }
     contract["contract_hash"] = _hash_value(contract)
     return contract
+
+
+def _generation_decision_authority_matrix():
+    fields = [
+        "decision_id",
+        "system_when",
+        "user_when",
+        "ai_when",
+        "forbidden",
+        "validation_owner",
+    ]
+    decisions = [
+        {
+            "decision_id": "generation_admission",
+            "system_when": "Request, Brief, readiness, profile, contract lease, evidence completeness, and source freshness are valid.",
+            "user_when": "Before Job creation: repair or rerecord evidence. After pasted advance-job but before full generation: answer the Job-bound option batch for user-authority or authorization blockers.",
+            "ai_when": "Never owns admission truth; Agent may only consume a Workbench-created claimed Job.",
+            "forbidden": "Creating an active Job from failed admission, missing evidence, stale source, or unclaimed state.",
+            "validation_owner": "generation_profile.project_generation_admission + generation_job_service.start_generation_job",
+        },
+        {
+            "decision_id": "business_questions_decision_pack",
+            "system_when": "DecisionPack projects one revision-bound option batch for user-authority or authorization questions and validates optional freeform BusinessFactPatch facts; AI-authority ambiguities stay in the Job context.",
+            "user_when": "User answers declared options in the pre-generation Job-bound batch, and may provide separate freeform business text when the option set is insufficient; accepted submission automatically continues the same generation action.",
+            "ai_when": "Resolves AI-authority business ambiguities through typed patch or Plan selection inside the claimed Job; transports user-authority selected options and structured freeform answers through submit-business-review-answers; never writes Answers JSON.",
+            "forbidden": "Agent askQuestions prompts, answer drafts, retired submit-job-answers, duplicate media links, terminal parsing, external output reads, technical fields in Answers or BusinessFactPatch, evidence repair by answer, option guessing from freeform text, or repeated generation-phase questions.",
+            "validation_owner": "decision_pack + generation_job_service.submit_generation_job_business_answers/submit_generation_job_business_facts + workflow_service._compiled_decision_patch",
+        },
+        {
+            "decision_id": "window_owner",
+            "system_when": "Existing WindowPage owner or new owner shape is proven by frozen root identity, owner candidates, and project scope.",
+            "user_when": "Only when business ownership of a window is ambiguous in the settled DecisionPack.",
+            "ai_when": "Only selects among frozen owner candidates or supplies a stable business owner name when the system cannot derive one.",
+            "forbidden": "Changing root facts, criteria, root path, candidate proof, or claiming an unrecorded owner.",
+            "validation_owner": "generation_design._compile_window_owners + generation_plan.validate_generation_plan",
+        },
+        {
+            "decision_id": "window_view",
+            "system_when": "Child-window evidence binds a same-root WindowView candidate, action_ids, locator_file, active_locator, and parent root.",
+            "user_when": "Never for technical View structure; only upstream business window ownership can be user-owned.",
+            "ai_when": "Only names or selects a View from frozen candidates when system proof is not unique.",
+            "forbidden": "Independent View root, changed action_ids, changed native ownership proof, or unbound active_locator.",
+            "validation_owner": "generation_design._validate_locked_child_window_views + implementation_manifest",
+        },
+        {
+            "decision_id": "locator_key_locator_reuse",
+            "system_when": "A verified existing locator key, legal public evidence name, or frozen locator candidate uniquely matches the recorded target.",
+            "user_when": "Never for locator naming or technical locator choice.",
+            "ai_when": "Only supplies public names for unresolved non-public names after reuse and legal evidence names fail.",
+            "forbidden": "Overriding verified reuse keys, target fingerprints, locator mappings, roots, or snapshot proof.",
+            "validation_owner": "locator_reuse + generation_design._locator_reuse_match + generation_validation",
+        },
+        {
+            "decision_id": "operation_selection",
+            "system_when": "Canonical command, semantic control state, implementation constraints, or exactly compatible operation is determined from evidence.",
+            "user_when": "Only when the requested business action or expectation is ambiguous, before generation.",
+            "ai_when": "Only chooses among registered compatible Plan operations when evidence leaves semantic implementation choice open.",
+            "forbidden": "Incompatible operations, unregistered APIs, hidden technical controls, or changing target/value facts.",
+            "validation_owner": "ai_capability_registry + action_knowledge + generation_design._compile_operation",
+        },
+        {
+            "decision_id": "target_action_value_action",
+            "system_when": "target_action_id, value_action_ids, action order, and action evidence are frozen by Request/Brief.",
+            "user_when": "Never during generation; missing actions require evidence repair before Job admission.",
+            "ai_when": "Never owns action identity; may only reference frozen IDs allowed by its minimal input schema.",
+            "forbidden": "Inventing, swapping, ignoring, or reassigning recorded Action IDs outside Decision constraints.",
+            "validation_owner": "generation_plan.validate_generation_plan + validate_plan_conformance",
+        },
+        {
+            "decision_id": "value_source",
+            "system_when": "Recorded value, feature literal, examples value, declared binding, runtime producer/consumer, or semantic literal is uniquely resolved.",
+            "user_when": "When business meaning, table relationship, or declared value authority conflicts or is missing.",
+            "ai_when": "Only selects from frozen value-source candidates when all values and provenance remain system/user-owned.",
+            "forbidden": "Inventing literal values, replacing examples/feature data, or moving values between target and value Actions.",
+            "validation_owner": "value_authority + generation_design._compile_value_source + generation_plan",
+        },
+        {
+            "decision_id": "table_usage",
+            "system_when": "No table exists, a single inferred table use is proven, or a user DecisionPack answer fixes the relationship.",
+            "user_when": "When table rows, whole table, scenario state, reset behavior, or business relationship is ambiguous.",
+            "ai_when": "Only maps confirmed table relationship into implementation ownership when system cannot derive the target structure.",
+            "forbidden": "Treating table shape or business relationship as AI fact, altering table data, or skipping required user authority.",
+            "validation_owner": "table_usage + decision_pack + generation_design._compile_table_use",
+        },
+        {
+            "decision_id": "assertion_semantics",
+            "system_when": "Observation intent, annotation, feature literal, examples value, or frozen assertion candidate proves expected behavior.",
+            "user_when": "When expected business outcome, comparator, or observed-vs-expected meaning is missing or conflicting.",
+            "ai_when": "Only selects a registered assertion operation from frozen candidates after target and expected value authority are fixed.",
+            "forbidden": "Writing target facts, expected values, observed runtime evidence, or assertion proof.",
+            "validation_owner": "semantic_reconciler assertion ambiguities + generation_design + generation_plan",
+        },
+        {
+            "decision_id": "step_behavior_reuse_modify_create",
+            "system_when": "Exact current-scope modify candidate or one frozen reuse candidate with complete ordered Action mappings is proven.",
+            "user_when": "Never for technical reuse; user only resolves business scope or behavior conflicts before generation.",
+            "ai_when": "Only chooses candidate_id/action_mappings among frozen Step candidates when more than one safe behavior remains.",
+            "forbidden": "Changing call_sequence, candidate proof, Step scope, Gherkin pattern, or covering unmapped Actions.",
+            "validation_owner": "generation_design._compile_step_behavior + generation_validation.validate_selected_generation_source_snapshot",
+        },
+        {
+            "decision_id": "page_method_reuse_create",
+            "system_when": "Existing Page method sequence, method scope, target/value mapping, and source hash are frozen and exactly verified.",
+            "user_when": "Never for method selection; business behavior ambiguity must be resolved before Plan.",
+            "ai_when": "Only selects among frozen method candidates or authors candidate method body within Manifest scope.",
+            "forbidden": "Using hidden helpers as proof, changing candidate source, bypassing source hash, or selecting non-linear calls as exact proof.",
+            "validation_owner": "code_reuse_index + generation_design._compile_method_resolution + generation_validation",
+        },
+        {
+            "decision_id": "runtime_scenario_state",
+            "system_when": "Producer/consumer bindings, scenario state names, runtime values, and step order are uniquely derived from evidence or user answers.",
+            "user_when": "When the business state meaning or expected runtime handoff is unresolved.",
+            "ai_when": "Only supplies semantic names or chooses among frozen runtime relationships without changing values.",
+            "forbidden": "Creating runtime state to paper over missing evidence, replacing feature/examples values, or inventing producers.",
+            "validation_owner": "generation_design runtime roles + generation_plan scenario model validation",
+        },
+        {
+            "decision_id": "ocr_pos_pic_fallback",
+            "system_when": "OCR/POS/PIC fallback evidence, coordinates, image assets, and PIC authorization are frozen and valid.",
+            "user_when": "Only explicit PIC authorization or business acceptance when required by policy.",
+            "ai_when": "Only selects a permitted fallback operation over frozen evidence when policy allows it.",
+            "forbidden": "New PIC use, hidden screenshot inference, coordinate invention, or weakening locator priority.",
+            "validation_owner": "generation_pic_policy + generation_design + generation_validation PIC audits",
+        },
+        {
+            "decision_id": "implementation_file_scope",
+            "system_when": "Manifest freezes allowed_changes, read_only_reuse, system_owned_changes, protected keys, paths, hashes, and lease.",
+            "user_when": "Never during generation; user may accept or undo final editor changes.",
+            "ai_when": "Only chooses semantics; normal system-owned writes are performed by system_materializer, and candidate artifacts are diagnostics rather than an Agent write path.",
+            "forbidden": "Shell writes, path traversal, unleased files, read-only reuse edits, or weakening validation to pass.",
+            "validation_owner": "implementation_manifest + generation_file_lock + generation_validation",
+        },
+        {
+            "decision_id": "candidate_delivery_keep_undo",
+            "system_when": "Content-addressed candidates are frozen under the Transaction lease, written by system_materializer on the normal path, recorded in implementation_receipt, and reviewed through implementation_diff.",
+            "user_when": "User reviews the terminal Result changed count and implementation diff.",
+            "ai_when": "Agent reports delivery_write_channel, review_channel, changed count, issues, and system_materializer delivery; it does not apply system-owned candidate_index lines on the normal path.",
+            "forbidden": "Python/shell writes, Agent Bdd edits on the system-owned path, hiding changed counts, or treating a patch/draft/native edit claim as system delivery.",
+            "validation_owner": "generation_orchestrator + job-implementation-candidate + finish_generation_transaction",
+        },
+        {
+            "decision_id": "validation_result",
+            "system_when": "Revision, contract, annotation, Python, locator, Step scope, policy, PIC, evidence, candidate, and Plan-to-Code checks pass.",
+            "user_when": "User reviews terminal Job Result, warnings, and editor diff outcome.",
+            "ai_when": "Only repairs manifest-scoped validation issues without changing Job goal, owner, scope, or acceptance model.",
+            "forbidden": "Reporting intermediate states as success, replacing Jobs to reset timing, or hiding unresolved failures.",
+            "validation_owner": "finish_generation_transaction + generation_job_result + runtime/oracle handoff",
+        },
+    ]
+    return {
+        "version": "1.0",
+        "fields": fields,
+        "decisions": decisions,
+    }
 
 
 def ensure_generation_contract(session_dir, *, write=True):
@@ -901,8 +1368,14 @@ def _framework_contract():
             "required_attributes": ["locator_file"],
             "optional_attributes": ["active_locator", "root_locator"],
         },
+            "rootless_pos_page": {
+                "class": f"{BasePage.__module__}.{BasePage.__qualname__}",
+                "required_attributes": ["locator_file"],
+                "forbidden_attributes": ["root_locator_file", "root_locator"],
+            },
         "rules": [
             "one WindowPage per stable desktop top-level Window",
+                "a special top-level popup with no stable Root criteria and only frozen POS Actions may use one rootless BasePage",
             "one top-level Root per window locator package",
             "WindowView shares its WindowPage Root by default",
             "an evidence-backed child-window WindowView may own one isolated Root",

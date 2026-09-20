@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from autowork_core.utils.debug_tools.recorder.capability import (
@@ -66,9 +67,7 @@ class RecorderLibraryQueryService:
         if blockers:
             return RetirementStatusDTO(
                 eligible=False,
-                detail="退役：已阻塞；" + "；".join(
-                    str(item) for item in blockers
-                ),
+                detail="退役：已阻塞；" + _retirement_blocker_text(blockers),
             )
         knowledge = inspection.get("knowledge") or {}
         if knowledge.get("durable"):
@@ -90,6 +89,9 @@ class RecorderLibraryQueryService:
         scenario = entry.get("scenario") or {}
         steps = entry.get("steps") or ()
         directory = _safe_child(self.output_root, entry.get("path"))
+        progress, scenario_complete, has_recording_gap = _manifest_progress(
+            directory
+        )
         searchable = [
             entry.get("session_id"),
             entry.get("path"),
@@ -102,20 +104,19 @@ class RecorderLibraryQueryService:
             scenario.get("example_id"),
             *(item.get("text") for item in steps if isinstance(item, dict)),
         ]
-        completed = sum(
-            item.get("status") == "completed"
-            for item in steps
-            if isinstance(item, dict)
-        )
         return LibraryRunDTO(
             session_id=str(entry.get("session_id")),
             feature_name=str(
                 feature.get("name") or feature.get("key") or ""
             ),
             scenario_name=_scenario_label(scenario),
-            progress=f"{completed}/{len(steps)}",
+            progress=progress or _catalog_progress(steps),
             next_action=(
-                _catalog_next_action(entry)
+                _catalog_next_action(
+                    entry,
+                    scenario_complete=scenario_complete,
+                    has_recording_gap=has_recording_gap,
+                )
                 if directory is not None
                 else "Run 路径无效"
             ),
@@ -125,6 +126,8 @@ class RecorderLibraryQueryService:
             search_text=" ".join(
                 str(item or "") for item in searchable
             ).casefold(),
+            feature_source_relpath=str(feature.get("source_relpath") or ""),
+            scenario_id=str(scenario.get("id") or ""),
         )
 
     def _capability_dto(self, entry):
@@ -189,14 +192,111 @@ def _scenario_label(scenario):
     return f"{name} [Examples {example_id}]" if example_id else name
 
 
-def _catalog_next_action(entry):
+def _manifest_progress(directory):
+    if directory is None:
+        return None, None, None
+    try:
+        manifest = json.loads(
+            (Path(directory) / "manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None, None, None
+    if not isinstance(manifest, dict):
+        return None, None, None
+    scenario_steps = [
+        str(item.get("id") or "")
+        for item in ((manifest.get("scenario") or {}).get("steps") or ())
+        if isinstance(item, dict) and item.get("id")
+    ]
+    recorded_steps = [
+        item
+        for item in (manifest.get("steps") or ())
+        if isinstance(item, dict)
+    ]
+    declared_step_ids = {
+        str((item.get("plan") or {}).get("id") or "")
+        for item in recorded_steps
+        if (item.get("plan") or {}).get("id")
+    }
+    completed_step_ids = {
+        str((item.get("plan") or {}).get("id") or "")
+        for item in recorded_steps
+        if (item.get("plan") or {}).get("id")
+        and item.get("status") == "completed"
+        and item.get("selected_take")
+    }
+    closed_step_ids = {
+        str((item.get("plan") or {}).get("id") or "")
+        for item in recorded_steps
+        if (item.get("plan") or {}).get("id")
+        and (
+            (
+                item.get("status") == "completed"
+                and item.get("selected_take")
+            )
+            or item.get("status") == "skipped"
+        )
+    }
+    expected_step_ids = set(scenario_steps)
+    if any((
+        not scenario_steps,
+        len(expected_step_ids) != len(scenario_steps),
+        not declared_step_ids <= expected_step_ids,
+        not completed_step_ids <= declared_step_ids,
+    )):
+        return None, None, None
+    return (
+        f"{len(completed_step_ids)}/{len(expected_step_ids)}",
+        completed_step_ids == expected_step_ids,
+        closed_step_ids != expected_step_ids,
+    )
+
+
+def _catalog_progress(steps):
+    completed = sum(
+        item.get("status") == "completed"
+        for item in steps
+        if isinstance(item, dict)
+    )
+    return f"{completed}/{len(steps)}"
+
+
+def _catalog_next_action(
+        entry,
+        *,
+        scenario_complete=None,
+        has_recording_gap=None,
+    ):
     readiness = entry.get("readiness") or {}
-    if readiness.get("capture_generation_candidate"):
-        return "待 AI 理解"
     if not readiness.get("bundle_valid"):
         return "证据损坏"
+    if scenario_complete is False and has_recording_gap is not False:
+        return "可继续录制"
+    if readiness.get("capture_generation_candidate"):
+        return "交给 Copilot"
     if readiness.get("recording_complete") is False:
         return "继续录制"
     if readiness.get("semantic_ready") is False:
         return "需要审阅"
     return "打开检查"
+
+
+def _retirement_blocker_text(blockers):
+    messages = []
+    for blocker in blockers:
+        text = str(blocker or "").strip()
+        if text.startswith("Run 尚未关闭"):
+            status = text.split("status=", 1)[-1] if "status=" in text else "未关闭"
+            messages.append(f"正在录制或保存（{status}），请先结束当前任务")
+        elif text.startswith("Run 正被写入"):
+            messages.append(text.replace("Run 正被写入", "正在被 Recorder 写入"))
+        elif "running generation transaction" in text:
+            detail = text.split(":", 1)[-1].strip()
+            messages.append(
+                "正在生成或上次生成未正常结束"
+                + (f"（{detail}）" if detail else "")
+                + "，请先打开审阅页处理生成状态"
+            )
+        else:
+            messages.append(text or "当前任务暂时不能删除")
+    return "；".join(messages)

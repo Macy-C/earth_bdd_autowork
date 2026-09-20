@@ -773,7 +773,7 @@ def _single_executable_scope(feature):
     if item.get("type") == "outline":
         examples = list(item.get("examples") or [])
         if len(examples) != 1:
-            return None
+            return {"scenario_name": item.get("name")}
         return {
             "scenario_name": item.get("name"),
             "example_id": examples[0].get("exampleId"),

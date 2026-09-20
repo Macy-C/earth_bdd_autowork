@@ -20,7 +20,7 @@ from autowork_core.runtime.application_lifecycle import (
     prepare_application_lifecycle,
 )
 from autowork_core.runtime.status import should_keep_artifacts
-from config.settings import settings
+from config.settings import AppProfile, settings
 
 if TYPE_CHECKING:
     from autowork_core.runtime.tag_manager import RuntimeTagDecision
@@ -45,6 +45,7 @@ class ScenarioRuntimeState:
     record_path: str | None = None
     application_cleanup_required: bool = False
     application_lifecycle_active: bool = False
+    app_profile: AppProfile | None = None
 
 def get_scenario_state(context):
     state = getattr(context, "autowork_scenario", None)
@@ -70,13 +71,30 @@ def initialize_ui_scenario(context, scenario):
     prepare_project_scenario(context, scenario)
 
 def _start_managed_application(context, scenario, state):
+    app_profile = select_scenario_app_profile(scenario, state)
     state.window_handles_before = get_top_level_window_handles()
     state.windows.set_launch_handle_baseline(state.window_handles_before)
     begin_process_tracking(context)
-    state.root_pid = start_configured_application()
+    state.root_pid = start_configured_application(app_profile)
     state.application_cleanup_required = True
     finalize_non_snapshot_tracking(context)
     notify_application_started(context, scenario)
+
+def select_scenario_app_profile(scenario, state=None):
+    app_profile = settings.app_profile_for_tags(
+        getattr(scenario, "effective_tags", ()),
+        scenario_name=getattr(scenario, "name", None),
+    )
+    if state is not None:
+        state.app_profile = app_profile
+    return app_profile
+
+def scenario_app_profile(context):
+    state = get_scenario_state(context)
+    return state.app_profile or settings.default_app_profile()
+
+def scenario_process_track_mode(context):
+    return scenario_app_profile(context).process_track_mode
 
 def _project_hook(name):
     try:
@@ -174,7 +192,7 @@ def get_pid_snapshot():
 
 def begin_process_tracking(context):
     state = get_scenario_state(context)
-    mode = str(settings.app_process_track_mode or "snapshot").strip().lower()
+    mode = str(scenario_process_track_mode(context) or "snapshot").strip().lower()
     if mode not in ("root", "none"):
         state.process_snapshot_before = get_pid_snapshot()
     state.process_tracking_pending = True
@@ -185,12 +203,13 @@ def safe_process_name(pid):
     except Exception:
         return "unknown"
 
-def start_configured_application():
-    if str(settings.app_path).strip().lower() == "runtime":
+def start_configured_application(app_profile=None):
+    app_profile = app_profile or settings.default_app_profile()
+    if str(app_profile.app_path).strip().lower() == "runtime":
         _require_project_hook("start_application")()
         root_pid = None
     else:
-        root_pid = start_app_path(settings.app_path)
+        root_pid = start_app_path(app_profile.app_path)
 
     return root_pid
 
@@ -240,7 +259,7 @@ def finalize_process_tracking(context):
     if not state.process_tracking_pending:
         return state.started_pids
 
-    mode = str(settings.app_process_track_mode or "snapshot").strip().lower()
+    mode = str(scenario_process_track_mode(context) or "snapshot").strip().lower()
     current_processes = (
         get_process_snapshot()
         if mode not in ("root", "none")
@@ -273,13 +292,13 @@ def finalize_process_tracking_before_step(context):
     if not state.process_tracking_pending:
         return state.started_pids
 
-    mode = str(settings.app_process_track_mode or "snapshot").strip().lower()
+    mode = str(scenario_process_track_mode(context) or "snapshot").strip().lower()
     if mode not in ("root", "none"):
         sleep(STEP_PROCESS_SNAPSHOT_WAIT)
     return finalize_process_tracking(context)
 
 def finalize_non_snapshot_tracking(context):
-    mode = str(settings.app_process_track_mode or "snapshot").strip().lower()
+    mode = str(scenario_process_track_mode(context) or "snapshot").strip().lower()
     if mode in ("root", "none"):
         finalize_process_tracking(context)
 
@@ -408,9 +427,10 @@ def _kill_processes(processes):
 def close_app_and_release_resource(context):
     state = get_scenario_state(context)
     finalize_process_tracking_before_step(context)
+    app_profile = scenario_app_profile(context)
     if settings.app_launch_mode == "attach":
         logger.debug("attach 模式，保留已运行应用")
-    elif str(settings.app_path).strip().lower() == "runtime":
+    elif str(app_profile.app_path).strip().lower() == "runtime":
         _require_project_hook("stop_application")()
     elif state.started_processes:
         remaining_pids = _kill_processes(state.started_processes.values())

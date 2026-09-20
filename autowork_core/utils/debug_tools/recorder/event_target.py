@@ -6,8 +6,8 @@ import threading
 import time
 
 
-EVENT_TARGET_BINDING_VERSION = "1.0"
-DEFAULT_EVENT_TARGET_TIMEOUT_MS = 15
+EVENT_TARGET_BINDING_VERSION = "1.4"
+DEFAULT_EVENT_TARGET_WATCHDOG_MS = 500
 _STOP = object()
 
 
@@ -17,9 +17,9 @@ class _TargetRequest:
     process_id: int | None
     window_handle: int | None
     event_type: str
-    deadline: float
     done: threading.Event = field(default_factory=threading.Event)
     element: dict | None = None
+    window: dict | None = None
     ancestors: list[dict] = field(default_factory=list)
     error: str | None = None
 
@@ -75,15 +75,15 @@ class EventTargetResolver:
             *,
             process_id,
             window_handle,
-            timeout_ms,
+            watchdog_ms=DEFAULT_EVENT_TARGET_WATCHDOG_MS,
             event_type="mouse_down",
         ):
-        timeout_ms = max(0, int(timeout_ms))
+        watchdog_ms = max(1, int(watchdog_ms))
         started = time.perf_counter()
         base = {
             "target_binding_version": EVENT_TARGET_BINDING_VERSION,
             "phase": "pre_dispatch",
-            "budget_ms": timeout_ms,
+            "watchdog_ms": watchdog_ms,
             "process_id": process_id,
             "window_handle": window_handle,
         }
@@ -107,30 +107,24 @@ class EventTargetResolver:
                 int(window_handle) if window_handle is not None else None
             ),
             event_type=str(event_type or "mouse_down"),
-            deadline=started + timeout_ms / 1000,
         )
         self._queue.put(request)
-        completed = request.done.wait(timeout_ms / 1000)
+        completed = request.done.wait(watchdog_ms / 1000)
         latency_ms = int(round((time.perf_counter() - started) * 1000))
         if not completed:
-            if request.element is None:
-                self._diagnostics["timed_out"] += 1
-                return {
-                    **base,
-                    "status": "timeout",
-                    "latency_ms": latency_ms,
-                    "element": None,
-                }
-            self._diagnostics["captured"] += 1
+            self._diagnostics["timed_out"] += 1
             return {
                 **base,
-                "status": "captured",
+                "status": "timeout",
                 "latency_ms": latency_ms,
-                "element": request.element,
-                "ancestors": [],
-                "partial": "ancestors_timeout",
+                "element": None,
+                "error": "event target provider exceeded safety watchdog",
             }
-        if request.error is not None or request.element is None:
+        if (
+            request.error is not None
+            or request.element is None
+            or request.window is None
+        ):
             self._diagnostics["errors"] += 1
             return {
                 **base,
@@ -145,6 +139,7 @@ class EventTargetResolver:
             "status": "captured",
             "latency_ms": latency_ms,
             "element": request.element,
+            "window": request.window,
             "ancestors": request.ancestors,
         }
 
@@ -160,7 +155,7 @@ class EventTargetResolver:
                 request = self._queue.get()
                 if request is _STOP:
                     return
-                if not self._running or time.perf_counter() > request.deadline:
+                if not self._running:
                     request.done.set()
                     continue
                 try:
@@ -170,16 +165,22 @@ class EventTargetResolver:
                         point=request.point,
                         process_id=request.process_id,
                     )
+                    window = backend.top_level_window()
+                    _validate_window(
+                        window,
+                        process_id=request.process_id,
+                    )
                     request.element = element
+                    request.window = window
                     if _requires_ancestor_context(
                             element,
                             request.event_type,
                     ):
                         try:
                             ancestors = backend.ancestors(
+                                root_info=window,
                                 window_handle=request.window_handle,
-                                deadline=request.deadline,
-                                limit=6,
+                                limit=8,
                             )
                             if isinstance(ancestors, (list, tuple)):
                                 request.ancestors = list(ancestors)
@@ -233,27 +234,44 @@ class _UIAEventTargetBackend:
             self._client.tagPOINT(int(point[0]), int(point[1]))
         )
         self._last_element = raw
-        return self._element_info(raw)
+        return self._element_info(raw, include_state=True)
 
-    def ancestors(self, *, window_handle, deadline, limit):
+    def top_level_window(self, limit=32):
+        import win32gui
+
+        desktop_handle = int(win32gui.GetDesktopWindow() or 0)
+        walker = self._automation.ControlViewWalker
+        current = self._last_element
+        if current is None:
+            raise ValueError("event target element unavailable")
+        seen = set()
+        for _index in range(max(1, int(limit))):
+            info = self._element_info(current, include_state=True)
+            identity = _uia_identity(info, current)
+            if identity in seen:
+                return info
+            seen.add(identity)
+            parent = walker.GetParentElement(current)
+            if parent is None:
+                return info
+            parent_info = self._element_info(parent)
+            if _is_uia_desktop(parent_info, desktop_handle):
+                return info
+            current = parent
+        raise ValueError("event target UIA parent chain exceeded limit")
+
+    def ancestors(self, *, root_info, window_handle, limit):
         walker = self._automation.ControlViewWalker
         current = self._last_element
         result = []
         for _index in range(max(0, int(limit))):
-            if current is None or time.perf_counter() > deadline:
+            if current is None:
                 break
             current = walker.GetParentElement(current)
             if current is None:
                 break
             info = self._element_info(current)
-            if (
-                info.get("control_type") == "Window"
-                or (
-                    window_handle
-                    and info.get("handle")
-                    and int(info["handle"]) == int(window_handle)
-                )
-            ):
+            if _same_uia_element(info, root_info):
                 break
             event_locator = _native_parent_locator(
                 info,
@@ -264,11 +282,11 @@ class _UIAEventTargetBackend:
             result.append(info)
         return result
 
-    def _element_info(self, raw):
+    def _element_info(self, raw, *, include_state=False):
         rectangle = raw.CurrentBoundingRectangle
         runtime_id = raw.GetRuntimeId()
         native_handle = int(raw.CurrentNativeWindowHandle or 0)
-        return {
+        result = {
             "name": str(raw.CurrentName or ""),
             "auto_id": str(raw.CurrentAutomationId or ""),
             "control_type": self._control_types.get(
@@ -290,6 +308,51 @@ class _UIAEventTargetBackend:
                 int(rectangle.bottom),
             ],
         }
+        if include_state:
+            result["element_properties"] = self._state_properties(raw)
+        return result
+
+    def _state_properties(self, raw):
+        properties = {}
+        for name, property_id, parser in (
+            (
+                "Toggle.ToggleState",
+                self._client.UIA_ToggleToggleStatePropertyId,
+                _uia_enum({0, 1, 2}),
+            ),
+            (
+                "SelectionItem.IsSelected",
+                self._client.UIA_SelectionItemIsSelectedPropertyId,
+                _uia_boolean,
+            ),
+            (
+                "ExpandCollapse.ExpandCollapseState",
+                self._client.UIA_ExpandCollapseExpandCollapseStatePropertyId,
+                _uia_enum({0, 1, 2, 3}),
+            ),
+            (
+                "RangeValue.Value",
+                self._client.UIA_RangeValueValuePropertyId,
+                _uia_number,
+            ),
+            (
+                "RangeValue.Minimum",
+                self._client.UIA_RangeValueMinimumPropertyId,
+                _uia_number,
+            ),
+            (
+                "RangeValue.Maximum",
+                self._client.UIA_RangeValueMaximumPropertyId,
+                _uia_number,
+            ),
+        ):
+            try:
+                value = parser(raw.GetCurrentPropertyValue(property_id))
+            except Exception:
+                value = None
+            if value is not None:
+                properties[name] = value
+        return properties
 
 
 def _validate_element(element, *, point, process_id):
@@ -309,13 +372,78 @@ def _validate_element(element, *, point, process_id):
         raise ValueError("event target no longer contains the input point")
 
 
+def _uia_enum(allowed):
+    def parse(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            return None
+        return result if result in allowed else None
+    return parse
+
+
+def _uia_boolean(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    return None
+
+
+def _uia_number(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _validate_window(window, *, process_id):
+    if not isinstance(window, dict):
+        raise ValueError("event target top-level window unavailable")
+    if process_id is not None and int(window.get("process_id") or 0) != int(
+            process_id
+    ):
+        raise ValueError("event target top-level process changed")
+
+
+def _uia_identity(info, raw):
+    runtime_id = tuple((info or {}).get("runtime_id") or ())
+    if runtime_id:
+        return ("runtime_id", runtime_id)
+    handle = int((info or {}).get("handle") or 0)
+    if handle:
+        return ("handle", handle)
+    return ("object", id(raw))
+
+
+def _is_uia_desktop(info, desktop_handle):
+    handle = int((info or {}).get("handle") or 0)
+    if desktop_handle and handle == desktop_handle:
+        return True
+    return str((info or {}).get("class_name") or "").casefold() == "#32769"
+
+
+def _same_uia_element(left, right):
+    left_runtime_id = tuple((left or {}).get("runtime_id") or ())
+    right_runtime_id = tuple((right or {}).get("runtime_id") or ())
+    if left_runtime_id and right_runtime_id:
+        return left_runtime_id == right_runtime_id
+    left_handle = int((left or {}).get("handle") or 0)
+    right_handle = int((right or {}).get("handle") or 0)
+    return bool(left_handle and right_handle and left_handle == right_handle)
+
+
 def _requires_ancestor_context(element, event_type):
     if str(event_type or "").casefold() == "mouse_wheel":
         return True
     control_type = str(
         (element or {}).get("control_type") or ""
     ).casefold()
-    if control_type in {"custom", "image"}:
+    if control_type in {"custom", "image", "text"}:
         return True
     return control_type == "pane" and not str(
         (element or {}).get("auto_id") or ""

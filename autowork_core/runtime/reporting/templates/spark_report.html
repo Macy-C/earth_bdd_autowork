@@ -523,6 +523,16 @@
       margin-bottom: 10px;
     }
 
+    .detail-summary {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 12px;
+      margin-bottom: 12px;
+    }
+
+    .detail-summary .detail-title-row {
+      margin-bottom: 8px;
+    }
+
     .detail-title {
       font-size: 18px;
       font-weight: 700;
@@ -559,6 +569,32 @@
       font-size: 13px;
       font-weight: 600;
       overflow-wrap: anywhere;
+    }
+
+    .detail-summary .facts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 10px 0 0;
+    }
+
+    .detail-summary .fact {
+      min-height: 30px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 4px;
+      padding: 5px 8px;
+      background: #f7f9fb;
+    }
+
+    .detail-summary .fact-label {
+      margin-bottom: 0;
+    }
+
+    .detail-summary .fact-value {
+      font-size: 12px;
+      white-space: nowrap;
     }
 
     .step-list {
@@ -706,6 +742,25 @@
       color: var(--muted);
       font-size: 12px;
       margin-top: 3px;
+    }
+
+    .step-copy {
+      min-width: 0;
+    }
+
+    .step-duration {
+      color: var(--muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .step-section-title {
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 800;
+      margin-top: 10px;
     }
 
     .step-extra {
@@ -974,7 +1029,7 @@
 
     .detail-workspace {
       display: grid;
-      grid-template-columns: minmax(280px, 0.72fr) minmax(520px, 1.7fr);
+      grid-template-columns: minmax(320px, 0.58fr) minmax(620px, 1.42fr);
       gap: 12px;
       flex: 1;
       min-height: 0;
@@ -996,43 +1051,46 @@
     .detail-workspace .scenario-list,
     #detailBody { overflow: auto; }
 
-    .detail-heading { display: flex; align-items: flex-start; gap: 12px; }
+  .detail-topbar { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(720px, auto); align-items: start; }
+  .detail-heading { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
     .detail-heading h1 { margin-bottom: 3px; }
+  #detailBreadcrumb { max-width: 640px; }
     .detail-feature-select { width: min(300px, 34vw); height: 34px; border: 1px solid var(--line); border-radius: 5px; outline: 0; padding: 0 30px 0 9px; color: var(--text); background: #ffffff; font-family: inherit; font-size: 11px; }
     .detail-feature-select:focus { border-color: #82a8b3; box-shadow: 0 0 0 2px rgba(53, 111, 130, 0.1); }
+  #scenarioPanel .panel-header { min-height: 58px; align-items: flex-start; }
+  .scenario-panel-heading { min-width: 0; }
+  .scenario-panel-subtitle { margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
     .scenario-panel-actions { display: flex; align-items: center; gap: 7px; }
     .scenario-drawer-toggle { display: none; min-height: 28px; border: 1px solid var(--line); border-radius: 4px; padding: 0 8px; color: var(--text); background: #ffffff; font-family: inherit; font-size: 10px; cursor: pointer; }
 
     .scenario-list { gap: 0; padding-right: 0; }
-    .scenario-card { min-height: 46px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 8px 10px; }
+  .scenario-card { min-height: 44px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 8px 11px; }
     .scenario-card:hover { border-color: var(--line); background: #f6f9f7; }
-    .scenario-card.active { border-color: var(--line); background: #eef5f3; box-shadow: inset 3px 0 0 #356f82; }
+  .scenario-card.active { border-color: var(--line); background: #f4f9f7; box-shadow: inset 3px 0 0 #356f82; }
     .scenario-card.active::after { display: none; }
     .scenario-card.outline-row { border-left: 0; background: #f7f9f8; box-shadow: none; }
     .scenario-card.example-row { margin-left: 20px; border-color: var(--line); background: #fcfdfc; }
     .scenario-card.example-row::before { left: -12px; width: 12px; border-color: #c9d1cd; }
-    .scenario-head { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-bottom: 0; }
+  .scenario-head { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 9px; margin-bottom: 0; }
     .scenario-code { color: #356f82; font-size: 9px; font-weight: 850; font-variant-numeric: tabular-nums; }
     .scenario-copy { min-width: 0; }
-    .scenario-name { overflow: hidden; font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+  .scenario-name { overflow: hidden; font-size: 12px; font-weight: 750; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
     .scenario-subline { margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
     .scenario-path { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-    .scenario-type { height: 18px; border-radius: 3px; padding: 0 5px; font-size: 9px; }
+  .scenario-type { height: 18px; border-radius: 3px; padding: 0 5px; font-size: 9px; margin-right: 0; }
     .scenario-tags { margin-top: 5px; }
     .tag, .param-chip { border-radius: 3px; font-size: 9px; }
-    .scenario-error { margin-top: 4px; border-left: 0; border-radius: 3px; padding: 0 0 0 46px; background: transparent; font-size: 9px; line-clamp: 1; -webkit-line-clamp: 1; }
+  .scenario-error { margin-top: 4px; border-left: 0; border-radius: 3px; padding: 0 0 0 51px; background: transparent; font-size: 9px; line-clamp: 1; -webkit-line-clamp: 1; }
 
-    .step-list { position: relative; gap: 0; margin: 16px 0 0 12px; border-left: 1px solid #c9d1cd; }
-    .step { position: relative; margin-left: 15px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; overflow: visible; }
-    .step:last-child { border-bottom: 0; }
-    .step::before { content: ""; position: absolute; z-index: 2; top: 17px; left: -20px; width: 8px; height: 8px; border: 2px solid #ffffff; border-radius: 2px; background: var(--unknown); box-shadow: 0 0 0 1px #c9d1cd; }
-    .step.passed::before { background: var(--pass); }
-    .step.failed::before { background: var(--fail); }
-    .step.skipped::before { background: var(--skip); }
-    .step-main { grid-template-columns: 24px 1fr auto; min-height: 43px; gap: 9px; padding: 8px 9px; }
+  .step-list { position: relative; gap: 6px; margin: 8px 0 0; border-left: 0; }
+  .step { position: relative; margin-left: 0; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+  .step:last-child { border-bottom: 1px solid var(--line); }
+  .step::before { display: none; }
+  .step-main { grid-template-columns: 24px 58px minmax(0, 1fr) 70px auto; min-height: 42px; gap: 8px; padding: 8px 10px; }
     .step-index { width: 20px; height: 20px; border-radius: 3px; font-size: 9px; }
-    .bdd-keyword { min-width: 42px; height: 18px; justify-content: center; border-radius: 3px; padding: 0 5px; font-size: 9px; }
+  .bdd-keyword { min-width: 42px; height: 18px; justify-content: center; border-radius: 3px; padding: 0 5px; font-size: 9px; margin-right: 0; }
     .step-name { font-size: 12px; }
+  .step-copy .step-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .step-meta { margin-top: 2px; font-size: 10px; }
     .step-extra { border-top: 1px solid var(--line); padding: 10px; background: #f9faf9; }
     .step-extra .facts { margin: 0 0 10px; }
@@ -1044,11 +1102,12 @@
     .evidence-section .attachment-grid { margin-top: 9px; }
 
     .detail-actions {
-      display: flex;
+      display: grid;
+      grid-template-columns: minmax(280px, 360px) minmax(220px, 260px) auto;
       align-items: center;
       justify-content: flex-end;
       gap: 8px;
-      flex-wrap: wrap;
+      min-width: 0;
     }
 
     .detail-panel-heading,
@@ -1116,6 +1175,8 @@
       button.nav-item { justify-content: center; padding: 8px 0; }
       .nav-symbol { margin-right: 0; }
       .detail-workspace { grid-template-columns: minmax(250px, 0.65fr) minmax(420px, 1.35fr); }
+      .detail-topbar { grid-template-columns: 1fr; }
+      .detail-actions { width: 100%; justify-content: flex-start; grid-template-columns: minmax(240px, 1fr) minmax(200px, 280px) auto; }
       .summary-grid { grid-template-columns: repeat(2, 1fr); }
       .topbar { flex-direction: column; }
       .toolbar { justify-content: flex-start; }
@@ -1147,7 +1208,7 @@
       .feature-execution-tree { min-width: 870px; }
       .detail-topbar { gap: 10px; }
       .detail-heading { width: 100%; }
-      .detail-actions { width: 100%; justify-content: flex-start; }
+      .detail-actions { width: 100%; justify-content: flex-start; grid-template-columns: 1fr; }
       .detail-feature-select { width: 100%; max-width: none; }
       #scenarioPanel { min-height: 0; height: auto; }
       #scenarioPanel > .panel-body { display: none; max-height: 360px; }
@@ -1158,8 +1219,12 @@
       #detailPanel { min-height: 520px; }
       .content { padding: 16px; }
       .facts { grid-template-columns: 1fr 1fr; }
-      .step-main { grid-template-columns: 26px 1fr; }
-      .step-main .status-pill { grid-column: 2; width: fit-content; }
+      .detail-summary .facts { display: grid; grid-template-columns: 1fr 1fr; }
+      .step-main { grid-template-columns: 24px minmax(0, 1fr) auto; align-items: start; }
+      .step-main .bdd-keyword { grid-column: 2; grid-row: 1; width: fit-content; }
+      .step-copy { grid-column: 2 / 4; grid-row: 2; }
+      .step-duration { grid-column: 2; grid-row: 3; text-align: left; }
+      .step-main .status-pill { grid-column: 3; grid-row: 1; width: fit-content; }
     }
   </style>
 </head>
@@ -1196,12 +1261,12 @@
         <div class="overview-execution-toolbar">
           <div>
             <div class="execution-toolbar-title">本次验收场景</div>
-            <div class="execution-toolbar-subtitle" id="executionSortDescription">Feature 内保持 Gherkin 规格顺序</div>
+            <div class="execution-toolbar-subtitle" id="executionSortDescription">全部筛选下按通过、需跟进、状态未知、未执行排序</div>
           </div>
           <div class="execution-toolbar-actions">
             <input class="execution-search" id="executionSearchInput" type="search" placeholder="搜索 Feature、场景或 tag" aria-label="搜索 Feature、场景或 tag" />
             <div class="segmented" id="featureSortControl" aria-label="Feature 排序">
-              <button class="active" data-feature-sort="original" aria-pressed="true">规格顺序</button>
+              <button class="active" data-feature-sort="original" aria-pressed="true">逻辑排序</button>
               <button data-feature-sort="attention" aria-pressed="false">需跟进优先</button>
               <button data-feature-sort="duration" aria-pressed="false">最慢优先</button>
             </div>
@@ -1255,7 +1320,7 @@
         <section class="detail-workspace">
           <div class="panel" id="scenarioPanel">
             <div class="panel-header">
-              <div class="panel-title" id="scenarioPanelTitle">Scenario / Examples</div>
+              <div class="scenario-panel-heading"><div class="panel-title" id="scenarioPanelTitle">场景列表</div><div class="scenario-panel-subtitle" id="scenarioPanelFeature">选择 Feature</div></div>
               <div class="scenario-panel-actions"><span class="status-pill status-unknown" id="visibleCount">0</span><button class="scenario-drawer-toggle" id="scenarioDrawerToggle" aria-expanded="false">展开</button></div>
             </div>
             <div class="panel-body"><div class="scenario-list" id="scenarioList"></div></div>
@@ -1681,6 +1746,11 @@
       return meta.join(" · ");
     }
 
+    function scenarioNavigationSubline(row) {
+      const fallback = row.rowType === "example" ? row.parentName : row.feature;
+      return [scenarioTypeLabel(row), scenarioNavigationMeta(row) || fallback].filter(Boolean).join(" · ");
+    }
+
     function renderFeatureSelect() {
       const features = reportData.features || [];
       const visibleFeatures = visibleFeatureEntries();
@@ -1740,12 +1810,40 @@
       return ({ passed: "var(--pass)", failed: "var(--fail)", skipped: "var(--skip)", unknown: "var(--unknown)" })[normalizeStatus(status)];
     }
 
+    function skipReasonLabel(item) {
+      const reason = String((item || {}).skipReason || "").trim().replace(/^@/, "");
+      if (reason) return reason;
+      const skipTags = ["maint", "skip", "manual", "rep"];
+      const match = ((item || {}).tags || [])
+        .map(tag => String(tag || "").trim().replace(/^@/, ""))
+        .find(tag => skipTags.includes(tag.toLowerCase()));
+      return match || "skipped";
+    }
+
+    function overviewStatusRank(status) {
+      return ({ passed: 0, failed: 1, unknown: 2, skipped: 3 })[normalizeStatus(status)] ?? 2;
+    }
+
+    function featureOverviewRank(stats) {
+      if ((stats.counts.failed || 0) > 0) return overviewStatusRank("failed");
+      if ((stats.counts.unknown || 0) > 0) return overviewStatusRank("unknown");
+      if ((stats.counts.passed || 0) > 0) return overviewStatusRank("passed");
+      return overviewStatusRank("skipped");
+    }
+
+    function logicallyOrderedExecutionItems(items) {
+      return [...items].sort((left, right) =>
+        overviewStatusRank(left.status) - overviewStatusRank(right.status)
+        || Number(left.executionPosition || 0) - Number(right.executionPosition || 0)
+      );
+    }
+
     function executionRowsForFeature(feature, featureIndex) {
       const rows = featureRows(feature, featureIndex);
       return rows.filter(row => row.rowType !== "outline").map((row, index) => ({
         ...row,
-        executionName: row.rowType === "feature-skip"
-          ? `整项 Feature 未执行 · 计划 ${Number(feature.plannedUnits || 0)} 个场景 · ${feature.skipReason || "skipped"}`
+        executionName: normalizeStatus(row.status) === "skipped"
+          ? skipReasonLabel(row.rowType === "feature-skip" ? feature : row)
           : row.name,
         executionPosition: index + 1,
         executionUnits: row.rowType === "feature-skip" ? Math.max(1, Number(feature.plannedUnits || 0)) : 1,
@@ -1762,15 +1860,18 @@
     function executionItemMatches(item, feature) {
       if (!state.executionSearch) return true;
       const params = item.params ? Object.entries(item.params).map(([key, value]) => `${key}=${value}`).join(" ") : "";
-      const haystack = [feature.name, feature.file, item.executionName, item.parentName, item.exampleId, params, ...(item.tags || [])].join(" ").toLowerCase();
+      const haystack = [feature.name, feature.file, item.executionName, item.name, item.parentName, item.exampleId, params, ...(item.tags || [])].join(" ").toLowerCase();
       return haystack.includes(state.executionSearch.toLowerCase());
     }
 
+    function featureMatchesExecutionStatus(feature, featureIndex) {
+      if (state.executionStatus === "all") return true;
+      return executionRowsForFeature(feature, featureIndex).some(item => normalizeStatus(item.status) === state.executionStatus);
+    }
+
     function visibleExecutionItems(feature, featureIndex) {
-      return executionRowsForFeature(feature, featureIndex).filter(item =>
-        (state.executionStatus === "all" || normalizeStatus(item.status) === state.executionStatus)
-        && executionItemMatches(item, feature)
-      );
+      const items = executionRowsForFeature(feature, featureIndex).filter(item => executionItemMatches(item, feature));
+      return state.executionStatus === "all" ? logicallyOrderedExecutionItems(items) : items;
     }
 
     function executionFilterActive() {
@@ -1794,11 +1895,14 @@
         featureIndex,
         visibleItems: visibleExecutionItems(feature, featureIndex),
         stats: featureExecutionStats(feature, featureIndex),
-      })).filter(entry => entry.visibleItems.length);
+        statusMatched: featureMatchesExecutionStatus(feature, featureIndex),
+      })).filter(entry => entry.statusMatched && entry.visibleItems.length);
       if (state.featureSort === "attention") {
         entries.sort((left, right) => right.stats.counts.failed - left.stats.counts.failed || right.stats.counts.unknown - left.stats.counts.unknown || left.featureIndex - right.featureIndex);
       } else if (state.featureSort === "duration") {
         entries.sort((left, right) => right.stats.totalDuration - left.stats.totalDuration || left.featureIndex - right.featureIndex);
+      } else if (state.executionStatus === "all") {
+        entries.sort((left, right) => featureOverviewRank(left.stats) - featureOverviewRank(right.stats) || left.featureIndex - right.featureIndex);
       }
       return entries;
     }
@@ -1822,7 +1926,7 @@
         ["unknown", "状态未知", summary.unknown, "var(--unknown)"],
         ["passed", "通过", summary.passed, "var(--pass)"],
       ];
-      document.getElementById("executionStatusFilters").innerHTML = `<span class="execution-filter-label">筛选</span>${filters.map(([status, label, count, color]) => `<button class="execution-status-filter ${state.executionStatus === status ? "active" : ""}" data-execution-status="${status}" aria-pressed="${state.executionStatus === status}" style="--execution-color:${color}">${label} ${count}</button>`).join("")}<span class="execution-filter-spacer"></span><span class="execution-unit-note">Feature 内始终保持 Gherkin 规格顺序</span>`;
+      document.getElementById("executionStatusFilters").innerHTML = `<span class="execution-filter-label">筛选</span>${filters.map(([status, label, count, color]) => `<button class="execution-status-filter ${state.executionStatus === status ? "active" : ""}" data-execution-status="${status}" aria-pressed="${state.executionStatus === status}" style="--execution-color:${color}">${label} ${count}</button>`).join("")}<span class="execution-filter-spacer"></span><span class="execution-unit-note">状态筛选按 Feature 命中；展开后显示该 Feature 全部场景</span>`;
     }
 
     function executionCode(item) {
@@ -1834,7 +1938,7 @@
     function renderScenarioExecutionRow(item, featureIndex) {
       const status = normalizeStatus(item.status);
       const type = item.rowType === "example" ? "Example" : item.rowType === "feature-skip" ? "Feature" : "Scenario";
-      const failedSteps = item.rowType === "feature-skip" ? `${item.executionUnits} 计划场景` : item.failedSteps ? `<strong>${item.failedSteps}</strong> 个` : "—";
+      const failedSteps = item.rowType === "feature-skip" ? "—" : item.failedSteps ? `<strong>${item.failedSteps}</strong> 个` : "—";
       return `<button class="scenario-execution-row ${item.id === state.selectedId ? "active" : ""}" data-execution-row-id="${escapeAttr(item.id)}" data-execution-feature-id="${featureIndex}" data-execution-name="${escapeAttr(item.executionName)}" data-execution-status="${escapeAttr(status)}" data-execution-duration="${escapeAttr(item.duration || "-")}" style="--execution-color:${executionColor(status)}" aria-label="${escapeAttr(`${item.executionName}，${statusLabel(status)}，${item.duration || "-"}`)}"><span class="scenario-status-mark"></span><span class="scenario-execution-code">${escapeHtml(executionCode(item))}<small class="scenario-execution-type">${type}</small></span><span class="scenario-execution-name" title="${escapeAttr(item.executionName)}">${escapeHtml(item.executionName)}</span><span class="scenario-result-label">${statusLabel(status)}</span><span class="scenario-duration">${escapeHtml(item.duration || "-")}</span><span class="scenario-failed-steps">${failedSteps}</span><span class="execution-row-arrow">›</span></button>`;
     }
 
@@ -1843,21 +1947,21 @@
       const entries = orderedFeatureEntries();
       const filtersActive = executionFilterActive();
       const groups = entries.map(({ feature, featureIndex, visibleItems, stats }) => {
-        const collapsed = state.collapsedFeatures.has(featureIndex) && !filtersActive;
+        const collapsed = state.collapsedFeatures.has(featureIndex);
         const featureAccent = stats.counts.failed ? "var(--fail)" : stats.counts.unknown ? "var(--unknown)" : stats.passRate === null ? "var(--skip)" : "var(--pass)";
         const resultRatio = stats.executed ? `${stats.counts.passed}/${stats.executed}` : "—";
         const resultLabel = stats.passRate === null ? `${stats.planned} 未执行` : `${stats.passRate}% 通过`;
         const failedSteps = stats.failedSteps ? `<strong>${stats.failedSteps}</strong> 个` : "—";
-        return `<section class="feature-execution-group ${collapsed ? "collapsed" : ""}" data-feature-group-id="${featureIndex}" style="--feature-accent:${featureAccent};--feature-ring:${featureStateRing(stats)}"><button class="feature-tree-row" data-toggle-feature="${featureIndex}" aria-expanded="${!collapsed}" aria-disabled="${filtersActive}"><span class="feature-primary-status"></span><span class="feature-tree-code"><span class="feature-tree-chevron">▼</span><span class="feature-state-badge"><span>F${String(featureIndex + 1).padStart(2, "0")}</span></span></span><span class="feature-tree-copy"><strong class="feature-tree-name">${escapeHtml(feature.name)}</strong><small class="feature-tree-path">${escapeHtml(feature.file || "")} · ${stats.planned} 场景</small></span><span class="feature-result-cell"><strong>${resultRatio}</strong><small>${resultLabel}</small></span><span class="feature-total-duration">${formatExecutionDuration(stats.totalDuration)}</span><span class="feature-failed-steps">${failedSteps}</span><span class="execution-row-arrow">›</span></button><div class="scenario-execution-list">${visibleItems.map(item => renderScenarioExecutionRow(item, featureIndex)).join("")}</div></section>`;
+        return `<section class="feature-execution-group ${collapsed ? "collapsed" : ""}" data-feature-group-id="${featureIndex}" style="--feature-accent:${featureAccent};--feature-ring:${featureStateRing(stats)}"><button class="feature-tree-row" data-toggle-feature="${featureIndex}" aria-expanded="${!collapsed}" aria-disabled="false"><span class="feature-primary-status"></span><span class="feature-tree-code"><span class="feature-tree-chevron">▼</span><span class="feature-state-badge"><span>F${String(featureIndex + 1).padStart(2, "0")}</span></span></span><span class="feature-tree-copy"><strong class="feature-tree-name">${escapeHtml(feature.name)}</strong><small class="feature-tree-path">${escapeHtml(feature.file || "")} · ${stats.planned} 场景</small></span><span class="feature-result-cell"><strong>${resultRatio}</strong><small>${resultLabel}</small></span><span class="feature-total-duration">${formatExecutionDuration(stats.totalDuration)}</span><span class="feature-failed-steps">${failedSteps}</span><span class="execution-row-arrow">›</span></button><div class="scenario-execution-list">${visibleItems.map(item => renderScenarioExecutionRow(item, featureIndex)).join("")}</div></section>`;
       }).join("");
       document.getElementById("featureGroups").innerHTML = groups || `<div class="execution-empty">没有匹配的 Feature 或 Scenario</div>`;
       const visibleUnits = entries.reduce((total, entry) => total + entry.visibleItems.reduce((sum, item) => sum + item.executionUnits, 0), 0);
       document.getElementById("executionVisibleSummary").textContent = `${entries.length} Feature · ${visibleUnits} 测试场景`;
       const allCollapsed = entries.length > 0 && entries.every(entry => state.collapsedFeatures.has(entry.featureIndex));
       const collapseButton = document.getElementById("executionCollapseAll");
-      collapseButton.disabled = filtersActive;
-      collapseButton.setAttribute("aria-expanded", String(filtersActive || !allCollapsed));
-      collapseButton.textContent = filtersActive ? "筛选结果已展开" : allCollapsed ? "全部展开" : "全部收起";
+      collapseButton.disabled = false;
+      collapseButton.setAttribute("aria-expanded", String(!allCollapsed));
+      collapseButton.textContent = allCollapsed ? "全部展开" : "全部收起";
       requestAnimationFrame(() => {
         const scroller = document.getElementById("executionScroll");
         scroller.scrollLeft = state.executionScrollLeft;
@@ -1868,6 +1972,10 @@
     function renderOverview(rows, summary) {
       renderSummaryLine(summary);
       renderGroupedExecution(rows, summary);
+    }
+
+    function collapseAllFeatures() {
+      (reportData.features || []).forEach((_, index) => state.collapsedFeatures.add(index));
     }
 
     function setView(view) {
@@ -1934,7 +2042,8 @@
       const featureIndex = Number(state.selectedFeatureId || 0);
       const featureOnlyRows = feature ? featureRows(feature, featureIndex) : [];
       const visible = featureOnlyRows.filter(row => matchesFilter(row) && shouldShowRow(row));
-      document.getElementById("scenarioPanelTitle").textContent = feature ? `${feature.name} · Scenario / Examples` : "Scenario / Examples";
+      document.getElementById("scenarioPanelTitle").textContent = "场景列表";
+      document.getElementById("scenarioPanelFeature").textContent = feature ? feature.name : "选择 Feature";
       document.getElementById("visibleCount").textContent = `${visible.length} 项`;
 
       if (!visible.length) {
@@ -1955,8 +2064,8 @@
           <div class="scenario-head">
             <div class="scenario-code">${escapeHtml(scenarioNavigationCode(row))}</div>
             <div class="scenario-copy">
-              <div class="scenario-name" title="${escapeAttr(row.name)}">${row.rowType === "outline" ? `<span class="outline-toggle">${isOutlineExpanded(row) ? "▼" : "▶"}</span>` : ""}<span class="scenario-type">${scenarioTypeLabel(row)}</span>${escapeHtml(row.name)}</div>
-              <div class="scenario-subline">${escapeHtml(scenarioNavigationMeta(row) || (row.rowType === "example" ? row.parentName : row.feature))}</div>
+              <div class="scenario-name" title="${escapeAttr(row.name)}">${row.rowType === "outline" ? `<span class="outline-toggle">${isOutlineExpanded(row) ? "▼" : "▶"}</span>` : ""}${escapeHtml(row.name)}</div>
+              <div class="scenario-subline">${escapeHtml(scenarioNavigationSubline(row))}</div>
             </div>
             ${statusPill(row.status)}
           </div>
@@ -2073,34 +2182,39 @@
 
       if (row.rowType === "feature-skip") {
         detailBody.innerHTML = `
-          <div class="detail-title-row"><div><div class="detail-title">${escapeHtml(row.name)}</div><div class="detail-subtitle">Feature 跳过 · ${escapeHtml(row.file || "")}</div></div></div>
-          <div class="facts">
-            <div class="fact"><div class="fact-label">跳过层级</div><div class="fact-value">Feature</div></div>
-            <div class="fact"><div class="fact-label">包含测试场景</div><div class="fact-value">${Number(row.plannedUnits || 0)}</div></div>
-            <div class="fact"><div class="fact-label">计划 BDD Step</div><div class="fact-value">${Number(row.plannedSteps || 0)}</div></div>
-            <div class="fact"><div class="fact-label">原因</div><div class="fact-value">${escapeHtml(row.skipReason || "skipped")}</div></div>
-          </div>
-          <div class="scenario-tags">${(row.tags || []).map(tag => `<span class="tag">@${escapeHtml(tag)}</span>`).join("")}</div>`;
+          <section class="detail-summary">
+            <div class="detail-title-row"><div><div class="detail-title">${escapeHtml(row.name)}</div><div class="detail-subtitle">Feature 跳过 · ${escapeHtml(row.file || "")}</div></div></div>
+            <div class="facts">
+              <div class="fact"><div class="fact-label">层级</div><div class="fact-value">Feature</div></div>
+              <div class="fact"><div class="fact-label">场景</div><div class="fact-value">${Number(row.plannedUnits || 0)}</div></div>
+              <div class="fact"><div class="fact-label">Step</div><div class="fact-value">${Number(row.plannedSteps || 0)}</div></div>
+              <div class="fact"><div class="fact-label">原因</div><div class="fact-value">${escapeHtml(row.skipReason || "skipped")}</div></div>
+            </div>
+            <div class="scenario-tags">${(row.tags || []).map(tag => `<span class="tag">@${escapeHtml(tag)}</span>`).join("")}</div>
+          </section>`;
         return;
       }
 
       detailBody.innerHTML = `
-        <div class="detail-title-row">
-          <div>
-            <div class="detail-title">${escapeHtml(row.name)}</div>
-            <div class="detail-subtitle">${escapeHtml(row.rowType === "example" ? row.parentName : row.feature)} · ${escapeHtml(row.file || "")}</div>
+        <section class="detail-summary">
+          <div class="detail-title-row">
+            <div>
+              <div class="detail-title">${escapeHtml(row.name)}</div>
+              <div class="detail-subtitle">${escapeHtml(row.rowType === "example" ? row.parentName : row.feature)} · ${escapeHtml(row.file || "")}</div>
+            </div>
           </div>
-        </div>
-        ${row.params ? `<div class="example-params">${Object.entries(row.params).map(([key, value]) => `<span class="param-chip">${escapeHtml(key)}=${escapeHtml(value)}</span>`).join("")}</div>` : ""}
-        <div class="facts">
-          <div class="fact"><div class="fact-label">类型</div><div class="fact-value">${row.rowType === "example" ? "Example" : "Scenario"}</div></div>
-          <div class="fact"><div class="fact-label">耗时</div><div class="fact-value">${escapeHtml(row.duration || "-")}</div></div>
-          <div class="fact"><div class="fact-label">失败步骤</div><div class="fact-value">${row.failedSteps}</div></div>
-          <div class="fact"><div class="fact-label">附件</div><div class="fact-value">${row.attachmentCount}</div></div>
-        </div>
+          ${row.params ? `<div class="example-params">${Object.entries(row.params).map(([key, value]) => `<span class="param-chip">${escapeHtml(key)}=${escapeHtml(value)}</span>`).join("")}</div>` : ""}
+          <div class="facts">
+            <div class="fact"><div class="fact-label">类型</div><div class="fact-value">${row.rowType === "example" ? "Example" : "Scenario"}</div></div>
+            <div class="fact"><div class="fact-label">耗时</div><div class="fact-value">${escapeHtml(row.duration || "-")}</div></div>
+            <div class="fact"><div class="fact-label">失败步骤</div><div class="fact-value">${row.failedSteps}</div></div>
+            <div class="fact"><div class="fact-label">附件</div><div class="fact-value">${row.attachmentCount}</div></div>
+          </div>
+          <div class="scenario-tags">${(row.tags || []).map(tag => `<span class="tag">@${escapeHtml(tag)}</span>`).join("")}</div>
+        </section>
         ${row.error ? `<div class="scenario-evidence-summary"><strong>失败摘要</strong><br>${escapeHtml(row.error)}</div>` : ""}
-        <div class="scenario-tags">${(row.tags || []).map(tag => `<span class="tag">@${escapeHtml(tag)}</span>`).join("")}</div>
         ${renderScenarioAttachments(collectAttachments(row))}
+        <div class="step-section-title">Step 时间线</div>
         <div class="step-list">${renderSteps(row.steps || [])}</div>
       `;
     }
@@ -2132,18 +2246,20 @@
     function renderOutlineDetail(row) {
       const examples = row.examples || [];
       return `
-        <div class="detail-title-row">
-          <div>
-            <div class="detail-title">${escapeHtml(row.name)}</div>
-            <div class="detail-subtitle">Scenario Outline · ${escapeHtml(row.file || "")}</div>
+        <section class="detail-summary">
+          <div class="detail-title-row">
+            <div>
+              <div class="detail-title">${escapeHtml(row.name)}</div>
+              <div class="detail-subtitle">Scenario Outline · ${escapeHtml(row.file || "")}</div>
+            </div>
           </div>
-        </div>
-        <div class="facts">
-          <div class="fact"><div class="fact-label">Examples</div><div class="fact-value">${examples.length}</div></div>
-          <div class="fact"><div class="fact-label">通过</div><div class="fact-value">${examples.filter(item => normalizeStatus(item.status) === "passed").length}</div></div>
-          <div class="fact"><div class="fact-label">失败</div><div class="fact-value">${examples.filter(item => normalizeStatus(item.status) === "failed").length}</div></div>
-          <div class="fact"><div class="fact-label">跳过</div><div class="fact-value">${examples.filter(item => normalizeStatus(item.status) === "skipped").length}</div></div>
-        </div>
+          <div class="facts">
+            <div class="fact"><div class="fact-label">Examples</div><div class="fact-value">${examples.length}</div></div>
+            <div class="fact"><div class="fact-label">通过</div><div class="fact-value">${examples.filter(item => normalizeStatus(item.status) === "passed").length}</div></div>
+            <div class="fact"><div class="fact-label">失败</div><div class="fact-value">${examples.filter(item => normalizeStatus(item.status) === "failed").length}</div></div>
+            <div class="fact"><div class="fact-label">跳过</div><div class="fact-value">${examples.filter(item => normalizeStatus(item.status) === "skipped").length}</div></div>
+          </div>
+        </section>
         ${renderExamplesTable(row)}
         <div class="empty" style="margin-top: 12px;">点击表格中的 Example 行，或展开中间 Scenario Outline 后点击 Example，可查看该行的 Step 时间线。</div>
       `;
@@ -2199,10 +2315,12 @@
           <div class="step ${normalized} ${hasExtra ? "has-extra open" : ""}">
             <div class="step-main">
               <div class="step-index">${index + 1}</div>
-              <div>
-                <div class="step-name"><span class="bdd-keyword">${escapeHtml(step.keyword || "Step")}</span>${escapeHtml(step.name)}</div>
-                <div class="step-meta">BDD Step · ${escapeHtml(step.duration || "-")}</div>
+              <div class="bdd-keyword">${escapeHtml(step.keyword || "Step")}</div>
+              <div class="step-copy">
+                <div class="step-name">${escapeHtml(step.name)}</div>
+                <div class="step-meta">BDD Step</div>
               </div>
+              <div class="step-duration">${escapeHtml(step.duration || "-")}</div>
               ${statusPill(step.status)}
             </div>
             ${hasExtra ? `<div class="step-extra">
@@ -2352,7 +2470,6 @@
     document.getElementById("featureExecutionTree").addEventListener("click", event => {
       const featureRow = event.target.closest("[data-toggle-feature]");
       if (featureRow) {
-        if (executionFilterActive()) return;
         const featureId = Number(featureRow.dataset.toggleFeature);
         if (state.collapsedFeatures.has(featureId)) state.collapsedFeatures.delete(featureId);
         else state.collapsedFeatures.add(featureId);
@@ -2372,6 +2489,7 @@
     document.getElementById("executionStatusFilters").addEventListener("click", event => {
       const button = event.target.closest("[data-execution-status]");
       if (!button) return;
+      if (state.executionStatus !== button.dataset.executionStatus) collapseAllFeatures();
       state.executionStatus = button.dataset.executionStatus;
       render();
     });
@@ -2386,7 +2504,7 @@
         item.setAttribute("aria-pressed", String(active));
       });
       document.getElementById("executionSortDescription").textContent = ({
-        original: "Feature 内按 Gherkin 原始顺序排列",
+        original: "全部筛选下按通过、需跟进、状态未知、未执行排序",
         attention: "Feature 按需跟进数量排序；组内规格顺序不变",
         duration: "Feature 按总耗时排序；组内规格顺序不变",
       })[state.featureSort];

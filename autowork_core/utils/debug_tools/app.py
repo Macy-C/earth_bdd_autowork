@@ -29,6 +29,7 @@ from autowork_core.utils.debug_tools.common import (
 )
 from autowork_core.utils.overlay import OverlayManager
 from autowork_core.utils.debug_tools.locator_tools import LocatorToolMixin
+from autowork_core.utils.debug_tools.action_runner_window import ActionRunnerWindow
 from autowork_core.utils.debug_tools.recorder.panel import RecorderToolMixin
 from autowork_core.utils.debug_tools.visual_tools import VisualToolMixin
 
@@ -100,6 +101,8 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.locator_workspace = None
         self.locator_notebook = None
         self.locator_workspace_initialized = False
+        self.action_runner_button = None
+        self.action_runner_window = None
         self.recorder_button = None
 
         # 点选控件模式
@@ -155,6 +158,12 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             command=self.open_recorder_workbench,
         )
         self.recorder_button.pack(side="right")
+        self.action_runner_button = ttk.Button(
+            header,
+            text="运行调试器",
+            command=self.open_action_runner,
+        )
+        self.action_runner_button.pack(side="right", padx=(0, 6))
 
         target = ttk.LabelFrame(self.app, text="目标窗口")
         target.pack(fill="x", padx=12, pady=(0, 8))
@@ -1464,6 +1473,29 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
     def set_status(self, text):
         self.status_label.config(text=text)
 
+    def open_action_runner(self):
+        if self.action_runner_window is not None:
+            try:
+                if self.action_runner_window.window.winfo_exists():
+                    self.action_runner_window.window.lift()
+                    self.action_runner_window.window.focus_force()
+                    return self.action_runner_window
+            except Exception:
+                pass
+        self.action_runner_window = ActionRunnerWindow(
+            self.app,
+            on_close=lambda: setattr(self, "action_runner_window", None),
+        )
+        return self.action_runner_window
+
+    def close_action_runner(self):
+        if self.action_runner_window is not None:
+            try:
+                self.action_runner_window.close()
+            except Exception:
+                pass
+        self.action_runner_window = None
+
     def close(self):
         if self.hotkey_poll_after_id is not None:
             try:
@@ -1473,6 +1505,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             self.hotkey_poll_after_id = None
         self.stop_recorder_on_close()
         self.stop_pick_mode()
+        self.close_action_runner()
         self.close_recorder_tool(force=True)
         self.close_locator_tools()
         self.close_ocr_tool()

@@ -2,8 +2,16 @@ import sys
 from autowork_core.runtime.local_runner import main
 
 if __name__ == "__main__":
-    # feature_path = r'Bdd\test_features\...'
-    feature_path = r'C:\Users\320321651\Messy\projects\earth_bdd_autowork\Bdd\test_features\calc\calc.feature'
+    feature_path = r'C:\Users\320321651\Messy\projects\bdd_autowork\Bdd\test_features\calc\calc.feature'
+    scenario_name = None
+    example_id = None
+    # 完整复跑一个普通 Scenario：
+    # scenario_name = "计算相加"
+    # 完整复跑一个 Scenario Outline 的全部 Examples：
+    # scenario_name = "计算 <a> 加 <b>"
+    # 完整复跑一个 Scenario Outline 的单个 Example：
+    # scenario_name = "计算 <a> 加 <b>"
+    # example_id = "1.1"
     debug_settings_overrides = {
         # 应用启动方式
         "app_launch_mode": "attach",  # auto / attach
@@ -40,4 +48,6 @@ if __name__ == "__main__":
         settings_overrides=debug_settings_overrides,
         verbose=True,
         formatter="progress2",  # progress2 / pretty
+        scenario_name=scenario_name,
+        example_id=example_id,
     ))

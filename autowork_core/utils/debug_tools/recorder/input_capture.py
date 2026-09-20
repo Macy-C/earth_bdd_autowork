@@ -19,8 +19,13 @@ from pywinauto.win32_hooks import HOOKCB, Hook, KeyboardEvent, MouseEvent
 from pywinauto.win32structures import MSLLHOOKSTRUCT
 
 from autowork_core.utils.debug_tools.recorder.event_target import (
-    DEFAULT_EVENT_TARGET_TIMEOUT_MS,
+    DEFAULT_EVENT_TARGET_WATCHDOG_MS,
+    EVENT_TARGET_BINDING_VERSION,
     EventTargetResolver,
+)
+from autowork_core.utils.debug_tools.recorder.evidence_acquisition import (
+    build_acquisition_record,
+    write_acquisition_record,
 )
 from autowork_core.utils.debug_tools.recorder.inspector import (
     UIAInspector,
@@ -97,33 +102,39 @@ class RecorderHook(Hook):
             time.sleep(0.005)
 
     def _mouse_ll_hdl(self, code, event_code, mouse_data_ptr):
-        result = windll.user32.CallNextHookEx(
-            self.mouse_id,
-            code,
-            event_code,
-            mouse_data_ptr,
-        )
-        if not self.handler:
-            return result
         event_code_word = 0xFFFFFFFF & event_code
         current_key = self.MOUSE_ID_TO_KEY.get(event_code_word)
         if current_key is None:
-            return result
+            return self._call_next_mouse_hook(
+                code,
+                event_code,
+                mouse_data_ptr,
+            )
         move_handler = getattr(self, "move_handler", None)
-        if current_key == "Move" and move_handler is None:
-            return result
         mouse_data = MSLLHOOKSTRUCT.from_address(mouse_data_ptr)
-        if move_handler is not None and current_key in {"Move", "Wheel"}:
+        if current_key == "Move":
+            result = self._call_next_mouse_hook(
+                code,
+                event_code,
+                mouse_data_ptr,
+            )
+            if move_handler is None:
+                return result
             try:
                 move_handler(
                     mouse_data.pt.x,
                     mouse_data.pt.y,
-                    current_key == "Wheel",
+                    False,
                 )
             except Exception:
                 pass
-        if current_key == "Move":
             return result
+        if not self.handler:
+            return self._call_next_mouse_hook(
+                code,
+                event_code,
+                mouse_data_ptr,
+            )
         event_type = self.MOUSE_ID_TO_EVENT_TYPE.get(event_code_word)
         event = MouseEvent(
             current_key,
@@ -135,8 +146,32 @@ class RecorderHook(Hook):
             event.wheel_delta = ctypes.c_short(
                 (int(mouse_data.mouseData) >> 16) & 0xFFFF
             ).value
-        self.handler(event)
+        try:
+            self.handler(event)
+            if move_handler is not None and current_key == "Wheel":
+                try:
+                    move_handler(
+                        mouse_data.pt.x,
+                        mouse_data.pt.y,
+                        True,
+                    )
+                except Exception:
+                    pass
+        finally:
+            result = self._call_next_mouse_hook(
+                code,
+                event_code,
+                mouse_data_ptr,
+            )
         return result
+
+    def _call_next_mouse_hook(self, code, event_code, mouse_data_ptr):
+        return windll.user32.CallNextHookEx(
+            self.mouse_id,
+            code,
+            event_code,
+            mouse_data_ptr,
+        )
 
 
 class InputCaptureEngine:
@@ -147,7 +182,7 @@ class InputCaptureEngine:
                  window_capture_mode="strict", on_window_discovered=None,
                  process_filter_enabled=True, journal_dir=None,
                  event_id_prefix="", event_target_resolver=None,
-                 event_target_timeout_ms=DEFAULT_EVENT_TARGET_TIMEOUT_MS):
+                 event_target_watchdog_ms=DEFAULT_EVENT_TARGET_WATCHDOG_MS):
         self.backend = backend
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
         self.monitor_index = max(1, int(monitor_index or 1))
@@ -180,7 +215,7 @@ class InputCaptureEngine:
         self.process_filter_enabled = bool(process_filter_enabled)
         self.journal_dir = Path(journal_dir).resolve() if journal_dir else None
         self.event_id_prefix = str(event_id_prefix or "")
-        self.event_target_timeout_ms = max(0, int(event_target_timeout_ms))
+        self.event_target_watchdog_ms = max(1, int(event_target_watchdog_ms))
         self.event_target_resolver = (
             event_target_resolver
             if event_target_resolver is not None
@@ -201,6 +236,7 @@ class InputCaptureEngine:
         self.inspector = UIAInspector(backend)
         self.events = []
         self.error = None
+        self._target_capture_unhealthy = False
         self._running = False
         self._accepting = False
         self._stopped = True
@@ -212,8 +248,6 @@ class InputCaptureEngine:
         self._hook = None
         self._hook_thread = None
         self._worker_thread = None
-        self._discovery_thread = None
-        self._discovery_stop = threading.Event()
         self._window_lock = threading.RLock()
         self._window_evidence_queue = queue.Queue()
         self._window_evidence_thread = None
@@ -354,7 +388,6 @@ class InputCaptureEngine:
             self._window_evidence_gate = _CaptureCommitGate()
             self._hook_done.clear()
             self._worker_cancelled.clear()
-            self._discovery_stop.clear()
             with self._frame_condition:
                 self._frame_jobs = []
                 self._frame_records = {}
@@ -368,6 +401,7 @@ class InputCaptureEngine:
             self._accepting = True
             self._running = True
             self.error = None
+            self._target_capture_unhealthy = False
             with self._event_lock:
                 self.events.clear()
             self._next_index = 1
@@ -409,10 +443,6 @@ class InputCaptureEngine:
                 daemon=True,
             )
             self._hook_thread = threading.Thread(target=self._run_hook, daemon=True)
-            self._discovery_thread = threading.Thread(
-                target=self._run_window_discovery,
-                daemon=True,
-            )
             self._frame_thread = threading.Thread(
                 target=self._run_frame_capture,
                 daemon=True,
@@ -423,7 +453,6 @@ class InputCaptureEngine:
             self._window_evidence_thread.start()
             self._worker_thread.start()
             self._hook_thread.start()
-            self._discovery_thread.start()
 
             deadline = time.monotonic() + max(0.1, float(startup_timeout))
             while time.monotonic() < deadline:
@@ -451,17 +480,6 @@ class InputCaptureEngine:
             with self._enqueue_lock:
                 self._accepting = False
             self._running = False
-            self._discovery_stop.set()
-
-            discovery_stop_error = None
-            if self._discovery_thread is not None:
-                self._discovery_thread.join(timeout=3)
-                if self._discovery_thread.is_alive():
-                    discovery_stop_error = TimeoutError(
-                        "等待窗口发现线程停止超时"
-                    )
-                    self._set_error(discovery_stop_error)
-                    self._restartable = False
 
             hook = self._hook
             if hook is not None:
@@ -551,7 +569,6 @@ class InputCaptureEngine:
             ]
             completion_error = (
                 raw_stop_error
-                or discovery_stop_error
                 or hook_stop_error
                 or frame_stop_error
                 or worker_stop_error
@@ -574,10 +591,6 @@ class InputCaptureEngine:
                 raise RuntimeError(
                     "原始事件 journal 未完整封存"
                 ) from raw_stop_error
-            if discovery_stop_error is not None:
-                raise RuntimeError(
-                    "窗口发现线程未停止，拒绝提交 Take"
-                ) from discovery_stop_error
             if hook_stop_error is not None:
                 raise RuntimeError(
                     "Windows 输入 Hook 未停止，拒绝提交 Take"
@@ -702,17 +715,110 @@ class InputCaptureEngine:
             return
         raw["window_admission"] = admission
         raw["process_relation"] = relation
-        if raw.get("event_type") in {"mouse_down", "mouse_wheel"}:
-            resolver = self.event_target_resolver
-            if resolver is not None:
-                raw["_event_target_binding"] = resolver.capture(
-                    tuple(raw.get("point") or (0, 0)),
-                    process_id=raw.get("process_id"),
-                    window_handle=raw.get("window_handle"),
-                    timeout_ms=self.event_target_timeout_ms,
-                    event_type=raw.get("event_type"),
+        with self._enqueue_lock:
+            if not self._accepting:
+                return
+            event_id = self._register_raw_locked(raw)
+            if raw.get("event_type") in {"mouse_down", "mouse_wheel"}:
+                resolver = self.event_target_resolver
+                if resolver is not None:
+                    binding = self._capture_event_target_binding(resolver, raw)
+                    raw["_event_target_binding"] = binding
+                    self._record_target_acquisition(event_id, raw, binding)
+                    if binding.get("status") in {"timeout", "error"}:
+                        self._target_capture_unhealthy = True
+            self._queue.put(raw)
+
+    def _capture_event_target_binding(self, resolver, raw):
+        if self._target_capture_unhealthy:
+            return {
+                "target_binding_version": EVENT_TARGET_BINDING_VERSION,
+                "phase": "pre_dispatch",
+                "watchdog_ms": self.event_target_watchdog_ms,
+                "process_id": raw.get("process_id"),
+                "window_handle": raw.get("window_handle"),
+                "status": "skipped_by_health",
+                "latency_ms": 0,
+                "element": None,
+                "error": "event target capture skipped after prior failure",
+            }
+        try:
+            return resolver.capture(
+                tuple(raw.get("point") or (0, 0)),
+                process_id=raw.get("process_id"),
+                window_handle=raw.get("window_handle"),
+                watchdog_ms=self.event_target_watchdog_ms,
+                event_type=raw.get("event_type"),
+            )
+        except Exception as error:
+            return {
+                "target_binding_version": EVENT_TARGET_BINDING_VERSION,
+                "phase": "pre_dispatch",
+                "watchdog_ms": self.event_target_watchdog_ms,
+                "process_id": raw.get("process_id"),
+                "window_handle": raw.get("window_handle"),
+                "status": "error",
+                "latency_ms": None,
+                "element": None,
+                "error": f"{type(error).__name__}: {error}"[:300],
+            }
+
+    def _record_target_acquisition(self, event_id, raw, binding):
+        if self.journal_dir is None:
+            return
+        status = str((binding or {}).get("status") or "unavailable")
+        acquisition_status = {
+            "captured": "captured",
+            "timeout": "timed_out",
+            "unavailable": "unavailable",
+            "skipped_by_health": "skipped_by_health",
+        }.get(status, "failed")
+        payload = {
+            key: (binding or {}).get(key)
+            for key in (
+                "target_binding_version",
+                "phase",
+                "watchdog_ms",
+                "latency_ms",
+                "process_id",
+                "window_handle",
+                "status",
+                "error",
+            )
+            if (binding or {}).get(key) is not None
+        }
+        element = (binding or {}).get("element") or {}
+        if isinstance(element, dict) and element:
+            payload["element"] = {
+                key: element.get(key)
+                for key in (
+                    "name",
+                    "auto_id",
+                    "control_type",
+                    "class_name",
+                    "framework_id",
+                    "process_id",
+                    "rectangle",
                 )
-        self._enqueue_raw(raw, required=False)
+                if element.get(key) not in (None, "", [])
+            }
+        try:
+            record = build_acquisition_record(
+                self.journal_dir,
+                kind="target_observation",
+                time_anchor={
+                    "event_id": event_id,
+                    "event_type": raw.get("event_type"),
+                    "monotonic_ms": raw.get("monotonic_ms"),
+                    "window_handle": raw.get("window_handle"),
+                },
+                status=acquisition_status,
+                payload=(payload if acquisition_status == "captured" else None),
+                error=(binding or {}).get("error"),
+            )
+            write_acquisition_record(self.journal_dir, record)
+        except Exception:
+            return
 
     def _enqueue_raw(self, raw, required):
         with self._enqueue_lock:
@@ -720,19 +826,23 @@ class InputCaptureEngine:
                 if required:
                     raise RuntimeError("输入采集器已停止接收事件")
                 return False
-            raw["index"] = self._next_index
-            self._next_index += 1
-            event_id = self._event_id(raw["index"])
-            raw["id"] = event_id
-            if self._raw_journal is not None:
-                self._raw_journal_queue.put({
-                    key: value
-                    for key, value in raw.items()
-                    if not str(key).startswith("_")
-                })
-            self._schedule_boundary_frames(raw)
+            event_id = self._register_raw_locked(raw)
             self._queue.put(raw)
             return event_id
+
+    def _register_raw_locked(self, raw):
+        raw["index"] = self._next_index
+        self._next_index += 1
+        event_id = self._event_id(raw["index"])
+        raw["id"] = event_id
+        if self._raw_journal is not None:
+            self._raw_journal_queue.put({
+                key: value
+                for key, value in raw.items()
+                if not str(key).startswith("_")
+            })
+        self._schedule_boundary_frames(raw)
+        return event_id
 
     def _schedule_boundary_frames(self, raw):
         event_type = raw.get("event_type")
@@ -1048,40 +1158,6 @@ class InputCaptureEngine:
                 with self._enqueue_lock:
                     self._accepting = False
 
-    def _run_window_discovery(self):
-        while not self._discovery_stop.wait(0.25):
-            if not self._accepting or not self.allowed_process_ids:
-                continue
-            now_ms = int((time.monotonic() - self._started_monotonic) * 1000)
-            for context in _visible_top_level_windows():
-                if not self._accepting:
-                    break
-                handle = context.get("window_handle")
-                if not handle or int(handle) in self._window_lifecycle:
-                    continue
-                if (
-                    int(handle) in self._initial_window_handles
-                    and int(handle) not in self.selected_window_handles
-                ):
-                    continue
-                admission, relation = self._classify_window(context)
-                if relation not in {
-                    "selected_window",
-                    "same_process",
-                    "child_process",
-                }:
-                    continue
-                self._track_window(
-                    {
-                        **context,
-                        "event_type": "window_discovered",
-                        "monotonic_ms": now_ms,
-                        "window_admission": admission,
-                        "process_relation": relation,
-                    },
-                    None,
-                )
-
     def _run_window_evidence(self):
         com_initialized = self._initialize_worker_com()
         if self.backend == "uia" and not com_initialized:
@@ -1151,7 +1227,6 @@ class InputCaptureEngine:
         screenshot = None
         screenshot_monotonic_ms = None
         target = None
-        late_target_observation = None
         target_binding = raw.get("_event_target_binding")
         if event_type in (
             "mouse_down",
@@ -1176,14 +1251,6 @@ class InputCaptureEngine:
                     raw,
                     self.backend,
                 )
-                if target is None:
-                    late_target_observation = (
-                        self.inspector.inspect_point_capture(
-                            point[0],
-                            point[1],
-                            **inspect_kwargs,
-                        )
-                    )
             else:
                 target = self.inspector.inspect_point_capture(
                     point[0],
@@ -1241,6 +1308,8 @@ class InputCaptureEngine:
             "process_id": raw.get("process_id"),
             "window_class": raw.get("window_class"),
             "window_title": raw.get("window_title"),
+            "window_owner_handle": raw.get("window_owner_handle"),
+            "window_owner_chain": raw.get("window_owner_chain") or [],
             "window_admission": raw.get("window_admission"),
             "process_relation": raw.get("process_relation"),
             "note": raw.get("note"),
@@ -1271,10 +1340,6 @@ class InputCaptureEngine:
         }
         if target_binding_record is not None:
             details["target_binding"] = target_binding_record
-        if late_target_observation is not None:
-            details["late_target_observation"] = (
-                _compact_target_observation(late_target_observation)
-            )
         return RecordingEvent(
             id=event_id,
             index=raw["index"],
@@ -1350,6 +1415,8 @@ class InputCaptureEngine:
                     "process_id": int(process_id),
                     "title": str(raw.get("window_title") or ""),
                     "class_name": str(raw.get("window_class") or ""),
+                    "owner_handle": raw.get("window_owner_handle"),
+                    "owner_chain": list(raw.get("window_owner_chain") or []),
                     "admission": raw.get("window_admission") or "provisional",
                     "process_relation": raw.get("process_relation") or "unknown",
                     "first_seen_ms": now_ms,
@@ -1423,11 +1490,14 @@ def _foreground_window():
 
 
 def _window_context(handle, process_id):
+    owner_chain = _window_owner_chain(handle)
     return {
         "window_handle": int(handle),
         "process_id": int(process_id),
         "window_class": str(win32gui.GetClassName(handle) or ""),
         "window_title": str(win32gui.GetWindowText(handle) or ""),
+        "window_owner_handle": owner_chain[0] if owner_chain else None,
+        "window_owner_chain": owner_chain,
     }
 
 
@@ -1437,7 +1507,26 @@ def _empty_window_context():
         "process_id": None,
         "window_class": "",
         "window_title": "",
+        "window_owner_handle": None,
+        "window_owner_chain": [],
     }
+
+
+def _window_owner_chain(handle, limit=16):
+    result = []
+    seen = {int(handle or 0)}
+    current = int(handle or 0)
+    for _index in range(max(0, int(limit))):
+        try:
+            owner = int(win32gui.GetWindow(current, 4) or 0)
+        except Exception:
+            break
+        if not owner or owner in seen:
+            break
+        result.append(owner)
+        seen.add(owner)
+        current = owner
+    return result
 
 
 def _top_level_window_handles():
@@ -1453,26 +1542,6 @@ def _top_level_window_handles():
     except Exception:
         return set()
     return handles
-
-
-def _visible_top_level_windows():
-    result = []
-
-    def collect(handle, _extra):
-        if not win32gui.IsWindowVisible(handle):
-            return True
-        try:
-            _, process_id = win32process.GetWindowThreadProcessId(handle)
-            result.append(_window_context(handle, process_id))
-        except Exception:
-            pass
-        return True
-
-    try:
-        win32gui.EnumWindows(collect, None)
-    except Exception:
-        return []
-    return result
 
 
 def _is_descendant_process(process_id, root_process_ids):
@@ -1496,17 +1565,6 @@ def _inspection_event_type(event_type, button):
     if button == "middle":
         return "middle_click"
     return "click"
-
-
-def _compact_target_observation(target):
-    target = target or {}
-    return {
-        "inspection_mode": target.get("inspection_mode"),
-        "point": target.get("point"),
-        "window": dict(target.get("window") or {}),
-        "element": dict(target.get("element") or {}),
-        "error": target.get("error"),
-    }
 
 
 def _has_structured_target(target):

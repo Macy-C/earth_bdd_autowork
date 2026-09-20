@@ -11,9 +11,23 @@ from autowork_core.utils.debug_tools.recorder.annotations import (
 )
 from autowork_core.utils.debug_tools.recorder.code_reuse_index import (
     match_window_owner_candidates,
+    step_pattern_contract_matches,
 )
 from autowork_core.utils.debug_tools.recorder.evidence_graph import (
     EVENT_ARTIFACT_KINDS,
+    _target_fingerprint as evidence_target_fingerprint,
+)
+from autowork_core.utils.debug_tools.recorder.identity import (
+    assertion_candidate_key,
+    locator_candidate_id,
+)
+from autowork_core.utils.debug_tools.recorder.generation_locator_policy import (
+    target_uses_pos_locator,
+    top_level_root_requires_locator_fallback,
+    verified_pos_locator_candidate,
+)
+from autowork_core.utils.debug_tools.recorder.locator_reuse import (
+    analyze_request_locator_reuse,
 )
 from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION
 from autowork_core.utils.debug_tools.recorder.reconciliation_repository import (
@@ -23,7 +37,7 @@ from autowork_core.utils.debug_tools.recorder.reconciliation_repository import (
 )
 
 
-RECONCILER_VERSION = "4.0"
+RECONCILER_VERSION = "4.3"
 RISK_MODES = {"fast", "clarify", "forensic", "blocked"}
 
 _HARD_CONFLICT_CODES = {
@@ -31,6 +45,7 @@ _HARD_CONFLICT_CODES = {
     "external_process_action",
     "no_recorded_actions",
     "orphan_mouse_boundary",
+    "tree_not_comparable",
     "unsupported_drag",
     "unsupported_middle_click",
 }
@@ -59,6 +74,7 @@ def build_generation_brief(
         inputs["memory"],
         semantics=inputs.get("semantics"),
         input_recovery=ReconciliationRepository.input_recovery(request),
+        locator_reuse_context=repository.locator_reuse_context(),
         created_at=datetime.now().isoformat(timespec="seconds"),
     )
     if write:
@@ -83,15 +99,16 @@ def reconcile_generation(
     *,
     semantics=None,
     input_recovery=None,
+    locator_reuse_context=None,
     created_at,
 ):
-    semantics = semantics or {
+    semantics = dict(semantics or {
         "available": False,
         "actions": {},
         "window_causality": [],
         "step_continuity": [],
         "reuse_candidates": [],
-    }
+    })
     items = {
         str(item.get("evidence_id")): item
         for item in context.get("items") or []
@@ -104,12 +121,30 @@ def reconcile_generation(
         action_metadata,
     )
     reviews = _reconcile_reviews(request, evidence)
+    window_ownership = _window_ownership_candidates(
+        evidence["actions"],
+        semantics,
+        request_evidence=request.get("evidence") or [],
+    )
+    locator_reuse = _locator_reuse_analysis(
+        request,
+        evidence["actions"],
+        window_ownership,
+        locator_reuse_context,
+    )
+    if locator_reuse["matches"]:
+        semantics["locator_reuse_matches"] = locator_reuse["matches"]
+    if locator_reuse["issues"]:
+        semantics["locator_reuse_issues"] = locator_reuse["issues"]
     ambiguities = _build_ambiguities(
         request,
         evidence,
         reviews,
         semantic_actions=semantics.get("actions") or {},
         input_recovery=input_recovery,
+        locator_reuse_issues=locator_reuse["issues"],
+        reuse_candidates=semantics.get("reuse_candidates") or [],
+        window_ownership=window_ownership,
     )
     adjustment = _adjustment_plan(
         request,
@@ -125,11 +160,6 @@ def reconcile_generation(
     )
     agent_tasks = _build_agent_tasks(request, evidence, ambiguities)
     revision = _revision_seal(request, context, reviews, memory)
-    window_ownership = _window_ownership_candidates(
-        evidence["actions"],
-        semantics,
-        request_evidence=request.get("evidence") or [],
-    )
     annotation_snapshot = _request_annotation_snapshot(request)
     reconciliation = {
         "schema_version": SCHEMA_VERSION,
@@ -324,6 +354,11 @@ def _reconcile_evidence(
             item.get("evidence_id") or "",
         ),
     )
+    owned_root_aliases = _owned_action_root_aliases(
+        action_items,
+        items,
+        request.get("evidence") or [],
+    )
     for item in action_items:
         payload = item.get("payload") or {}
         action_id = str(payload.get("action_id") or "")
@@ -338,7 +373,10 @@ def _reconcile_evidence(
         target_id = f"target:{evidence_identity}"
         text_id = f"text-change:{evidence_identity}"
         media_id = f"media:{evidence_identity}"
-        target = (items.get(target_id) or {}).get("payload") or {}
+        target = _apply_owned_action_root_alias(
+            (items.get(target_id) or {}).get("payload") or {},
+            owned_root_aliases.get((step_id, action_id)),
+        )
         text_change = (items.get(text_id) or {}).get("payload")
         media = (items.get(media_id) or {}).get("payload") or {}
         for evidence_id in (target_id, text_id, media_id):
@@ -360,6 +398,8 @@ def _reconcile_evidence(
                 and canonical_command.get("sequence_status") == "incomplete"
         ):
             conflict_codes.append("keyboard_sequence_incomplete")
+        if _is_system_keyboard_noise(canonical_command):
+            conflict_codes.append("system_keyboard_noise_unobserved")
         same_observed_target = target.get("same_observed_target")
         if same_observed_target is None:
             same_observed_target = target.get("same_runtime_target")
@@ -549,6 +589,9 @@ def _build_ambiguities(
         *,
         semantic_actions=None,
     input_recovery=None,
+    locator_reuse_issues=None,
+        reuse_candidates=None,
+        window_ownership=None,
     ):
     semantic_actions = semantic_actions or {}
     actions = evidence.get("actions") or []
@@ -584,7 +627,7 @@ def _build_ambiguities(
                 in confirmed_input_steps
         ):
             continue
-        if code in _TARGET_CONFLICT_CODES:
+        if code in {"fallback_ocr", "fallback_pos"}:
             continue
         event_ids = _source_review_event_ids(review)
         matched_actions = _actions_matching_events(
@@ -648,10 +691,18 @@ def _build_ambiguities(
         actions,
         semantic_actions,
     ))
+    result.extend(_semantic_control_evidence_ambiguities(
+        actions,
+        semantic_actions,
+    ))
     result.extend(_declared_binding_ambiguities(actions))
     result.extend(_confirmed_input_recovery_ambiguities(
         actions,
         input_recovery,
+    ))
+    result.extend(_locator_reuse_ambiguities(
+        actions,
+        locator_reuse_issues,
     ))
     result.extend(_specification_conflict_ambiguities(request))
     result.extend(_step_context_conflict_ambiguities(request))
@@ -700,6 +751,11 @@ def _build_ambiguities(
             codes,
             declared_binding=declared_binding,
             action=action,
+            reuse_candidate_ids=_matching_step_reuse_candidate_ids(
+                request,
+                step_id,
+                reuse_candidates or (),
+            ),
         )
         if action_id in user_managed_action_ids and outcomes:
             continue
@@ -726,11 +782,7 @@ def _build_ambiguities(
                 }),
                 "source_review_ids": source_review_ids,
             },
-            code=(
-                "keyboard_sequence_incomplete"
-                if "keyboard_sequence_incomplete" in codes
-                else "action_implementation"
-            ),
+            code=_action_conflict_code(codes),
             step_id=step_id,
             action_ids=[action_id],
             event_ids=(
@@ -768,11 +820,208 @@ def _build_ambiguities(
             facts={},
             allowed_outcomes=[],
         ))
+    covered_action_ids = {
+        str(action_id)
+        for item in result
+        if any(
+            outcome.get("authority") == "user"
+            or (
+                outcome.get("outcome") == "generate_issue_placeholder"
+                and outcome.get("authority") == "ai"
+            )
+            for outcome in item.get("allowed_outcomes") or ()
+        )
+        for action_id in item.get("action_ids") or ()
+    }
+    covered_action_ids.update(
+        str(candidate.get("excluded_action_id") or "")
+        for candidate in input_recovery or ()
+        if isinstance(candidate, dict)
+        and candidate.get("candidate_id")
+        and candidate.get("confirmed_edit_id")
+        and candidate.get("excluded_action_id")
+    )
+    result.extend(_empty_root_without_pos_ambiguities(
+        actions,
+        window_ownership,
+        covered_action_ids=covered_action_ids,
+    ))
     unique = {
         item["ambiguity_id"]: item
         for item in result
     }
     return [unique[key] for key in sorted(unique)]
+
+
+def _locator_reuse_analysis(
+        request,
+        actions,
+        window_ownership,
+        context,
+    ):
+    context = dict(context or {})
+    session_dir = context.get("session_dir")
+    project_root = context.get("project_root")
+    if not session_dir or not project_root:
+        return {"matches": [], "issues": []}
+    try:
+        result = analyze_request_locator_reuse(
+            session_dir,
+            request,
+            actions,
+            window_ownership,
+            project_root=project_root,
+            user_modified_locator_files=context.get(
+                "user_modified_locator_files"
+            ) or (),
+        )
+    except (LookupError, OSError, TypeError, ValueError):
+        return {"matches": [], "issues": []}
+    return {
+        "matches": list(result.get("matches") or ()),
+        "issues": list(result.get("issues") or ()),
+    }
+
+
+def _locator_reuse_ambiguities(actions, issues):
+    actions_by_key = {
+        (
+            str(action.get("step_id") or ""),
+            str(action.get("action_id") or ""),
+        ): action
+        for action in actions or ()
+        if action.get("step_id") and action.get("action_id")
+    }
+    issues_by_step = {}
+    for issue in issues or ():
+        if not isinstance(issue, dict):
+            continue
+        step_id = str(issue.get("step_id") or "")
+        action_id = str(issue.get("action_id") or "")
+        if step_id and action_id:
+            issues_by_step.setdefault(step_id, []).append(dict(issue))
+    result = []
+    for step_id, step_issues in sorted(issues_by_step.items()):
+        action_ids = sorted({
+            str(issue.get("action_id") or "")
+            for issue in step_issues
+            if issue.get("action_id")
+        })
+        related_actions = [
+            actions_by_key.get((step_id, action_id)) or {}
+            for action_id in action_ids
+        ]
+        result.append(_ambiguity_record(
+            source={
+                "kind": "locator_reuse",
+                "issue_ids": [
+                    str(issue.get("issue_id") or "")
+                    for issue in step_issues
+                ],
+            },
+            code="locator_reuse_maintenance_required",
+            step_id=step_id,
+            action_ids=action_ids,
+            event_ids=[
+                event_id
+                for action in related_actions
+                for event_id in action.get("event_ids") or ()
+            ],
+            evidence_ids=[
+                evidence_id
+                for action in related_actions
+                for evidence_id in action.get("evidence_ids") or ()
+            ],
+            facts={
+                "issues": [
+                    {
+                        key: issue.get(key)
+                        for key in (
+                            "issue_id",
+                            "code",
+                            "recorded_locator_name",
+                            "existing_keys",
+                            "locator_file",
+                        )
+                    }
+                    for issue in step_issues
+                ],
+            },
+            allowed_outcomes=[{
+                "outcome": "generate_issue_placeholder",
+                "authority": "ai",
+                "effect": "issue_placeholder",
+            }],
+        ))
+    return result
+
+
+def _empty_root_without_pos_ambiguities(
+        actions,
+        window_ownership,
+        *,
+        covered_action_ids=(),
+    ):
+    empty_roots = _empty_locator_root_names(window_ownership)
+    if not empty_roots:
+        return []
+    covered_action_ids = {str(item) for item in covered_action_ids or ()}
+    result = []
+    for action in actions or ():
+        if (action.get("role") or "business") == "noise":
+            continue
+        target = action.get("target") or {}
+        root_name = str(target.get("root_name") or "")
+        if root_name not in empty_roots:
+            continue
+        if _has_valid_pos_candidate(target):
+            continue
+        step_id = str(action.get("step_id") or "")
+        action_id = str(action.get("action_id") or action.get("id") or "")
+        if not step_id or not action_id:
+            continue
+        if action_id in covered_action_ids:
+            continue
+        result.append(_ambiguity_record(
+            source={
+                "kind": "top_level_root_locator",
+                "root_name": root_name,
+            },
+            code="top_level_root_without_criteria",
+            step_id=step_id,
+            action_ids=[action_id],
+            event_ids=action.get("event_ids") or [],
+            evidence_ids=action.get("evidence_ids") or action.get("evidence") or [],
+            facts={
+                "root_name": root_name,
+                "locator_name": target.get("locator_name"),
+                "reason": "top-level root has no stable locator criteria and no POS fallback candidate",
+            },
+            allowed_outcomes=[{
+                "outcome": "generate_issue_placeholder",
+                "authority": "ai",
+                "effect": "issue_placeholder",
+            }],
+        ))
+    return result
+
+
+def _empty_locator_root_names(window_ownership):
+    return {
+        str(window.get("root_name") or "")
+        for window in ((window_ownership or {}).get("windows") or ())
+        if window.get("root_name")
+        and top_level_root_requires_locator_fallback(window)
+    }
+
+
+def _has_valid_pos_candidate(target):
+    if target_uses_pos_locator(target):
+        return True
+    for candidate in target.get("locator_candidates") or ():
+        if verified_pos_locator_candidate(candidate):
+            return True
+    return False
 
 
 def _confirmed_input_recovery_ambiguities(actions, candidates):
@@ -894,7 +1143,11 @@ def _semantic_assertion_ambiguities(actions, semantic_actions):
             "collection_assertion_unsupported",
             "region_text_assertion_unsupported",
         }:
-            outcomes = []
+            outcomes.append({
+                "outcome": "generate_issue_placeholder",
+                "authority": "ai",
+                "effect": "issue_placeholder",
+            })
         elif code == "assertion_value_unobserved" and executable_target:
             outcomes.append({
                 "outcome": "implement_declared_expectation",
@@ -952,6 +1205,59 @@ def _semantic_assertion_ambiguities(actions, semantic_actions):
     return result
 
 
+def _semantic_control_evidence_ambiguities(actions, semantic_actions):
+    result = []
+    for action in actions:
+        step_id = str(action.get("step_id") or "")
+        action_id = str(action.get("action_id") or "")
+        semantic = semantic_actions.get(
+            _action_scope_key(step_id, action_id)
+        ) or {}
+        candidates = [
+            item
+            for item in semantic.get("intent_candidates") or ()
+            if isinstance(item, dict)
+            and item.get("requires_value_evidence") is True
+            and item.get("recommended_operation") in {
+                "set_checked",
+                "set_tree_expanded",
+                "set_slider_value",
+            }
+        ]
+        if not candidates:
+            continue
+        candidate = candidates[0]
+        result.append(_ambiguity_record(
+            source={
+                "kind": "semantic_control_state",
+                "recommended_operation": candidate.get(
+                    "recommended_operation"
+                ),
+            },
+            code="control_final_state_unobserved",
+            step_id=step_id,
+            action_ids=[action_id],
+            event_ids=action.get("event_ids") or [],
+            evidence_ids=action.get("evidence_ids") or [],
+            facts={
+                "target": action.get("target") or {},
+                "recommended_operation": candidate.get(
+                    "recommended_operation"
+                ),
+            },
+            allowed_outcomes=[{
+                "outcome": "implement_recorded_action",
+                "authority": "ai",
+                "effect": "plan_coverage",
+            }, {
+                "outcome": "generate_issue_placeholder",
+                "authority": "ai",
+                "effect": "issue_placeholder",
+            }],
+        ))
+    return result
+
+
 def _declared_binding_ambiguities(actions):
     result = []
     for action in actions:
@@ -979,9 +1285,13 @@ def _declared_binding_ambiguities(actions):
                 "authority": "user_confirmed",
             },
             allowed_outcomes=[{
-                "outcome": "repair_declared_binding",
-                "authority": "evidence",
-                "effect": "evidence_required",
+                "outcome": "implement_recorded_action",
+                "authority": "ai",
+                "effect": "plan_coverage",
+            }, {
+                "outcome": "generate_issue_placeholder",
+                "authority": "ai",
+                "effect": "issue_placeholder",
             }],
         ))
     return result
@@ -1285,6 +1595,22 @@ def _ambiguity_record(
 def _review_ambiguity_outcomes(code, *, hard_blocker, evidence=None):
     if hard_blocker:
         return []
+    if code in {"weak_target_quality", "fallback_ocr", "fallback_pos"}:
+        return [{
+            "outcome": "resolve_locator_in_plan",
+            "authority": "ai",
+            "effect": "plan_coverage",
+        }]
+    if code == "tree_not_comparable":
+        return [{
+            "outcome": "reconstruct_from_structured_and_media_evidence",
+            "authority": "ai",
+            "effect": "plan_coverage",
+        }, {
+            "outcome": "generate_issue_placeholder",
+            "authority": "ai",
+            "effect": "issue_placeholder",
+        }]
     if code == "provisional_window":
         return [{
             "outcome": "belongs_to_business_flow",
@@ -1298,16 +1624,16 @@ def _review_ambiguity_outcomes(code, *, hard_blocker, evidence=None):
     if code == "window_closed_during_take":
         return [{
             "outcome": "expected_close",
-            "authority": "user",
-            "effect": "scenario_authority",
+            "authority": "ai",
+            "effect": "plan_coverage",
         }, {
             "outcome": "workflow_transition",
-            "authority": "user",
-            "effect": "scenario_authority",
+            "authority": "ai",
+            "effect": "plan_coverage",
         }, {
-            "outcome": "unexpected_close",
-            "authority": "user",
-            "effect": "evidence_required",
+            "outcome": "generate_issue_placeholder",
+            "authority": "ai",
+            "effect": "issue_placeholder",
         }]
     if code == "pause_state_changed":
         return [{
@@ -1325,13 +1651,13 @@ def _review_ambiguity_outcomes(code, *, hard_blocker, evidence=None):
         }]
     if code == "unsupported_scroll":
         return [{
-            "outcome": "belongs_to_step",
-            "authority": "user",
+            "outcome": "implement_recorded_action",
+            "authority": "ai",
             "effect": "plan_coverage",
         }, {
-            "outcome": "ignore_as_noise",
-            "authority": "user",
-            "effect": "ignored_action",
+            "outcome": "generate_issue_placeholder",
+            "authority": "ai",
+            "effect": "issue_placeholder",
         }]
     return []
 
@@ -1341,6 +1667,7 @@ def _conflict_ambiguity_outcomes(
     *,
     declared_binding=None,
     action=None,
+    reuse_candidate_ids=(),
 ):
     codes = set(codes or ())
     if codes & {
@@ -1355,17 +1682,52 @@ def _conflict_ambiguity_outcomes(
             "authority": "ai",
             "effect": "issue_placeholder",
         }]
+    if "system_keyboard_noise_unobserved" in codes:
+        return [{
+            "outcome": "repair_or_rerecord_keyboard_noise",
+            "authority": "evidence",
+            "effect": "evidence_required",
+        }]
+    reuse_candidate_ids = sorted({
+        str(candidate_id)
+        for candidate_id in reuse_candidate_ids or ()
+        if candidate_id
+    })
+    if codes == {"visual_state_unsettled"}:
+        return [{
+            "outcome": "implement_recorded_action",
+            "authority": "ai",
+            "effect": "plan_coverage",
+        }]
     outcomes = [{
-        "outcome": "reuse_existing_behavior",
-        "authority": "ai",
-        "effect": "behavior_coverage",
-    }, {
         "outcome": "generate_issue_placeholder",
         "authority": "ai",
         "effect": "issue_placeholder",
     }]
+    if reuse_candidate_ids:
+        reuse = {
+            "outcome": "reuse_existing_behavior",
+            "authority": "ai",
+            "effect": "behavior_coverage",
+        }
+        if len(reuse_candidate_ids) == 1:
+            reuse["candidate_id"] = reuse_candidate_ids[0]
+        else:
+            reuse["candidate_ids"] = reuse_candidate_ids
+        outcomes.insert(0, reuse)
     if "positional_locator_unstable" in codes:
-        return outcomes
+        reusable = [
+            outcome
+            for outcome in outcomes
+            if outcome["outcome"] == "reuse_existing_behavior"
+        ]
+        if reusable:
+            return reusable
+        return [
+            outcome
+            for outcome in outcomes
+            if outcome["outcome"] == "generate_issue_placeholder"
+        ]
     if "text_value_unobserved" in codes and declared_binding:
         outcomes.append({
             "outcome": "implement_with_declared_binding",
@@ -1397,6 +1759,55 @@ def _conflict_ambiguity_outcomes(
             "effect": "plan_coverage",
         })
     return outcomes
+
+
+def _is_system_keyboard_noise(command):
+    if str((command or {}).get("kind") or "").casefold() != "keyboard":
+        return False
+    if command.get("text"):
+        return False
+    sequence = tuple(
+        str(event.get("name") or "").casefold()
+        for event in command.get("key_events") or ()
+        if not event.get("is_modifier")
+    )
+    return sequence in {
+        ("numlock", "f15", "numlock"),
+    }
+
+
+def _action_conflict_code(codes):
+    codes = set(codes or ())
+    if "keyboard_sequence_incomplete" in codes:
+        return "keyboard_sequence_incomplete"
+    if "system_keyboard_noise_unobserved" in codes:
+        return "system_keyboard_noise_unobserved"
+    return "action_implementation"
+
+
+def _matching_step_reuse_candidate_ids(request, step_id, candidates):
+    target_step = next((
+        step
+        for step in ((request.get("target") or {}).get("steps") or ())
+        if str(step.get("id") or "") == str(step_id or "")
+    ), None)
+    if target_step is None:
+        return []
+    return [
+        str(candidate["candidate_id"])
+        for candidate in candidates or ()
+        if isinstance(candidate, dict)
+        and candidate.get("candidate_id")
+        and candidate.get("kind") == "step_definition"
+        and any(
+            step_pattern_contract_matches(contract, target_step)
+            for contract in (
+                candidate.get("step_pattern_contracts")
+                or candidate.get("step_parameter_contracts")
+                or ()
+            )
+        )
+    ]
 
 
 def _declared_input_binding(action_semantics, action=None):
@@ -2020,6 +2431,9 @@ def _compact_brief(reconciliation):
             "canonical_action": _compact_canonical_action(
                 action.get("canonical_action")
             ),
+            "text_change": _compact_text_change(
+                action.get("text_change")
+            ),
             "binding": action.get("value_binding"),
             "note": action.get("note"),
             "correction": action.get("correction"),
@@ -2111,6 +2525,15 @@ def _compact_brief(reconciliation):
                     ) or []
                 )[:8]
             ],
+            "locator_reuse_matches": [
+                _compact_locator_reuse_match(item)
+                for item in (
+                    (reconciliation.get("semantics") or {}).get(
+                        "locator_reuse_matches"
+                    ) or []
+                )
+                if isinstance(item, dict)
+            ],
             "environment_dependencies": [
                 dict(item)
                 for item in (
@@ -2124,6 +2547,24 @@ def _compact_brief(reconciliation):
                 (reconciliation.get("semantics") or {}).get("reuse_index")
                 or {}
             ),
+            "verified_naming_candidates": [
+                dict(item)
+                for item in (
+                    (reconciliation.get("semantics") or {}).get(
+                        "verified_naming_candidates"
+                    ) or ()
+                )[:24]
+                if isinstance(item, dict)
+            ],
+            "verified_ambiguity_choices": [
+                dict(item)
+                for item in (
+                    (reconciliation.get("semantics") or {}).get(
+                        "verified_ambiguity_choices"
+                    ) or ()
+                )[:24]
+                if isinstance(item, dict)
+            ],
         },
         "generation": reconciliation["generation"],
     }
@@ -2591,6 +3032,8 @@ def _window_ownership_candidates(
         }
         for identity in sorted(identities):
             value = dict(identity)
+            if "owner_chain" in value:
+                value["owner_chain"] = list(value["owner_chain"])
             if value not in window["window_identities"]:
                 window["window_identities"].append(value)
         if step_id:
@@ -2621,16 +3064,137 @@ def _window_ownership_candidates(
         "window_causality": list(
             (semantics or {}).get("window_causality") or []
         )[:12],
-        "ownership_candidates": _child_view_ownership_candidates(
+        "ownership_candidates": _child_window_view_candidates(
             actions,
             list((semantics or {}).get("window_causality") or []),
-            windows,
+            identities_by_event,
         ),
         "view_ownership": "ai_reasoning_required",
     }
 
 
-def _child_view_ownership_candidates(actions, causality, windows):
+def _owned_action_root_aliases(action_items, items, request_evidence):
+    identities_by_event = _window_identities_by_event(request_evidence)
+    records = []
+    roots_by_handle = {}
+    for index, item in enumerate(action_items or (), start=1):
+        payload = item.get("payload") or {}
+        action_id = str(payload.get("action_id") or "")
+        step_id = str(item.get("step_id") or "")
+        if not action_id or not step_id:
+            continue
+        evidence_identity = str(item.get("evidence_id") or "")[len("action:"):]
+        target = (items.get(f"target:{evidence_identity}") or {}).get(
+            "payload"
+        ) or {}
+        root_name = str(target.get("root_name") or "")
+        if not root_name:
+            continue
+        event_ids = [
+            str(event_id)
+            for event_id in (
+                list(payload.get("event_ids") or [])
+                + list(payload.get("media_event_ids") or [])
+            )
+            if event_id
+        ]
+        identities = [
+            dict(identity)
+            for event_id in event_ids
+            for identity in identities_by_event.get((step_id, event_id), ())
+        ]
+        order = _action_order(payload, index)
+        record = {
+            "step_id": step_id,
+            "action_id": action_id,
+            "order": order,
+            "root_name": root_name,
+            "identities": identities,
+        }
+        records.append(record)
+        for identity in identities:
+            handle = int(identity.get("handle") or 0)
+            if handle:
+                roots_by_handle.setdefault((step_id, handle), []).append(
+                    (order, root_name)
+                )
+    aliases = {}
+    for record in records:
+        parent_roots = set()
+        for identity in record["identities"]:
+            for owner_handle in identity.get("owner_chain") or ():
+                owner_handle = int(owner_handle or 0)
+                if not owner_handle:
+                    continue
+                for owner_order, owner_root in roots_by_handle.get(
+                        (record["step_id"], owner_handle),
+                        (),
+                ):
+                    if (
+                            owner_order < record["order"]
+                            and owner_root
+                            and owner_root != record["root_name"]
+                    ):
+                        parent_roots.add(owner_root)
+        if len(parent_roots) == 1:
+            aliases[(record["step_id"], record["action_id"])] = {
+                "root_name": next(iter(parent_roots)),
+                "evidence_root_name": record["root_name"],
+            }
+    return aliases
+
+
+def _apply_owned_action_root_alias(target, alias):
+    if not alias:
+        return target
+    target = json.loads(json.dumps(target or {}, ensure_ascii=False))
+    original_root = str(target.get("root_name") or "")
+    root_name = str(alias.get("root_name") or "")
+    if not original_root or not root_name or original_root == root_name:
+        return target
+    target["evidence_root_name"] = str(
+        alias.get("evidence_root_name") or original_root
+    )
+    target["root_name"] = root_name
+    target["locator"] = _retarget_locator_root(
+        target.get("locator") or {},
+        original_root,
+        root_name,
+    )
+    selected_candidate_id = str(target.get("locator_candidate_id") or "")
+    updated_candidates = []
+    for candidate in target.get("locator_candidates") or ():
+        if not isinstance(candidate, dict):
+            continue
+        updated = dict(candidate)
+        updated_locator = _retarget_locator_root(
+            updated.get("locator") or {},
+            original_root,
+            root_name,
+        )
+        updated["locator"] = updated_locator
+        updated_id = locator_candidate_id(
+            updated_locator,
+            updated.get("reason"),
+        )
+        if updated.get("candidate_id") == selected_candidate_id:
+            target["locator_candidate_id"] = updated_id
+        updated["candidate_id"] = updated_id
+        updated_candidates.append(updated)
+    if updated_candidates:
+        target["locator_candidates"] = updated_candidates
+    target["target_fingerprint"] = evidence_target_fingerprint(target)
+    return target
+
+
+def _retarget_locator_root(locator, original_root, root_name):
+    locator = dict(locator or {})
+    if str(locator.get("root") or "") == str(original_root or ""):
+        locator["root"] = root_name
+    return locator
+
+
+def _child_window_view_candidates(actions, causality, identities_by_event):
     indexed_actions = []
     actions_by_id = {}
     for index, action in enumerate(actions or (), start=1):
@@ -2643,91 +3207,157 @@ def _child_view_ownership_candidates(actions, causality, windows):
     result = []
     seen = set()
     for item in causality or ():
-        opener_id = str(item.get("opened_by_action_id") or "").strip()
-        if not opener_id:
+        closer_id = str(item.get("closed_by_action_id") or "").strip()
+        native_window = item.get("window") or {}
+        native_handle = int(native_window.get("handle") or 0)
+        owner_chain = {
+            int(handle)
+            for handle in native_window.get("owner_chain") or ()
+            if handle
+        }
+        if not native_handle or not owner_chain:
             continue
-        for opener in actions_by_id.get(opener_id, []):
+        for opener_id, opener in _child_window_candidate_openers(
+                item,
+                indexed_actions,
+                actions_by_id,
+                identities_by_event,
+                native_handle,
+                owner_chain,
+        ):
             parent_root = str(((opener or {}).get("target") or {}).get("root_name") or "")
             step_id = str((opener or {}).get("step_id") or "")
             if not parent_root or not step_id:
                 continue
-            for child_root in _causality_child_roots(
-                    item,
-                    indexed_actions,
-                    opener,
-                    windows,
-                ):
-                if not child_root or child_root == parent_root:
-                    continue
-                child_actions = [
-                    str(action.get("action_id") or action.get("id") or "")
-                    for action in indexed_actions
-                    if str(action.get("step_id") or "") == step_id
-                    and str((action.get("target") or {}).get("root_name") or "") == child_root
-                    and _action_order(action, 0) > _action_order(opener, 0)
-                ]
-                child_actions = [value for value in child_actions if value]
-                if not child_actions:
-                    continue
-                identity = {
-                    "kind": "child_view",
-                    "parent_root": parent_root,
-                    "child_root": child_root,
-                    "opener_action_id": opener_id,
-                    "child_action_ids": child_actions,
-                    "step_id": step_id,
-                }
-                key = json.dumps(identity, ensure_ascii=False, sort_keys=True)
-                if key in seen:
-                    continue
-                seen.add(key)
-                result.append({
-                    "candidate_id": "window-view-candidate-" + _stable_hash(identity)[:16],
-                    **identity,
-                    "evidence": {
-                        "opened_by_parent_action": True,
-                        "parent_action_root": parent_root,
-                        "child_action_roots": [child_root],
-                        "order": "opener_before_child",
-                    },
-                    "confidence": "evidence_supported",
-                })
+            opener_handles = _action_window_handles(
+                opener,
+                identities_by_event,
+            )
+            if not opener_handles or not (opener_handles & owner_chain):
+                continue
+            view_actions = [
+                str(action.get("action_id") or action.get("id") or "")
+                for action in indexed_actions
+                if str(action.get("step_id") or "") == step_id
+                and str((action.get("target") or {}).get("root_name") or "")
+                == parent_root
+                and _action_order(action, 0) > _action_order(opener, 0)
+                and (
+                    native_handle in _action_window_handles(
+                        action,
+                        identities_by_event,
+                    )
+                    or str(
+                        action.get("action_id") or action.get("id") or ""
+                    ) == closer_id
+                )
+            ]
+            view_actions = [value for value in view_actions if value]
+            if not view_actions:
+                continue
+            identity = {
+                "kind": "child_window_view",
+                "root_name": parent_root,
+                "opener_action_id": opener_id,
+                "action_ids": view_actions,
+                "step_id": step_id,
+                "native_window_handle": native_handle,
+            }
+            key = json.dumps(identity, ensure_ascii=False, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append({
+                "candidate_id": "window-view-candidate-" + _stable_hash(identity)[:16],
+                **identity,
+                "evidence": {
+                    "opened_by_parent_action": True,
+                    "automation_root": parent_root,
+                    "native_window_handle": native_handle,
+                    "native_owner_chain": sorted(owner_chain),
+                    "order": "opener_before_child_window_actions",
+                },
+                "confidence": "evidence_supported",
+            })
     return result
 
 
-def _causality_child_roots(causality, actions, opener, windows):
-    step_id = str((opener or {}).get("step_id") or "")
-    parent_root = str(((opener or {}).get("target") or {}).get("root_name") or "")
-    roots = []
-    for action in actions:
-        if str(action.get("step_id") or "") != step_id:
-            continue
-        if _action_order(action, 0) <= _action_order(opener, 0):
-            continue
-        root_name = str((action.get("target") or {}).get("root_name") or "")
-        if root_name and root_name != parent_root and root_name not in roots:
-            roots.append(root_name)
-    matched = [
-        root_name for root_name in roots
-        if _causality_window_matches_root(causality, windows.get(root_name) or {})
-    ]
-    if matched:
-        return matched
-    return roots if len(roots) == 1 else []
+def _child_window_candidate_openers(
+        item,
+        indexed_actions,
+        actions_by_id,
+        identities_by_event,
+        native_handle,
+        owner_chain,
+):
+    result = []
+    seen = set()
 
-def _causality_window_matches_root(causality, window):
-    observed = (causality or {}).get("window") or {}
-    criteria = (window or {}).get("root_criteria") or {}
-    observed_title = str(observed.get("title") or "")
-    observed_class = str(observed.get("class_name") or "")
-    expected_title = str(criteria.get("title") or criteria.get("name") or "")
-    expected_class = str(criteria.get("class_name") or "")
-    return bool(
-        (not observed_title or not expected_title or observed_title == expected_title)
-        and (not observed_class or not expected_class or observed_class == expected_class)
-        and (observed_title or observed_class)
-        and (expected_title or expected_class)
-    )
+    def add(opener):
+        opener_id = str(
+            (opener or {}).get("action_id") or (opener or {}).get("id") or ""
+        ).strip()
+        step_id = str((opener or {}).get("step_id") or "")
+        if not opener_id or not step_id:
+            return
+        key = (step_id, opener_id, _action_order(opener, 0))
+        if key in seen:
+            return
+        seen.add(key)
+        result.append((opener_id, opener))
+
+    explicit_opener_id = str(item.get("opened_by_action_id") or "").strip()
+    for opener in actions_by_id.get(explicit_opener_id, []) if explicit_opener_id else []:
+        if _action_window_handles(opener, identities_by_event) & owner_chain:
+            add(opener)
+
+    for child_action in indexed_actions:
+        child_id = str(
+            child_action.get("action_id") or child_action.get("id") or ""
+        )
+        child_handles = _action_window_handles(
+            child_action,
+            identities_by_event,
+        )
+        if native_handle not in child_handles:
+            continue
+        step_id = str(child_action.get("step_id") or "")
+        parent_root = str(
+            ((child_action or {}).get("target") or {}).get("root_name") or ""
+        )
+        child_order = _action_order(child_action, 0)
+        if not step_id or not parent_root or not child_order:
+            continue
+        parent_openers = [
+            action
+            for action in indexed_actions
+            if str(action.get("step_id") or "") == step_id
+            and str((action.get("target") or {}).get("root_name") or "")
+            == parent_root
+            and _action_order(action, 0) < child_order
+            and (_action_window_handles(action, identities_by_event) & owner_chain)
+        ]
+        if parent_openers:
+            add(max(parent_openers, key=lambda action: _action_order(action, 0)))
+        elif child_id == explicit_opener_id:
+            continue
+    return result
+
+
+def _action_window_handles(action, identities_by_event):
+    step_id = str((action or {}).get("step_id") or "")
+    return {
+        int(dict(identity).get("handle"))
+        for event_id in (
+            list((action or {}).get("event_ids") or ())
+            + list((action or {}).get("media_event_ids") or ())
+        )
+        for identity in identities_by_event.get(
+            (step_id, str(event_id)),
+            (),
+        )
+        if dict(identity).get("handle")
+    }
 
 
 def _action_order(action, fallback):
@@ -2745,12 +3375,13 @@ def _window_identities_by_event(request_evidence):
         if not step_id:
             continue
         for item in evidence.get("window_evidence") or ():
-            if item.get("comparable") is False:
-                continue
             window = item.get("window") or {}
             identity = tuple(sorted({
+                "handle": window.get("handle"),
                 "title": str(window.get("title") or ""),
                 "class_name": str(window.get("class_name") or ""),
+                "owner_handle": window.get("owner_handle"),
+                "owner_chain": tuple(window.get("owner_chain") or ()),
             }.items()))
             if not any(value for _key, value in identity):
                 continue
@@ -2767,6 +3398,7 @@ def _compact_brief_target(target):
         key: target.get(key)
         for key in (
             "root_name",
+            "evidence_root_name",
             "control_type",
             "name",
             "auto_id",
@@ -2812,6 +3444,7 @@ def _compact_target(target):
         "name": element.get("name"),
         "auto_id": element.get("auto_id"),
         "root_name": target.get("root_name"),
+        "evidence_root_name": target.get("evidence_root_name"),
         "locator_name": target.get("locator_name"),
         "locator_strategy": target.get("locator_strategy"),
         "locator_stability": _without_empty({
@@ -2826,6 +3459,8 @@ def _compact_target(target):
         and re.search(r"\[\s*-?\d+\s*\]\s*$", str(locator.get("value") or ""))
     ):
         result["positional_fallback"] = True
+    if str(locator.get("by") or "").casefold() == "pos":
+        result["locator"] = dict(locator)
     return result
 
 
@@ -2922,6 +3557,7 @@ def _compact_ambiguity(value):
     if code == "assertion_implementation":
         candidates = [
             _without_empty({
+                "candidate_key": assertion_candidate_key(candidate),
                 "information_class": (
                     "evidence_bound_implementation_constraint"
                 ),
@@ -3110,6 +3746,28 @@ def _compact_reuse_candidate(value):
             "semantic_contract",
             "score",
             "reasons",
+        )
+    })
+
+
+def _compact_locator_reuse_match(value):
+    value = dict(value or {})
+    return _without_empty({
+        key: value.get(key)
+        for key in (
+            "match_id",
+            "status",
+            "step_id",
+            "action_id",
+            "root_name",
+            "evidence_name",
+            "owner_candidate_id",
+            "locator_file",
+            "locator_key",
+            "locator_sha256",
+            "locator_fingerprint",
+            "target_fingerprint",
+            "snapshot_proof",
         )
     })
 

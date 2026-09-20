@@ -121,7 +121,7 @@ class TimelineEditorWindow:
         self.pending_supplement_before_action_id = None
         self.timeline_revision = None
         self.review_action_map = {}
-        self.keyboard_event_rows = {}
+        self.keyboard_key_rows = {}
         self.busy = False
         self.closed = False
         self.mutation_controls = []
@@ -464,31 +464,35 @@ class TimelineEditorWindow:
             command=self.ignore_selected_observation,
         ).pack(side="left", padx=6)
 
-    def _toggle_keyboard_event(
+    def _toggle_keyboard_key(
             self,
-            keyboard_event,
+            keyboard_key,
             *,
             action_id=None,
-            event_row_id=None,
+            key_row_id=None,
         ):
         action_id = action_id or (self.current_action or {}).get("id")
-        event_id = str(keyboard_event.get("event_id") or "")
-        if not action_id or not event_id:
-            self.status_var.set("当前键盘操作无可校正的原始事件。")
+        event_ids = [
+            str(event_id)
+            for event_id in keyboard_key.get("event_ids") or ()
+            if event_id
+        ]
+        if not action_id or not event_ids:
+            self.status_var.set("当前按键无可校正的原始事件。")
             return
-        include = not bool(keyboard_event.get("included"))
+        include = not bool(keyboard_key.get("included"))
         self._apply(
-            lambda store, _ids: store.set_keyboard_event_included(
+            lambda store, _ids: store.set_keyboard_events_included(
                 action_id,
-                event_id,
+                event_ids,
                 include,
             ),
             [],
-            select_ids=[event_row_id or action_id],
+            select_ids=[key_row_id or action_id],
             completion_message=(
-                "已恢复键盘事件。"
+                "已恢复按键。"
                 if include
-                else "已忽略键盘事件；原始录制仍然保留。"
+                else "已忽略按键；原始录制仍然保留。"
             ),
         )
 
@@ -841,7 +845,7 @@ class TimelineEditorWindow:
             for action in state.get("actions", [])
             if action.get("id")
         }
-        self.keyboard_event_rows = {}
+        self.keyboard_key_rows = {}
         current_selection = set(select_ids or tree_view["selection"])
         self.tree.delete(*self.tree.get_children())
         for action in state.get("actions", []):
@@ -864,22 +868,22 @@ class TimelineEditorWindow:
                 ),
             )
             if action.get("type") == "keyboard":
-                for keyboard_event in self.store.keyboard_events(action_id):
-                    event_row_id = (
-                        f"{action_id}:event:{keyboard_event['event_id']}"
+                for keyboard_key in self.store.keyboard_keystrokes(action_id):
+                    key_row_id = (
+                        f"{action_id}:key:{keyboard_key['event_ids'][0]}"
                     )
-                    self.keyboard_event_rows[event_row_id] = {
+                    self.keyboard_key_rows[key_row_id] = {
                         "action_id": action_id,
-                        "event": keyboard_event,
+                        "key": keyboard_key,
                     }
                     self.tree.insert(
                         action_id,
                         "end",
-                        iid=event_row_id,
+                        iid=key_row_id,
                         values=(
-                            "✓" if keyboard_event.get("included") else "×",
+                            "✓" if keyboard_key.get("included") else "×",
                             "",
-                            _keyboard_event_label(keyboard_event),
+                            _keyboard_stroke_label(keyboard_key),
                         ),
                     )
         existing = [action_id for action_id in current_selection if self.tree.exists(action_id)]
@@ -945,12 +949,12 @@ class TimelineEditorWindow:
         if len(action_ids) != 1:
             self.status_var.set("忽略或恢复时请只选择一个动作。")
             return
-        keyboard_event = self.keyboard_event_rows.get(action_ids[0])
-        if keyboard_event is not None:
-            self._toggle_keyboard_event(
-                keyboard_event["event"],
-                action_id=keyboard_event["action_id"],
-                event_row_id=action_ids[0],
+        keyboard_key = self.keyboard_key_rows.get(action_ids[0])
+        if keyboard_key is not None:
+            self._toggle_keyboard_key(
+                keyboard_key["key"],
+                action_id=keyboard_key["action_id"],
+                key_row_id=action_ids[0],
             )
             return
         action = self.review_action_map.get(action_ids[0]) or {}
@@ -999,7 +1003,7 @@ class TimelineEditorWindow:
         if self.busy:
             self.status_var.set("录制修改正在保存，请等待当前操作完成。")
             return "break"
-        keyboard_event = self.keyboard_event_rows.get(action_id)
+        keyboard_event = self.keyboard_key_rows.get(action_id)
         action = self.review_action_map.get(
             keyboard_event["action_id"]
             if keyboard_event is not None else action_id
@@ -1438,7 +1442,7 @@ class TimelineEditorWindow:
         selected = list(self.tree.selection())
         if not selected:
             return
-        keyboard_event = self.keyboard_event_rows.get(selected[0])
+        keyboard_event = self.keyboard_key_rows.get(selected[0])
         action = self.review_action_map.get(
             keyboard_event["action_id"]
             if keyboard_event is not None else selected[0]
@@ -1448,9 +1452,9 @@ class TimelineEditorWindow:
         if keyboard_event is not None:
             self.simple_ignore_button.configure(
                 text=(
-                    "恢复键盘事件"
-                    if not keyboard_event["event"].get("included")
-                    else "忽略键盘事件"
+                    "恢复按键"
+                    if not keyboard_event["key"].get("included")
+                    else "忽略按键"
                 ),
                 state="normal",
             )
@@ -1802,11 +1806,11 @@ def _action_summary_label(action):
     return text
 
 
-def _keyboard_event_label(keyboard_event):
-    key = (keyboard_event or {}).get("key") or {}
+def _keyboard_stroke_label(keyboard_key):
+    key = (keyboard_key or {}).get("key") or {}
     name = str(key.get("name") or "")
-    event_type = str(keyboard_event.get("event_type") or "keyboard")
-    return f"{event_type} · {_keyboard_key_label(name)}"
+    label = _keyboard_key_label(name)
+    return label if keyboard_key.get("complete") else f"{label}（记录不完整）"
 
 
 def _keyboard_key_label(name):

@@ -151,9 +151,15 @@ def acquire_generation_file_lease(
     return lease
 
 
-def find_committed_generation_file_lease_report(project_root, request_id):
+def find_committed_generation_file_lease_report(
+        project_root,
+        request_id,
+        *,
+        generation_job_lease=None,
+    ):
     project_root = _canonical_project_root(project_root)
     request_id = str(request_id)
+    expected_job_lease = dict(generation_job_lease or {})
     candidates = []
     with _ProjectMutex(project_root):
         _lock_dir, receipt_dir = _ensure_lock_directories(project_root)
@@ -176,6 +182,12 @@ def find_committed_generation_file_lease_report(project_root, request_id):
                     "已提交的生成文件 lease 缺少有效 running 报告: "
                     f"{receipt.get('transaction_id')}"
                 )
+            if (
+                    expected_job_lease
+                    and (report.get("generation_job_lease") or {})
+                    != expected_job_lease
+            ):
+                continue
             candidates.append((report_path.resolve(), report))
     if len(candidates) > 1:
         raise GenerationFileConflict(
@@ -382,13 +394,14 @@ def generation_file_lease_publish_guard(project_root, lease):
         except Exception:
             raise
         else:
+            cleanup_complete = True
             for lock_path in lock_paths:
-                payload = _read_json(lock_path)
-                if payload.get("lease_token") == lease_token:
-                    lock_path.unlink(missing_ok=True)
-            current = _read_json(receipt_path)
-            if current.get("lease_token") == lease_token:
-                receipt_path.unlink(missing_ok=True)
+                cleanup_complete = (
+                    _try_unlink_matching_lease_file(lock_path, lease_token)
+                    and cleanup_complete
+                )
+            if cleanup_complete:
+                _try_unlink_matching_lease_file(receipt_path, lease_token)
 
 
 def generation_path_has_reparse_point(project_root, relative):
@@ -466,6 +479,20 @@ def _release_transaction_receipt(
                 and (not token or receipt.get("lease_token") == token)
         ):
             receipt_path.unlink(missing_ok=True)
+
+
+def _try_unlink_matching_lease_file(path, lease_token):
+    path = Path(path)
+    payload = _read_json(path)
+    if not payload:
+        return not path.exists()
+    if payload.get("lease_token") != lease_token:
+        return False
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        return False
+    return True
 
 
 def _lease_is_active(payload, receipt_dir):

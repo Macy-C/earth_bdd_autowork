@@ -27,6 +27,7 @@ from autowork_core.utils.debug_tools.recorder.generation_plan import (
 )
 from autowork_core.utils.debug_tools.recorder.generation_design import (
     GENERATION_DESIGN_VERSION,
+    GenerationDesignValidationError,
     compile_generation_design,
 )
 from autowork_core.utils.debug_tools.recorder.generation_contract import (
@@ -77,12 +78,23 @@ def inspect_workflow(
         *,
         write=True,
         preserve_transaction=True,
+    ignore_current_job=False,
         return_brief=False,
     ):
     request_path = Path(request_path).resolve()
     request = _read_json(request_path)
     session_dir = session_dir_for_request_path(request_path, request)
     existing = load_workflow_state(session_dir, request.get("request_id"))
+    if ignore_current_job and existing.get("current_job"):
+        existing = dict(existing)
+        existing.update({
+            "status": "draft",
+            "next_action": None,
+            "current_job": None,
+            "job_execution": None,
+            "active_transaction": None,
+            "plan": {},
+        })
     terminal_job_workflow = bool(
         not existing.get("current_job")
         and existing.get("last_job_result")
@@ -288,6 +300,41 @@ def inspect_workflow(
     return (state, brief) if return_brief else state
 
 
+def fresh_workflow_state_for_generation_admission(request_path):
+    request_path = Path(request_path).resolve()
+    request = _read_json(request_path)
+    session_dir = session_dir_for_request_path(request_path, request)
+    state = inspect_workflow(
+        request_path,
+        write=False,
+        ignore_current_job=True,
+    )
+    if state.get("status") in {"blocked", "stale"}:
+        return state
+    brief = build_generation_brief(session_dir, request, write=True)
+    decision = _decision_context(
+        session_dir,
+        request,
+        {},
+        brief,
+        write=True,
+    )
+    status = _status_without_plan(brief, decision)
+    state.update({
+        "status": status,
+        "next_action": _next_action(status, decision),
+        "brief": _brief_pointer(session_dir, brief),
+        "plan": {},
+        "decision": decision,
+        "ambiguity": _ambiguity_projection(brief, decision, None),
+        "current_job": None,
+        "job_execution": None,
+        "active_transaction": None,
+        "errors": [],
+    })
+    return state
+
+
 def submit_decision_answers(request_path, answers):
     request_path = Path(request_path).resolve()
     request = _read_json(request_path)
@@ -424,11 +471,13 @@ def _prepare_generation_design(
         raise ValueError(f"GenerationPlanV{PLAN_VERSION} 只接受 RequestV3")
     if confirmation_source not in {
         "ai_generated",
+        "system_generated",
         "user_adjustment",
     }:
         raise ValueError(f"无效 Plan 确认来源: {confirmation_source}")
     if plan_origin is None:
         plan_origin = {
+            "system_generated": "system_baseline",
             "user_adjustment": "human_authored",
         }.get(confirmation_source)
     if confirmation_source == "ai_generated" and plan_origin is None:
@@ -513,28 +562,35 @@ def _prepare_generation_design(
         request,
         state,
     )
-    plan = compile_generation_design(design, brief)
-    plan = compile_generation_intent(plan, brief)
-    if compiled_patch:
-        plan = apply_decision_constraints(plan, compiled_patch)
+    try:
+        plan = compile_generation_design(
+            design,
+            brief,
+            require_public_locator_names=True,
+        )
         plan = compile_generation_intent(plan, brief)
-    plan = bind_generation_annotation_trace(plan, brief)
-    normalized = normalize_generation_plan(request, plan)
-    errors = validate_generation_plan(
-        normalized,
-        brief,
-        require_window_ownership=True,
-        require_scenario_model=True,
-        require_action_roles=True,
-        user_confirmed_references={
-            str(item.get("question_id"))
-            for item in compiled_patch.get("decision_trace") or ()
-            if item.get("question_id")
-        },
-    )
-    errors.extend(validate_decision_conformance(normalized, compiled_patch))
-    if errors:
-        raise ValueError(f"GenerationPlanV{PLAN_VERSION} 无效: {errors}")
+        if compiled_patch:
+            plan = apply_decision_constraints(plan, compiled_patch)
+            plan = compile_generation_intent(plan, brief)
+        plan = bind_generation_annotation_trace(plan, brief)
+        normalized = normalize_generation_plan(request, plan)
+        errors = validate_generation_plan(
+            normalized,
+            brief,
+            require_window_ownership=True,
+            require_scenario_model=True,
+            require_action_roles=True,
+            user_confirmed_references={
+                str(item.get("question_id"))
+                for item in compiled_patch.get("decision_trace") or ()
+                if item.get("question_id")
+            },
+        )
+        errors.extend(validate_decision_conformance(normalized, compiled_patch))
+        if errors:
+            raise ValueError(f"GenerationPlanV{PLAN_VERSION} 无效: {errors}")
+    except ValueError as error:
+        raise GenerationDesignValidationError(str(error)) from error
     return {
         "request_path": request_path,
         "request": request,

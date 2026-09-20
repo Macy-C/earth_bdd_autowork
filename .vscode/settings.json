@@ -17,6 +17,7 @@
     "python.analysis.extraPaths": [
         "${workspaceFolder}"
     ],
+    "chat.useCustomAgentHooks": true,
     "python.terminal.executeInFileDir": false,
     "terminal.integrated.cwd": "${workspaceFolder}",
     "terminal.integrated.env.windows": {

@@ -18,6 +18,10 @@ _MODIFIER_NAMES = {
     "rshift",
 }
 _WINDOWS_MODIFIERS = {"win", "lwin", "rwin"}
+_NUMPAD_DIGITS = {
+    f"numpad{digit}": digit
+    for digit in "0123456789"
+}
 
 
 def build_canonical_action(action, action_events, text_change=None):
@@ -168,9 +172,10 @@ def _literal_text(action_events):
         normalized = name.casefold()
         if normalized in _MODIFIER_NAMES | _WINDOWS_MODIFIERS:
             continue
-        if _event_modifiers(event) or len(name) != 1 or not name.isprintable():
+        literal = _NUMPAD_DIGITS.get(normalized, name)
+        if _event_modifiers(event) or len(literal) != 1 or not literal.isprintable():
             return None
-        characters.append(name)
+        characters.append(literal)
     return "".join(characters) if characters else None
 
 

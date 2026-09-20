@@ -27,7 +27,7 @@ from autowork_core.utils.debug_tools.portable_knowledge import (
     validate_portable_knowledge_schema,
 )
 
-DOCUMENTATION_CHECK_VERSION = "1.1"
+DOCUMENTATION_CHECK_VERSION = "1.2"
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 FENCED_CODE_BLOCK = re.compile(
     r"```(?P<language>python|ya?ml)[^\n]*\n(?P<body>.*?)\n```",
@@ -42,8 +42,10 @@ MARKDOWN_PATTERNS = (
     "ai/prompts/*.md",
     "ai/instructions/*.md",
     ".github/*.md",
+    ".github/agents/*.md",
     ".github/prompts/*.md",
     ".github/instructions/*.md",
+    ".github/skills/*/SKILL.md",
 )
 NAVIGATION_GROUPS = (
     ("docs/1.快速开始.md", "docs"),
@@ -287,6 +289,44 @@ def inspect_documentation(project_root):
         path = (root / str(relative)).resolve()
         if not _contained(path, root) or not path.is_file():
             errors.append(f"AI discovery adapter 无效: {relative}")
+    host_control = manifest.get("recorder_host_control")
+    if not isinstance(host_control, dict):
+        errors.append("recorder_host_control 必须是 object")
+        host_control = {}
+    host_control_expected = {
+        "version": "1.9",
+        "skill": ".github/skills/recorder-generate/SKILL.md",
+        "agent": ".github/agents/recorder-generation.agent.md",
+        "hook_scope": "agent",
+        "windows_hook_wrapper": (
+            ".github/hooks/scripts/recorder-generation.ps1"
+        ),
+        "trigger": "select Recorder Generation Agent and submit <job-path>",
+        "scope": "bound_generation_job",
+        "workspace_write_owner": "current_chat_native_edit",
+        "workflow_state_authoritative": True,
+        "baseline_role": "system_owned_when_proven_else_ai_seed",
+        "business_questions": "single_combined_batch_after_claim",
+        "task_bundle_role": "large_job_read_only_pages",
+        "mcp_required": False,
+    }
+    if set(host_control) != set(host_control_expected):
+        errors.append("recorder_host_control 字段无效")
+    for key, expected_value in host_control_expected.items():
+        if host_control.get(key) != expected_value:
+            errors.append(f"recorder_host_control.{key} 无效")
+    for key in (
+        "skill",
+        "agent",
+        "windows_hook_wrapper",
+    ):
+        relative = host_control.get(key)
+        if not relative:
+            continue
+        manifest_references += 1
+        path = (root / str(relative)).resolve()
+        if not _contained(path, root) or not path.is_file():
+            errors.append(f"recorder_host_control.{key} 引用无效")
     collaboration = manifest.get("collaboration_learning") or {}
     collaboration_fields = {
         "review_schema",

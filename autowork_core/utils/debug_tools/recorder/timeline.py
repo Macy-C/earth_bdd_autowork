@@ -21,7 +21,14 @@ from autowork_core.utils.debug_tools.recorder.evidence_graph import (
     EVIDENCE_GRAPH_VERSION,
     build_evidence_graph,
 )
+from autowork_core.utils.debug_tools.recorder.evidence_compiler import (
+    publish_pending_compilation,
+    publish_compilation_from_projection,
+)
 from autowork_core.utils.debug_tools.recorder.identity import stable_digest
+from autowork_core.utils.debug_tools.recorder.event_target import (
+    EVENT_TARGET_BINDING_VERSION,
+)
 from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION
 from autowork_core.utils.debug_tools.recorder.projection_store import (
     ProjectionStore,
@@ -45,7 +52,7 @@ from autowork_core.utils.debug_tools.recorder.writer import (
 
 
 TIMELINE_PROTOCOL_VERSION = "1.1"
-LOCATOR_PROJECTION_VERSION = "2.0"
+LOCATOR_PROJECTION_VERSION = "2.3"
 USER_EDIT_OPERATIONS = {
     "exclude",
     "include",
@@ -102,7 +109,7 @@ class TimelineStore:
             "timeline_state",
         ) or (self.projections.root / "__missing__" / "timeline-state.json")
 
-    def initialize(self, actions):
+    def initialize(self, actions, *, materialize=True):
         auto = {
             "schema_version": SCHEMA_VERSION,
             "timeline_protocol_version": TIMELINE_PROTOCOL_VERSION,
@@ -111,6 +118,18 @@ class TimelineStore:
         }
         write_json_atomic(self.auto_path, auto)
         RecordingSessionWriter._write_jsonl_path(self.edits_path, [])
+        if not materialize:
+            publish_pending_compilation(self.take_dir)
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "timeline_protocol_version": TIMELINE_PROTOCOL_VERSION,
+                "source": "pending_compilation",
+                "timeline_revision": _timeline_revision([]),
+                "actions": [
+                    {**copy.deepcopy(action), "included": True}
+                    for action in auto["actions"]
+                ],
+            }
         return self.materialize()
 
     def apply_edit(self, operation, action_ids, payload=None, reason=""):
@@ -173,6 +192,39 @@ class TimelineStore:
             "key": copy.deepcopy(event.get("key") or {}),
             "included": str(event.get("id") or "") not in excluded,
         } for event in source_events]
+
+    def keyboard_keystrokes(self, action_id):
+        events = self.keyboard_events(action_id)
+        strokes = []
+        pending = {}
+        for event in events:
+            name = str((event.get("key") or {}).get("name") or "")
+            if event.get("event_type") == "key_down":
+                stroke = {
+                    "event_ids": [event["event_id"]],
+                    "key": copy.deepcopy(event.get("key") or {}),
+                    "included": bool(event.get("included")),
+                    "complete": False,
+                }
+                strokes.append(stroke)
+                pending.setdefault(name, []).append(stroke)
+                continue
+            matches = pending.get(name) or []
+            if matches:
+                stroke = matches.pop(0)
+                stroke["event_ids"].append(event["event_id"])
+                stroke["included"] = (
+                    stroke["included"] and bool(event.get("included"))
+                )
+                stroke["complete"] = True
+                continue
+            strokes.append({
+                "event_ids": [event["event_id"]],
+                "key": copy.deepcopy(event.get("key") or {}),
+                "included": bool(event.get("included")),
+                "complete": False,
+            })
+        return strokes
 
     def set_keyboard_event_included(
             self,
@@ -311,10 +363,14 @@ class TimelineStore:
             *,
             expected_revision,
         ):
+        from autowork_core.utils.debug_tools.recorder.target_repair import (
+            TARGET_REPAIR_VERSION,
+        )
+
         self.require_revision(expected_revision)
         candidate = copy.deepcopy(dict(candidate or {}))
         if any((
-            candidate.get("target_repair_version") != "1.0",
+            candidate.get("target_repair_version") != TARGET_REPAIR_VERSION,
             candidate.get("status") != "forensic_verified",
             not candidate.get("candidate_id"),
             not candidate.get("action_id"),
@@ -345,6 +401,17 @@ class TimelineStore:
             event_element == action_element == candidate_element
         ):
             raise ValueError("target repair payload不一致: element")
+        event_window = (
+            (candidate.get("event_target") or {}).get("window") or {}
+        )
+        evidence = candidate.get("evidence") or {}
+        if any((
+            int(event_window.get("handle") or 0)
+            != int(evidence.get("window_handle") or 0),
+            int(event_window.get("process_id") or 0)
+            != int(evidence.get("process_id") or 0),
+        )):
+            raise ValueError("target repair payload不一致: window")
         locator = candidate.get("locator") or {}
         candidates = (
             (candidate.get("event_target") or {}).get(
@@ -671,7 +738,7 @@ class TimelineStore:
                 )
             return artifacts
 
-        self.projections.publish(
+        snapshot = self.projections.publish(
             source_revision,
             build_projection,
             required=(
@@ -685,6 +752,10 @@ class TimelineStore:
                 "semantic_pack",
                 "pic_template_audit",
             ),
+        )
+        publish_compilation_from_projection(
+            self.take_dir,
+            snapshot,
         )
         return state
 
@@ -736,7 +807,7 @@ class TimelineStore:
             except ValueError:
                 logical_path = path.name
             digest.update(logical_path.encode("utf-8"))
-            if path.exists():
+            if path.is_file():
                 digest.update(self._projection_source_payload(path))
         for logical_path, size, modified in media_stats:
             digest.update(f"{logical_path}|{size}|{modified}".encode("utf-8"))
@@ -990,11 +1061,12 @@ class TimelineStore:
         events_path = self.take_dir / "events.jsonl"
         if events is not None or events_path.exists():
             try:
-                events = list(events) if events is not None else [
+                recorded_events = [
                     json.loads(line)
                     for line in events_path.read_text(encoding="utf-8").splitlines()
                     if line.strip()
-                ]
+                ] if events_path.exists() else []
+                events = list(events) if events is not None else recorded_events
                 if events:
                     snapshots = [
                         _load_json_file(path)
@@ -1003,6 +1075,7 @@ class TimelineStore:
                     return build_locator_bundle(
                         events,
                         tree_snapshots=snapshots,
+                        evidence_events=recorded_events,
                     )
             except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError):
                 pass
@@ -1105,7 +1178,7 @@ class TimelineStore:
 
 def _load_json_file(path):
     path = Path(path)
-    if not path.exists():
+    if not path.is_file():
         return {}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -1353,7 +1426,7 @@ def _apply_target_repair_to_event(event, repair):
     details = event.setdefault("details", {})
     details["observation_phase"] = "forensic_repaired"
     details["target_binding"] = {
-        "target_binding_version": repair["target_repair_version"],
+        "target_binding_version": EVENT_TARGET_BINDING_VERSION,
         "status": "forensic_verified",
         "phase": "forensic_snapshot",
         "candidate_id": repair["candidate_id"],

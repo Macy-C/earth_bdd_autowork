@@ -15,7 +15,7 @@ from autowork_core.utils.debug_tools.recorder.observation_repository import (
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-SEMANTIC_PACK_VERSION = "6.1"
+SEMANTIC_PACK_VERSION = "6.4"
 SUPPORTED_SEMANTIC_PACK_VERSIONS = {SEMANTIC_PACK_VERSION}
 ASSERTION_OPERATIONS = (
     "assert_collection_equal",
@@ -1700,7 +1700,7 @@ def _intent_and_role_candidates(action, effect, step, index, count):
     normalized_step = f" {step_text.casefold()} "
     semantic_control = _semantic_control_candidate(
         action_type,
-        control_type,
+        target_element,
         effect,
         normalized_step,
     )
@@ -1769,12 +1769,17 @@ def _intent_and_role_candidates(action, effect, step, index, count):
 
 def _semantic_control_candidate(
         action_type,
-        control_type,
+    target_element,
         effect,
         normalized_step,
     ):
     if action_type not in {"click", "drag"}:
         return None
+    target_element = target_element or {}
+    control_type = str(
+        target_element.get("control_type") or ""
+    ).casefold()
+    class_name = str(target_element.get("class_name") or "").casefold()
     changes = {
         str(item.get("property")): item
         for item in effect.get("changes") or ()
@@ -1804,7 +1809,10 @@ def _semantic_control_candidate(
             "收起",
         )
     )
-    if control_type == "checkbox" and action_type == "click":
+    if (
+        action_type == "click"
+        and control_type == "checkbox"
+    ):
         state = (
             (changes.get("toggle_state") or {}).get("after")
             if "toggle_state" in changes
@@ -1814,7 +1822,7 @@ def _semantic_control_candidate(
             "intent": "set_checked_state",
             "recommended_operation": "set_checked",
             "confidence": 0.96 if state in {0, 1} else 0.8,
-            "reason": "CheckBox target requires final-state semantics",
+            "reason": "CheckBox target supports final-state semantics",
             "requires_value_evidence": state not in {0, 1},
         }
         if state in {0, 1}:
@@ -2004,7 +2012,9 @@ def _valid_rectangle(value):
 
 def _window_causality(actions, metadata):
     result = []
-    for lifecycle in (metadata or {}).get("window_lifecycle") or []:
+    lifecycles = (metadata or {}).get("window_lifecycle") or []
+    event_window_handles = _window_handles_by_event(lifecycles)
+    for lifecycle in lifecycles:
         first_seen = lifecycle.get("first_seen_ms")
         last_seen = lifecycle.get("last_seen_ms")
         opened_by = (
@@ -2012,6 +2022,18 @@ def _window_causality(actions, metadata):
             if lifecycle.get("opened_during_take")
             else None
         )
+        if _action_is_bound_to_window(
+                opened_by,
+                lifecycle,
+                event_window_handles,
+        ):
+            opened_by = _owner_action_before_child_action(
+                actions,
+                lifecycle,
+                event_window_handles,
+                opened_by,
+                first_seen,
+            )
         closed_by = (
             _nearest_action(actions, last_seen)
             if lifecycle.get("closed_during_take")
@@ -2032,17 +2054,120 @@ def _window_causality(actions, metadata):
     return result
 
 
+def _window_handles_by_event(lifecycles):
+    result = {}
+    for lifecycle in lifecycles or ():
+        handle = int((lifecycle or {}).get("handle") or 0)
+        if not handle:
+            continue
+        for event_id in (lifecycle or {}).get("event_ids") or ():
+            if event_id:
+                result.setdefault(str(event_id), set()).add(handle)
+    return result
+
+
+def _action_event_ids(action):
+    return [
+        str(event_id)
+        for event_id in (
+            list((action or {}).get("event_ids") or ())
+            + list((action or {}).get("media_event_ids") or ())
+        )
+        if event_id
+    ]
+
+
+def _action_window_handles(action, event_window_handles):
+    result = set()
+    for event_id in _action_event_ids(action):
+        result.update(event_window_handles.get(event_id) or set())
+    return result
+
+
+def _action_is_bound_to_window(action, lifecycle, event_window_handles):
+    handle = int((lifecycle or {}).get("handle") or 0)
+    return bool(handle and handle in _action_window_handles(
+        action,
+        event_window_handles,
+    ))
+
+
+def _owner_action_before_child_action(
+        actions,
+        lifecycle,
+        event_window_handles,
+        child_action,
+        timestamp,
+        threshold=1500,
+):
+    owner_handles = {
+        int(handle)
+        for handle in (lifecycle or {}).get("owner_chain") or ()
+        if handle
+    }
+    if not owner_handles:
+        return None
+    try:
+        child_index = next(
+            index
+            for index, action in enumerate(actions or ())
+            if action is child_action
+        )
+    except StopIteration:
+        child_index = None
+    candidates = []
+    for index, action in enumerate(actions or ()):
+        if child_index is not None and index >= child_index:
+            continue
+        if not (_action_window_handles(action, event_window_handles) & owner_handles):
+            continue
+        distance = _action_distance(action, timestamp)
+        if distance is None:
+            order_distance = (
+                child_index - index
+                if child_index is not None
+                else len(actions or ()) - index
+            )
+            distance_key = 10_000_000 + order_distance
+        elif distance <= threshold:
+            distance_key = distance
+        else:
+            continue
+        candidates.append((distance_key, -index, action))
+    return min(candidates, default=(None, None, None), key=lambda item: item[:2])[2]
+
+
+def _action_distance(action, timestamp):
+    if timestamp is None:
+        return None
+    start_ms = (action or {}).get("start_ms")
+    end_ms = (action or {}).get("end_ms")
+    if end_ms is None:
+        return None
+    if start_ms is not None and start_ms <= timestamp <= end_ms:
+        return 0
+    if end_ms <= timestamp:
+        return timestamp - end_ms
+    return None
+
+
 def _nearest_action(actions, timestamp, threshold=1500):
     if timestamp is None:
         return None
     candidates = []
     for action in actions:
+        start_ms = action.get("start_ms")
         end_ms = action.get("end_ms")
-        if end_ms is None or end_ms > timestamp:
+        if end_ms is None:
             continue
-        distance = timestamp - end_ms
-        if distance <= threshold:
+        if start_ms is not None and start_ms <= timestamp <= end_ms + threshold:
+            distance = 0 if timestamp <= end_ms else timestamp - end_ms
             candidates.append((distance, action))
+            continue
+        if end_ms <= timestamp:
+            distance = timestamp - end_ms
+            if distance <= threshold:
+                candidates.append((distance, action))
     return min(candidates, default=(None, None), key=lambda item: item[0])[1]
 
 
@@ -2052,6 +2177,8 @@ def _window_summary(value):
         "process_id": value.get("process_id"),
         "title": value.get("title"),
         "class_name": value.get("class_name"),
+        "owner_handle": value.get("owner_handle"),
+        "owner_chain": list(value.get("owner_chain") or []),
     }
 
 

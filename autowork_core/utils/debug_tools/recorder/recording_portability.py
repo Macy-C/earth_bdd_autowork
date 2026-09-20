@@ -31,6 +31,7 @@ RUN_PREFIX = PurePosixPath("runs")
 MAX_PACKAGE_MEMBERS = 200_000
 MAX_PACKAGE_BYTES = 50 * 1024 * 1024 * 1024
 MAX_FILE_BYTES = 20 * 1024 * 1024 * 1024
+MAX_RUN_MANIFEST_BYTES = 10 * 1024 * 1024
 
 
 class RecordingPackageError(RuntimeError):
@@ -297,6 +298,21 @@ def import_recording_package(
                     if entry.get("status") == "completed"
                     and entry.get("selected_take")
                 ]
+                scenario_step_ids = [
+                    str(entry.get("id") or "")
+                    for entry in (
+                        (manifest.get("scenario") or {}).get("steps")
+                        or []
+                    )
+                    if entry.get("id")
+                ]
+                scenario_recording_complete = bool(
+                    scenario_step_ids
+                    and set(completed_step_ids) == set(scenario_step_ids)
+                )
+                missing_step_count = len(
+                    set(scenario_step_ids) - set(completed_step_ids)
+                )
                 if completed_step_ids:
                     try:
                         request = build_generation_request(
@@ -328,8 +344,23 @@ def import_recording_package(
                     "bundle_valid": True,
                     "status": (
                         "ready_for_generation"
-                        if request_path
+                        if scenario_recording_complete
+                        else "partial_recording"
+                        if completed_step_ids
                         else "needs_recording"
+                    ),
+                    "recorded_step_count": len(completed_step_ids),
+                    "missing_step_count": missing_step_count,
+                    "total_step_count": len(scenario_step_ids),
+                    "scenario_recording_complete": (
+                        scenario_recording_complete
+                    ),
+                    "next_action": (
+                        "完整场景已录制"
+                        if scenario_recording_complete
+                        else "可继续录制"
+                        if completed_step_ids
+                        else "继续录制"
                     ),
                 })
             return {
@@ -502,45 +533,8 @@ def _bdd_relative_path(value):
 
 def _extract_verified_package(package_path, staging):
     with zipfile.ZipFile(package_path, "r") as archive:
-        infos = archive.infolist()
-        if len(infos) > MAX_PACKAGE_MEMBERS:
-            raise RecordingPackageError("Recorder 便携包文件数量超过安全上限")
-        if sum(info.file_size for info in infos) > MAX_PACKAGE_BYTES:
-            raise RecordingPackageError("Recorder 便携包解压大小超过安全上限")
-        by_name = {}
-        canonical_names = set()
-        for info in infos:
-            name = _safe_archive_name(info.filename)
-            canonical = name.casefold()
-            if name in by_name or canonical in canonical_names:
-                raise RecordingPackageError(f"便携包包含重复路径: {name}")
-            canonical_names.add(canonical)
-            if _zip_info_is_symlink(info):
-                raise RecordingPackageError(f"便携包不能包含符号链接: {name}")
-            if info.file_size > MAX_FILE_BYTES:
-                raise RecordingPackageError(f"便携包单文件超过安全上限: {name}")
-            by_name[name] = info
-        manifest_info = by_name.get(PACKAGE_MANIFEST)
-        if manifest_info is None:
-            raise RecordingPackageError("Recorder 便携包缺少 package manifest")
-        package = json.loads(archive.read(manifest_info).decode("utf-8"))
-        _validate_package_manifest(package)
-        declared = {
-            str(item["path"]): item
-            for item in package.get("files") or []
-        }
-        if len(declared) != len(package.get("files") or []):
-            raise RecordingPackageError("Recorder 便携包文件清单包含重复路径")
-        actual = {
-            name
-            for name, info in by_name.items()
-            if name != PACKAGE_MANIFEST and not info.is_dir()
-        }
-        if actual != set(declared):
-            raise RecordingPackageError(
-                "Recorder 便携包文件清单与 ZIP 内容不一致"
-            )
-        for name in sorted(actual):
+        package, by_name, declared = _package_archive_index(archive)
+        for name in sorted(declared):
             item = declared[name]
             info = by_name[name]
             target = _contained(staging, staging / _safe_relative_path(name))
@@ -558,6 +552,120 @@ def _extract_verified_package(package_path, staging):
             if digest.hexdigest() != item.get("sha256"):
                 raise RecordingPackageError(f"便携包文件 SHA-256 不匹配: {name}")
         return package
+
+
+def inspect_recording_package_manifests(package_path):
+    """Return verified run manifests without extracting the full evidence archive."""
+    package_path = Path(package_path).resolve()
+    if not package_path.is_file():
+        raise FileNotFoundError(f"Recorder 便携包不存在: {package_path}")
+    with zipfile.ZipFile(package_path, "r") as archive:
+        package, by_name, declared = _package_archive_index(archive)
+        manifests = []
+        for run in package.get("runs") or ():
+            session_id = str(run.get("session_id") or "")
+            relative = _safe_relative_path(run.get("relative_path"))
+            manifest_name = (
+                RUN_PREFIX
+                / PurePosixPath(relative.as_posix())
+                / "manifest.json"
+            ).as_posix()
+            info = by_name.get(manifest_name)
+            item = declared.get(manifest_name)
+            if info is None or item is None:
+                raise RecordingPackageError(
+                    "Recorder 便携包 Run 缺少 manifest.json: "
+                    f"{relative.as_posix()}"
+                )
+            if info.file_size > MAX_RUN_MANIFEST_BYTES:
+                raise RecordingPackageError(
+                    "Recorder Run manifest超过安全上限: "
+                    f"{relative.as_posix()}"
+                )
+            digest = hashlib.sha256()
+            chunks = []
+            size = 0
+            with archive.open(info, "r") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_RUN_MANIFEST_BYTES:
+                        raise RecordingPackageError(
+                            "Recorder Run manifest超过安全上限: "
+                            f"{relative.as_posix()}"
+                        )
+                    digest.update(chunk)
+                    chunks.append(chunk)
+            data = b"".join(chunks)
+            if any((
+                size != int(item.get("size") or -1),
+                digest.hexdigest() != item.get("sha256"),
+                digest.hexdigest() != run.get("manifest_sha256"),
+            )):
+                raise RecordingPackageError(
+                    "Recorder Run manifest与便携包清单不一致: "
+                    f"{relative.as_posix()}"
+                )
+            try:
+                manifest = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise RecordingPackageError(
+                    "Recorder Run manifest无法解析: "
+                    f"{relative.as_posix()}"
+                ) from error
+            if not isinstance(manifest, dict) or str(
+                    manifest.get("session_id") or "") != session_id:
+                raise RecordingPackageError(
+                    "Recorder Run manifest身份不一致: "
+                    f"{relative.as_posix()}"
+                )
+            manifests.append({
+                "session_id": session_id,
+                "relative_path": relative.as_posix(),
+                "manifest": manifest,
+            })
+        return tuple(manifests)
+
+
+def _package_archive_index(archive):
+    infos = archive.infolist()
+    if len(infos) > MAX_PACKAGE_MEMBERS:
+        raise RecordingPackageError("Recorder 便携包文件数量超过安全上限")
+    if sum(info.file_size for info in infos) > MAX_PACKAGE_BYTES:
+        raise RecordingPackageError("Recorder 便携包解压大小超过安全上限")
+    by_name = {}
+    canonical_names = set()
+    for info in infos:
+        name = _safe_archive_name(info.filename)
+        canonical = name.casefold()
+        if name in by_name or canonical in canonical_names:
+            raise RecordingPackageError(f"便携包包含重复路径: {name}")
+        canonical_names.add(canonical)
+        if _zip_info_is_symlink(info):
+            raise RecordingPackageError(f"便携包不能包含符号链接: {name}")
+        if info.file_size > MAX_FILE_BYTES:
+            raise RecordingPackageError(f"便携包单文件超过安全上限: {name}")
+        by_name[name] = info
+    manifest_info = by_name.get(PACKAGE_MANIFEST)
+    if manifest_info is None:
+        raise RecordingPackageError("Recorder 便携包缺少 package manifest")
+    package = json.loads(archive.read(manifest_info).decode("utf-8"))
+    _validate_package_manifest(package)
+    declared = {
+        str(item["path"]): item
+        for item in package.get("files") or []
+    }
+    if len(declared) != len(package.get("files") or []):
+        raise RecordingPackageError("Recorder 便携包文件清单包含重复路径")
+    actual = {
+        name
+        for name, info in by_name.items()
+        if name != PACKAGE_MANIFEST and not info.is_dir()
+    }
+    if actual != set(declared):
+        raise RecordingPackageError(
+            "Recorder 便携包文件清单与 ZIP 内容不一致"
+        )
+    return package, by_name, declared
 
 
 def _validate_package_manifest(package):
@@ -771,4 +879,5 @@ __all__ = [
     "export_recording_package",
     "export_recording_runs",
     "import_recording_package",
+    "inspect_recording_package_manifests",
 ]

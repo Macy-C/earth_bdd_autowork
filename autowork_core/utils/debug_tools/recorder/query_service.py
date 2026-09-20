@@ -60,6 +60,7 @@ from autowork_core.utils.debug_tools.recorder.dto import (
     GenerationStageSummaryDTO,
     ImplementationSummaryDTO,
     IssueDTO,
+    LocatorReuseSummaryDTO,
     ObservationDTO,
     QuestionMediaDTO,
     RuntimeDiagnosticDTO,
@@ -76,6 +77,7 @@ from autowork_core.utils.debug_tools.recorder.dto import (
     XPathTechnicalDetailDTO,
 )
 from autowork_core.utils.debug_tools.recorder.decision_pack import (
+    load_answer_record,
     load_decision_pack,
 )
 from autowork_core.utils.debug_tools.recorder.evidence_context import (
@@ -110,6 +112,8 @@ TIMELINE_CORRECTABLE_CODES = {
     "orphan_mouse_boundary",
     "shell_transport_action",
 }
+_REQUEST_NOT_PROVIDED = object()
+_WORKFLOW_NOT_PROVIDED = object()
 
 
 class RecorderQueryService:
@@ -131,12 +135,24 @@ class RecorderQueryService:
             )
         ):
             readiness = validate_ai_bundle(self.session_dir)
-        scope = self._scenario_scope()
+        scope = self._scenario_scope(readiness=readiness)
+        request = (
+            self.requests.latest(scope.selected_step_ids)
+            if _scope_capture_generation_candidate(scope)
+            else None
+        )
+        workflow = self.requests.workflow_state_for_request(request)
         generation = self._scenario_generation_summary(
             scope=scope,
             include_result=True,
+            request=request,
+            workflow=workflow,
         )
-        generation_context = self._current_generation_context(scope)
+        generation_context = self._current_generation_context(
+            scope,
+            request=request,
+            workflow=workflow,
+        )
         generation_provenance = (
             generation_context[0] if generation_context is not None else None
         )
@@ -178,10 +194,10 @@ class RecorderQueryService:
             recommended_detail=(
                 verification.detail
                 if generation.workflow_status in {"completed", "failed"}
+                and generation.result is not None
                 else generation.recommended_detail
             ),
         )
-        workflow = self.requests.workflow_state(scope.selected_step_ids)
         workflow = workflow if isinstance(workflow, dict) else {}
         effective_readiness = _effective_readiness(
             readiness,
@@ -222,11 +238,19 @@ class RecorderQueryService:
             ),
         )
 
-    def _current_generation_context(self, scope):
-        request = self.requests.latest(scope.selected_step_ids)
+    def _current_generation_context(
+            self,
+            scope,
+            *,
+            request=_REQUEST_NOT_PROVIDED,
+            workflow=_WORKFLOW_NOT_PROVIDED,
+        ):
+        if request is _REQUEST_NOT_PROVIDED:
+            request = self.requests.latest(scope.selected_step_ids)
         if request is None:
             return None
-        workflow = self.requests.workflow_state(scope.selected_step_ids)
+        if workflow is _WORKFLOW_NOT_PROVIDED:
+            workflow = self.requests.workflow_state(scope.selected_step_ids)
         workflow = workflow if isinstance(workflow, dict) else {}
         job_result = (
             load_generation_job_result(
@@ -423,9 +447,18 @@ class RecorderQueryService:
         )
         if step is None:
             raise KeyError(f"录制任务中不存在 Step: {step_id}")
-        scope = self._scenario_scope()
-        generation = self._scenario_generation_summary(scope=scope)
-        workflow = self.requests.workflow_state(scope.selected_step_ids)
+        scope = self._scenario_scope(readiness=readiness)
+        request = (
+            self.requests.latest(scope.selected_step_ids)
+            if _scope_capture_generation_candidate(scope)
+            else None
+        )
+        workflow = self.requests.workflow_state_for_request(request)
+        generation = self._scenario_generation_summary(
+            scope=scope,
+            request=request,
+            workflow=workflow,
+        )
         readiness = _effective_readiness(
             readiness,
             (workflow or {}).get("ambiguity"),
@@ -463,7 +496,7 @@ class RecorderQueryService:
             IssueDTO(
                 code=str(item.get("code") or "unknown"),
                 message="",
-                blocking=bool(item.get("blocking")),
+                blocking=_issue_blocks_user_repair(item),
                 title=user_diagnostic_title(item),
                 detail=format_user_step_diagnostic(item),
                 repair=item.get("repair"),
@@ -670,7 +703,7 @@ class RecorderQueryService:
             != "skipped"
         )
 
-    def _scenario_scope(self):
+    def _scenario_scope(self, *, readiness=None):
         step_ids = self._scenario_step_ids()
         incomplete_step_ids = tuple(
             str(step.id)
@@ -701,6 +734,11 @@ class RecorderQueryService:
         )
         complete = bool(all_step_ids) and not excluded
         capture_generation_candidate = bool(step_ids) and not incomplete_step_ids
+        if (
+            readiness is not None
+            and readiness.get("capture_generation_candidate") is False
+        ):
+            capture_generation_candidate = False
         return ScenarioScopeDTO(
             kind="scenario",
             complete=complete,
@@ -722,16 +760,25 @@ class RecorderQueryService:
             *,
             scope=None,
             include_result=False,
+            request=_REQUEST_NOT_PROVIDED,
+            workflow=_WORKFLOW_NOT_PROVIDED,
         ):
         scope = scope or self._scenario_scope()
         step_ids = scope.selected_step_ids
         if not _scope_capture_generation_candidate(scope):
+            if not getattr(scope, "incomplete_step_ids", ()):
+                return _generation_summary(
+                    workflow_status="updating",
+                    display_status="updating",
+                    next_action="materialize_latest_request",
+                )
             return _generation_summary(
                 workflow_status="scenario_incomplete",
                 display_status="scenario_incomplete",
                 next_action="complete_scenario_recording",
             )
-        request = self.requests.latest(step_ids)
+        if request is _REQUEST_NOT_PROVIDED:
+            request = self.requests.latest(step_ids)
         if request is None:
             running = _running_transaction_for_scope(
                 self.session_dir,
@@ -762,8 +809,13 @@ class RecorderQueryService:
                 display_status="updating",
                 next_action="materialize_latest_request",
             )
-        workflow = self.requests.workflow_state(step_ids)
-        status = str((workflow or {}).get("status") or "draft")
+        if workflow is _WORKFLOW_NOT_PROVIDED:
+            workflow = self.requests.workflow_state(step_ids)
+        status = _project_workflow_status(
+            str((workflow or {}).get("status") or "draft"),
+            workflow,
+            request,
+        )
         display_status = {
             "draft": "ready",
             "ready": "ready",
@@ -833,9 +885,24 @@ class RecorderQueryService:
             workflow.get("brief") or {},
         )
         ambiguity = workflow.get("ambiguity") or {}
-        recommended_action, recommended_label, recommended_detail = (
-            _generation_recommendation(status, result, scope.label)
-        )
+        if workflow.get("current_job") and job is None:
+            recommended_action = "retry_generation"
+            recommended_label = "重新准备生成"
+            recommended_detail = (
+                "当前 Copilot 请求与现行协议不兼容；"
+                "点击后会关闭旧请求，并为同一范围准备新请求。"
+            )
+        else:
+            recommended_action, recommended_label, recommended_detail = (
+                _generation_recommendation(
+                    status,
+                    result,
+                    scope.label,
+                    job_phase=(workflow.get("job_execution") or {}).get(
+                        "phase"
+                    ),
+                )
+            )
         return GenerationSummaryDTO(
             workflow_status=status,
             display_status=display_status,
@@ -1040,11 +1107,16 @@ def _take_evidence_summary(directory_path):
     events = coverage.get("events") or {}
     actions = coverage.get("actions") or {}
     source = graph.get("source") or {}
+    action_total = int(actions.get("total") or 0)
     return EvidenceSummaryDTO(
         linked_event_count=int(events.get("linked_to_actions") or 0),
         event_count=int(events.get("total") or 0),
-        complete_action_count=int(actions.get("complete_envelopes") or 0),
-        action_count=int(actions.get("total") or 0),
+        complete_action_count=int(
+            actions.get("complete_envelopes")
+            if actions.get("complete_envelopes") is not None
+            else action_total
+        ),
+        action_count=action_total,
         artifact_count=int(source.get("artifact_count") or 0),
     )
 
@@ -1128,6 +1200,33 @@ def _evidence_status(state, issues):
     return "clean"
 
 
+def _issue_blocks_user_repair(item):
+    if not bool(item.get("blocking")):
+        return False
+    recovery = item.get("recovery") or {}
+    if recovery:
+        return bool(recovery.get("hard_blocker"))
+    return True
+
+
+def _project_workflow_status(status, workflow, request):
+    if status != "blocked":
+        return status
+    risk = (workflow or {}).get("risk") or {}
+    if risk.get("mode") != "blocked":
+        return status
+    readiness = (request or {}).get("readiness") or {}
+    hard_count = int(readiness.get("target_hard_blocker_count") or 0)
+    if hard_count:
+        return status
+    if not readiness.get("target_capture_generation_candidate", True):
+        return status
+    reviews = readiness.get("target_review_required") or ()
+    if readiness.get("target_reconciliation_required") or reviews:
+        return "forensic"
+    return "draft"
+
+
 def _next_action(
         capture_status,
         evidence_status,
@@ -1141,21 +1240,13 @@ def _next_action(
         return "repair", "修复证据"
     if evidence_status == "needs_review":
         return "review", "检查录制内容"
-    if generation_status == "scenario_incomplete":
-        return "complete_scenario", "完成场景录制"
-    if generation_status == "ready":
-        return "generate", "交给 Copilot"
-    if generation_status == "needs_input":
-        return "adjust", "确认业务问题"
     if generation_status == "running":
         return "wait", "生成中"
     if generation_status == "completed":
         return "review_result", "查看本次生成"
     if generation_status == "failed":
         return "repair_generation", "修复生成结果"
-    if generation_status == "blocked":
-        return "repair", "校正或补录"
-    return "wait", "正在更新证据"
+    return "ready", "已就绪"
 
 
 def recommend_step_action(readiness, step_id, step_states):
@@ -1299,6 +1390,15 @@ def _user_task_projection(
             generation.recommended_detail,
         )
     if status == "failed":
+        if generation.result is None:
+            return task(
+                "copilot",
+                True,
+                "generate",
+                "交给 Copilot",
+                "review",
+                "上次 Copilot 任务未产生生成报告；可以基于当前录制重新交给 Copilot。",
+            )
         return task(
             "copilot",
             True,
@@ -1359,15 +1459,13 @@ def _user_task_projection(
         )
 
     if status == "needs_adjustment":
-        target_step_id = review_target(reviews)
         return task(
-            "user",
+            "copilot",
             True,
-            "v3_adjust",
-            "确认业务问题",
+            "v3_business_questions",
+            "交给 Copilot",
             "review",
-            "有业务含义只有你能确认，确认结果只约束 Copilot 的实现。",
-            target_step_id,
+            "Copilot 会在生成前一次性确认业务问题；回答后继续同一个生成任务。",
         )
     if status in {"draft", "ready", "forensic"}:
         return task(
@@ -1375,6 +1473,18 @@ def _user_task_projection(
             True,
             generation.recommended_action,
             "交给 Copilot",
+            "review",
+            generation.recommended_detail,
+        )
+    if (
+            status == "running"
+            and generation.recommended_action == "retry_generation"
+    ):
+        return task(
+            "copilot",
+            True,
+            "retry_generation",
+            generation.recommended_label,
             "review",
             generation.recommended_detail,
         )
@@ -1650,7 +1760,7 @@ def _verification_summary(
     )
 
 
-def _generation_recommendation(status, result, scope_label):
+def _generation_recommendation(status, result, scope_label, *, job_phase=None):
     if status == "draft":
         return (
             "v3_plan",
@@ -1672,9 +1782,9 @@ def _generation_recommendation(status, result, scope_label):
         )
     if status == "needs_adjustment":
         return (
-            "v3_adjust",
+            "v3_business_questions",
             "交给 Copilot",
-            "有业务含义无法自动确定；Copilot 会一次性向你说明并询问。",
+            "Copilot 会在生成前一次性确认业务问题；回答后继续同一个生成任务。",
         )
     if status == "blocked":
         return (
@@ -1684,6 +1794,12 @@ def _generation_recommendation(status, result, scope_label):
             "校正或补录后系统会自动重新准备。",
         )
     if status == "running":
+        if str(job_phase or "") in {"design", "implementation"}:
+            return (
+                "retry_generation",
+                "继续交给 Copilot",
+                "当前 Job 已创建并等待 Copilot 继续；点击会重新复制同一个 Job 路径。",
+            )
         return "pending", "正在生成", "Copilot 生成和检查尚未完成。"
     if status == "completed":
         return (
@@ -1692,6 +1808,12 @@ def _generation_recommendation(status, result, scope_label):
             "生成已完成，请查看修改内容和真实运行结果。",
         )
     if status == "failed":
+        if result is None:
+            return (
+                "generate",
+                "交给 Copilot",
+                "上次 Copilot 请求未产生生成报告；可以基于当前录制重新交给 Copilot。",
+            )
         return (
             "review_failed_result",
             result.recommended_label if result else "查看失败报告",
@@ -1767,8 +1889,8 @@ def _decision_summary(
     )
     return DecisionSummaryDTO(
         status=str(decision.get("status") or "not_available"),
-        question_count=int(pack.get("question_count") or 0),
-        blocking_count=int(pack.get("blocking_count") or 0),
+        question_count=len(questions),
+        blocking_count=sum(1 for item in questions if item.blocking),
         forensic_blocking_count=int(
             pack.get("forensic_blocking_count") or 0
         ),
@@ -1853,8 +1975,19 @@ def _decision_questions(decision, *, session_dir=None, request=None):
             request,
             decision,
         )
+        answer_record = load_answer_record(
+            session_dir,
+            (decision or {}).get("answers") or {},
+            request,
+            loaded_pack,
+        )
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return ()
+    answered_ids = {
+        str(item.get("question_id") or "")
+        for item in (answer_record or {}).get("answers") or ()
+        if isinstance(item, dict) and item.get("question_id")
+    }
 
     return tuple(
         _decision_question_dto(
@@ -1863,7 +1996,18 @@ def _decision_questions(decision, *, session_dir=None, request=None):
             Path(session_dir).resolve(),
         )
         for question in loaded_pack.get("questions") or ()
-        if isinstance(question, dict)
+        if _pending_decision_question(question, answered_ids)
+    )
+
+
+def _pending_decision_question(question, answered_ids):
+    if not isinstance(question, dict):
+        return False
+    question_id = str(question.get("question_id") or "")
+    return bool(
+        question.get("blocking")
+        and question_id
+        and question_id not in answered_ids
     )
 
 
@@ -2449,6 +2593,10 @@ def _generation_result(report_path, report):
         failed,
     )
     implementation = report.get("implementation_summary") or {}
+    service_level = report.get("service_level") or {}
+    unresolved_issues = _generation_unresolved_issues(
+        report.get("unresolved_issues") or ()
+    )
     return GenerationResultDTO(
         status=report_status,
         transaction_id=report.get("transaction_id"),
@@ -2480,11 +2628,160 @@ def _generation_result(report_path, report):
             if implementation
             else None
         ),
+        locator_reuse=_locator_reuse_summary(
+            report.get("implementation_manifest") or {},
+            unresolved_issues,
+        ),
+        unresolved_issues=unresolved_issues,
         stages=_generation_stages(report, report_path=report_path),
         execution_status=(
             (report.get("execution_outcome") or {}).get("status")
         ),
         workspace_materialization=_workspace_materialization(report_path, report),
+        service_level_status=service_level.get("status"),
+        service_level_target_seconds=_optional_int(
+            service_level.get("target_seconds")
+        ),
+        service_level_duration_ms=_optional_int(
+            service_level.get("total_duration_ms")
+        ),
+        service_level_observed_duration_ms=_optional_int(
+            service_level.get("agent_observed_duration_ms")
+        ),
+        service_level_coverage=service_level.get("coverage"),
+        service_level_timing_source=service_level.get("timing_source"),
+        **_generation_progress_kwargs(report),
+    )
+
+
+def _generation_unresolved_issues(values):
+    result = []
+    seen = set()
+    for value in values or ():
+        if not isinstance(value, dict):
+            continue
+        issue_type = str(value.get("issue_type") or "unresolved_generation")
+        identity = str(value.get("issue_id") or "") or (
+            issue_type,
+            str(value.get("step_id") or ""),
+            str(value.get("ambiguity_id") or ""),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        step_id = str(value.get("step_id") or "") or None
+        reason = str(value.get("reason") or "").strip()
+        summary = _generation_issue_public_summary(issue_type)
+        if issue_type == "locator_reuse_maintenance_required":
+            title = "已有控件需要维护"
+            detail = "本次未改动已有控件；相关步骤已保留待处理占位。"
+        elif issue_type == "top_level_root_without_criteria_pos_fallback":
+            title = summary
+            detail = _pos_fallback_issue_detail(value, summary)
+        else:
+            title = summary
+            detail = _generation_issue_detail(
+                summary,
+                step_id=step_id,
+                reason=reason,
+            )
+        result.append(IssueDTO(
+            code=issue_type,
+            message="",
+            blocking=True,
+            title=title,
+            detail=detail,
+            repair="review_result",
+            location=step_id,
+        ))
+    return tuple(result)
+
+
+def _generation_issue_public_summary(issue_type):
+    return {
+        "action_implementation": "动作实现需要人工审阅",
+        "control_final_state_unobserved": "控件最终状态未可靠记录",
+        "collection_assertion_unsupported": "集合断言已保留占位",
+        "region_text_assertion_unsupported": "OCR/区域文本断言已保留占位",
+        "input_binding_invalid": "录入值来源绑定无效",
+        "keyboard_sequence_incomplete": "键盘输入序列不完整",
+        "visual_state_unsettled": "界面状态未稳定",
+        "unsupported_scroll": "滚动动作需要审阅",
+        "top_level_root_without_criteria_pos_fallback": "顶层窗口缺少稳定定位，已使用坐标兜底",
+    }.get(str(issue_type or ""), "生成保留了待处理项")
+
+
+def _generation_issue_detail(summary, *, step_id=None, reason=""):
+    parts = []
+    if step_id:
+        parts.append(f"Step {step_id}")
+    parts.append(f"{summary}，已生成待处理占位，未猜测缺失实现")
+    if reason:
+        parts.append(f"原因：{reason}")
+    parts.append("修复前不进入强复用")
+    return "；".join(parts) + "。"
+
+
+def _pos_fallback_issue_detail(value, summary):
+    step_id = str(value.get("step_id") or "")
+    root_name = str(value.get("root_name") or "")
+    locator_name = str(value.get("locator_name") or "")
+    coords = value.get("coords") or []
+    parts = []
+    if step_id:
+        parts.append(f"Step {step_id}")
+    if locator_name:
+        parts.append(f"控件 {locator_name}")
+    if root_name:
+        parts.append(f"窗口 {root_name} 缺少稳定定位条件")
+    parts.append(f"{summary}，窗口位置、分辨率或缩放变化时可能失效")
+    if coords:
+        parts.append(f"坐标 {list(coords)}")
+    parts.append("修复前不进入强复用")
+    return "；".join(parts) + "。"
+
+
+def _locator_reuse_summary(manifest, unresolved_issues, *, inherited=None):
+    manifest = manifest if isinstance(manifest, dict) else {}
+    writable_files = {
+        str(path) for path in manifest.get("allowed_changes") or ()
+    }
+    protected = {
+        (str(item.get("file") or ""), str(item.get("key") or ""))
+        for item in manifest.get("protected_locator_keys") or ()
+        if isinstance(item, dict)
+        and item.get("file")
+        and item.get("key")
+    }
+    added = {
+        (str(item.get("file") or ""), str(item.get("key") or ""))
+        for item in manifest.get("locator_patch") or ()
+        if isinstance(item, dict)
+        and item.get("kind") == "child"
+        and item.get("file")
+        and item.get("key")
+        and str(item.get("file")) in writable_files
+    } - protected
+    if inherited is not None and not protected and not added:
+        reused_count = int(getattr(inherited, "reused_count", 0) or 0)
+        added_count = int(getattr(inherited, "added_count", 0) or 0)
+    else:
+        reused_count = len(protected)
+        added_count = len(added)
+    maintenance_count = sum(
+        issue.code == "locator_reuse_maintenance_required"
+        for issue in unresolved_issues or ()
+    )
+    if inherited is not None and not maintenance_count:
+        maintenance_count = int(
+            getattr(inherited, "maintenance_count", 0) or 0
+        )
+    if not any((reused_count, added_count, maintenance_count)):
+        return None
+    return LocatorReuseSummaryDTO(
+        reused_count=reused_count,
+        added_count=added_count,
+        maintenance_count=maintenance_count,
     )
 
 
@@ -2617,6 +2914,10 @@ def _generation_result_from_job_result(
     path = path.resolve() if path.is_absolute() else (session_dir / path).resolve()
     status = str(job_result.get("status") or "failed")
     category = str(job_result.get("category") or "job_failed")
+    service_level = job_result.get("service_level") or {}
+    unresolved_issues = _generation_unresolved_issues(
+        job_result.get("unresolved_issues") or ()
+    )
     return GenerationResultDTO(
         status=status,
         transaction_id=None,
@@ -2631,9 +2932,51 @@ def _generation_result_from_job_result(
             job_result.get("next_action") or "review_generation_failure"
         ),
         recommended_label=_job_result_label(status, category),
+        locator_reuse=_locator_reuse_summary({}, unresolved_issues),
+        unresolved_issues=unresolved_issues,
         stages=_job_result_stages(job_result),
         execution_status=None,
+        service_level_status=service_level.get("status"),
+        service_level_target_seconds=_optional_int(
+            service_level.get("target_seconds")
+        ),
+        service_level_duration_ms=_optional_int(
+            service_level.get("total_duration_ms")
+        ),
+        service_level_observed_duration_ms=_optional_int(
+            service_level.get("agent_observed_duration_ms")
+        ),
+        service_level_coverage=service_level.get("coverage"),
+        service_level_timing_source=service_level.get("timing_source"),
+        **_generation_progress_kwargs(job_result),
     )
+
+
+def _generation_progress_kwargs(value):
+    progress = (value or {}).get("generation_progress") or {}
+    candidate_index = progress.get("candidate_index") or {}
+    agent_wait = progress.get("agent_wait") or {}
+    return {
+        "generation_progress_phase": progress.get("phase"),
+        "generation_progress_stage": progress.get("current_stage"),
+        "generation_progress_next_action": progress.get("next_visible_action"),
+        "generation_progress_candidate_file_count": _optional_int(
+            candidate_index.get("file_count")
+        ),
+        "generation_progress_candidate_window_count": _optional_int(
+            candidate_index.get("window_count")
+        ),
+        "generation_progress_agent_wait_status": agent_wait.get("status"),
+        "generation_progress_max_wait_ms": _optional_int(
+            agent_wait.get("max_wait_ms")
+        ),
+        "generation_progress_max_wait_tool_kind": agent_wait.get(
+            "max_wait_tool_kind"
+        ),
+        "generation_progress_max_wait_segment": agent_wait.get(
+            "max_wait_segment"
+        ),
+    }
 
 
 def _generation_stages(report, *, report_path=None):
@@ -2735,6 +3078,10 @@ def _generation_stages(report, *, report_path=None):
 def _with_job_result(result, job_result):
     category = str(job_result.get("category") or "")
     status = str(job_result.get("status") or result.status)
+    service_level = job_result.get("service_level") or {}
+    unresolved_issues = _generation_unresolved_issues(
+        job_result.get("unresolved_issues") or ()
+    )
     return replace(
         result,
         status=status,
@@ -2743,7 +3090,25 @@ def _with_job_result(result, job_result):
             job_result.get("next_action") or result.recommended_action
         ),
         recommended_label=_job_result_label(status, category),
+        locator_reuse=_locator_reuse_summary(
+            {},
+            unresolved_issues,
+            inherited=result.locator_reuse,
+        ),
+        unresolved_issues=unresolved_issues,
         stages=_job_result_stages(job_result),
+        service_level_status=service_level.get("status"),
+        service_level_target_seconds=_optional_int(
+            service_level.get("target_seconds")
+        ),
+        service_level_duration_ms=_optional_int(
+            service_level.get("total_duration_ms")
+        ),
+        service_level_observed_duration_ms=_optional_int(
+            service_level.get("agent_observed_duration_ms")
+        ),
+        service_level_coverage=service_level.get("coverage"),
+        service_level_timing_source=service_level.get("timing_source"),
     )
 
 

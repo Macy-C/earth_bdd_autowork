@@ -20,7 +20,8 @@ from pathlib import Path
 from loguru import logger
 
 from autowork_core.runtime.status import status_category, status_text
-from autowork_core.runtime.run_state import active_step_scope
+from autowork_core.runtime.tag_manager import SKIP_TAG_PRIORITY
+from autowork_core.runtime.run_state import active_step_scope, report_source_path
 from autowork_core.runtime.reporting.run_result_bridge import (
     publish_run_result,
 )
@@ -471,7 +472,7 @@ class SparkReporter:
                 or getattr(item, "tags", ())
             )
         }
-        for candidate in ("maint", "skip", "rep"):
+        for candidate in SKIP_TAG_PRIORITY:
             if candidate in tags:
                 return candidate
         return "skipped"
@@ -645,8 +646,9 @@ class SparkReporter:
     def _location_path(self, path):
         if not path:
             return ""
+        path = report_source_path(path) or path
         try:
-            return str(Path(path).resolve().relative_to(Paths.BASE_DIR))
+            return Path(path).resolve().relative_to(Path(Paths.BASE_DIR).resolve()).as_posix()
         except Exception:
             return str(path)
 

@@ -27,6 +27,10 @@ from autowork_core.utils.debug_tools.recorder.raw_event_journal import (
 from autowork_core.utils.debug_tools.recorder.evidence_recovery import (
     enrich_review_recovery,
 )
+from autowork_core.utils.debug_tools.recorder.evidence_compilation import (
+    evidence_compilation_input_fingerprint,
+    load_evidence_compilation_result,
+)
 
 
 def validate_ai_bundle(session_dir):
@@ -80,6 +84,7 @@ def validate_ai_bundle(session_dir):
                 errors.append(f"普通 locator draft 包含未授权 PIC: {name}")
 
     steps = (context or {}).get("steps") or []
+    compilation_records = []
     annotation_repository = RecordingAnnotationRepository(session_dir)
     try:
         annotation_records = annotation_repository.load()
@@ -151,7 +156,21 @@ def validate_ai_bundle(session_dir):
             continue
 
         artifacts = step.get("artifacts") or {}
-        for key in (
+        compilation_record = _evidence_compilation_record(
+            session_dir,
+            step,
+            errors,
+        )
+        compilation_records.append(compilation_record)
+        evidence_compiled = bool(compilation_record.get("evidence_compiled"))
+        required_keys = (
+            "take",
+            "events",
+            "media_index",
+            "summary",
+            "actions_auto",
+            "timeline_edits",
+        ) if not evidence_compiled else (
             "take",
             "events",
             "actions",
@@ -159,28 +178,30 @@ def validate_ai_bundle(session_dir):
             "locator_candidates",
             "media_index",
             "summary",
-        ):
+        )
+        for key in required_keys:
             relative_path = artifacts.get(key)
             if not relative_path:
                 errors.append(f"完成 Step 缺少 artifact 索引: step={step.get('step', {}).get('id')}, key={key}")
                 continue
             if not (session_dir / relative_path).exists():
                 errors.append(f"artifact 文件不存在: {relative_path}")
-        for key in (
-            "actions_auto",
-            "actions_effective",
-            "timeline_state",
-            "locator_candidates_auto",
-            "locator_candidates_effective",
-        ):
-            relative_path = artifacts.get(key)
-            if not relative_path:
-                errors.append(
-                    f"2.1 完成 Step 缺少 artifact 索引: "
-                    f"step={step.get('step', {}).get('id')}, key={key}"
-                )
-            elif not (session_dir / relative_path).exists():
-                errors.append(f"artifact 文件不存在: {relative_path}")
+        if evidence_compiled:
+            for key in (
+                "actions_auto",
+                "actions_effective",
+                "timeline_state",
+                "locator_candidates_auto",
+                "locator_candidates_effective",
+            ):
+                relative_path = artifacts.get(key)
+                if not relative_path:
+                    errors.append(
+                        f"2.1 完成 Step 缺少 artifact 索引: "
+                        f"step={step.get('step', {}).get('id')}, key={key}"
+                    )
+                elif not (session_dir / relative_path).exists():
+                    errors.append(f"artifact 文件不存在: {relative_path}")
 
         media_path = artifacts.get("media_index")
         if media_path and (session_dir / media_path).exists():
@@ -195,6 +216,8 @@ def validate_ai_bundle(session_dir):
                 action_media,
                 errors,
             )
+        if not evidence_compiled:
+            continue
         semantic_path = artifacts.get("semantic_pack")
         if semantic_path and (session_dir / semantic_path).is_file():
             semantic_pack = _read_json(
@@ -225,6 +248,7 @@ def validate_ai_bundle(session_dir):
             window_catalog=window_catalog,
         )
 
+    _merge_compilation_reviews(review_required, compilation_records)
     _review_root_variants(locator_drafts, review_required)
     enrich_review_recovery(session_dir, steps, review_required)
     stats["review_required"] = len(review_required)
@@ -237,11 +261,21 @@ def validate_ai_bundle(session_dir):
         for item in review_required
     )
     recording_complete = stats["completed_steps"] > 0 and stats["pending_steps"] == 0
+    compilation_summary = _evidence_compilation_summary(
+        compilation_records,
+        completed_steps=stats["completed_steps"],
+    )
+    evidence_compiled = bool(compilation_summary["evidence_compiled"])
+    evidence_generation_allowed = _evidence_generation_allowed(
+        compilation_summary,
+    )
 
     capture_generation_candidate = (
         not errors
         and recording_complete
         and semantic_ready
+        and evidence_compiled
+        and evidence_generation_allowed
     )
     if not errors and stats["completed_steps"] == 0:
         warnings.append("没有已完成的 Step，证据包结构有效但尚不能生成脚本")
@@ -254,6 +288,13 @@ def validate_ai_bundle(session_dir):
         "readiness_version": "2.0",
         "bundle_valid": not errors,
         "recording_complete": recording_complete,
+        "evidence_compiled": evidence_compiled,
+        "evidence_compilation_status": compilation_summary["status"],
+        "evidence_generation_allowed": evidence_generation_allowed,
+        "evidence_compilation_fingerprint": compilation_summary[
+            "fingerprint"
+        ],
+        "evidence_compilations": compilation_summary["items"],
         "semantic_ready": semantic_ready,
         "capture_generation_candidate": capture_generation_candidate,
         "errors": errors,
@@ -294,6 +335,176 @@ def _validate_observation_annotation_scopes(
                 "ObservationIntent引用的event不是F9 observation: "
                 f"take={scope[1]}, event={event_id}"
             )
+
+
+def _evidence_compilation_record(session_dir, step, errors):
+    step_plan = step.get("step") or {}
+    step_id = step_plan.get("id")
+    artifacts = step.get("artifacts") or {}
+    take_path = artifacts.get("take")
+    if not take_path:
+        return {
+            "step_id": step_id,
+            "status": "missing",
+            "evidence_compiled": False,
+            "fingerprint": None,
+        }
+    take_dir = session_dir / take_path
+    try:
+        result = load_evidence_compilation_result(take_dir)
+    except FileNotFoundError:
+        return {
+            "step_id": step_id,
+            "take_path": take_path,
+            "status": "missing",
+            "evidence_compiled": False,
+            "fingerprint": None,
+        }
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        errors.append(
+            "EvidenceCompilationResult 无效: "
+            f"step={step_id}, {type(error).__name__}: {error}"
+        )
+        return {
+            "step_id": step_id,
+            "take_path": take_path,
+            "status": "invalid",
+            "evidence_compiled": False,
+            "fingerprint": None,
+        }
+    current_input = evidence_compilation_input_fingerprint(take_dir)
+    if result.get("input_fingerprint") != current_input:
+        return {
+            "step_id": step_id,
+            "take_path": take_path,
+            "status": "stale",
+            "evidence_compiled": False,
+            "fingerprint": result.get("result_fingerprint"),
+        }
+    return {
+        "step_id": step_id,
+        "take_path": take_path,
+        "status": result.get("status") or "unknown",
+        "evidence_compiled": bool(result.get("evidence_compiled")),
+        "fingerprint": result.get("result_fingerprint"),
+        "issues": [dict(item) for item in result.get("issues") or ()],
+        "review_required": [
+            dict(item) for item in result.get("review_required") or ()
+        ],
+        "hard_missing": [
+            dict(item) for item in result.get("hard_missing") or ()
+        ],
+    }
+
+
+def _merge_compilation_reviews(review_required, compilation_records):
+    existing = {
+        (str(item.get("step_id") or ""), str(item.get("code") or "")): item
+        for item in review_required
+        if isinstance(item, dict)
+    }
+    for record in compilation_records or ():
+        step_id = str((record or {}).get("step_id") or "")
+        for source in (
+                *((record or {}).get("hard_missing") or ()),
+                *((record or {}).get("review_required") or ()),
+        ):
+            if not isinstance(source, dict):
+                continue
+            code = str(source.get("code") or "")
+            key = (step_id, code)
+            if not code:
+                continue
+            if key in existing:
+                existing[key]["source"] = "evidence_compilation"
+                continue
+            review_required.append({
+                "step_id": step_id,
+                "code": code,
+                "message": source.get("message") or code,
+                "evidence": (
+                    source.get("evidence")
+                    or source.get("event_id")
+                    or source.get("action_id")
+                ),
+                "blocking": True,
+                "source": "evidence_compilation",
+            })
+            existing[key] = review_required[-1]
+
+
+def _evidence_compilation_summary(records, *, completed_steps):
+    records = [dict(item) for item in records or ()]
+    if not completed_steps:
+        return {
+            "status": "not_applicable",
+            "evidence_compiled": False,
+            "fingerprint": None,
+            "items": records,
+        }
+    if not records:
+        return {
+            "status": "missing",
+            "evidence_compiled": False,
+            "fingerprint": None,
+            "items": records,
+        }
+    if all(item.get("evidence_compiled") for item in records):
+        status = (
+            records[0].get("status")
+            if len({item.get("status") for item in records}) == 1
+            else "mixed"
+        )
+        return {
+            "status": status,
+            "evidence_compiled": True,
+            "fingerprint": _stable_json_hash([
+                item.get("fingerprint") for item in records
+            ]),
+            "items": records,
+        }
+    return {
+        "status": next(
+            (
+                str(item.get("status") or "missing")
+                for item in records
+                if not item.get("evidence_compiled")
+            ),
+            "missing",
+        ),
+        "evidence_compiled": False,
+        "fingerprint": None,
+        "items": records,
+    }
+
+
+def _evidence_generation_allowed(compilation_summary):
+    status = str((compilation_summary or {}).get("status") or "")
+    if status in {"verified", "forensic_review", "authorization_required", "placeholder_required"}:
+        return True
+    if status == "mixed":
+        allowed = {
+            "verified",
+            "forensic_review",
+            "authorization_required",
+            "placeholder_required",
+        }
+        return all(
+            str(item.get("status") or "") in allowed
+            for item in (compilation_summary or {}).get("items") or ()
+        )
+    return False
+
+
+def _stable_json_hash(value):
+    return __import__("hashlib").sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _recorded_observation_event_scopes(session_dir, manifest, errors):

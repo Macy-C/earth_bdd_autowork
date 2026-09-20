@@ -11,6 +11,9 @@ from autowork_core.utils.debug_tools.recorder.annotations import (
     build_annotation_snapshot,
     current_annotation_snapshot_for_request,
 )
+from autowork_core.utils.debug_tools.recorder.evidence_compilation import (
+    load_evidence_compilation_result,
+)
 from autowork_core.utils.debug_tools.recorder.identity import (
     safe_segment,
     stable_digest,
@@ -324,6 +327,8 @@ def generation_request_id(
         specification_fingerprint=None,
         annotation_fingerprint=None,
         execution_profile_fingerprint=None,
+    evidence_compilation_fingerprint=None,
+    evidence_generation_allowed=None,
 ):
     identity = {
         "request_version": "3.0",
@@ -336,6 +341,9 @@ def generation_request_id(
                 "selected_take": item.get("selected_take") or {},
                 "timeline_revision": item.get("timeline_revision"),
                 "evidence_graph": item.get("evidence_graph") or {},
+                "evidence_compilation": item.get(
+                    "evidence_compilation"
+                ) or {},
                 "artifact_hashes": item.get("artifact_hashes") or {},
             }
             for item in evidence
@@ -344,6 +352,16 @@ def generation_request_id(
             {
                 "step_id": item.get("step_id"),
                 "code": item.get("code"),
+                **(
+                    {"source": item.get("source")}
+                    if item.get("source") is not None
+                    else {}
+                ),
+                **(
+                    {"evidence": item.get("evidence")}
+                    if item.get("evidence") is not None
+                    else {}
+                ),
                 "hard_blocker": bool(
                     (item.get("recovery") or {}).get("hard_blocker")
                 ),
@@ -361,6 +379,14 @@ def generation_request_id(
     if execution_profile_fingerprint:
         identity["execution_profile_fingerprint"] = str(
             execution_profile_fingerprint
+        )
+    if evidence_compilation_fingerprint:
+        identity["evidence_compilation_fingerprint"] = str(
+            evidence_compilation_fingerprint
+        )
+    if evidence_generation_allowed is not None:
+        identity["evidence_generation_allowed"] = bool(
+            evidence_generation_allowed
         )
     if scenario_scope:
         identity["scenario_scope"] = scenario_scope
@@ -465,6 +491,16 @@ def _seal_less_request_identity_is_valid(request):
                 "execution_profile_fingerprint"
             )
         ),
+        evidence_compilation_fingerprint=(
+            identity_basis.get(
+                "evidence_compilation_fingerprint"
+            )
+        ),
+        evidence_generation_allowed=(
+            identity_basis.get("evidence_generation_allowed")
+            if "evidence_generation_allowed" in identity_basis
+            else None
+        ),
     )
     return request_id == expected
 
@@ -516,6 +552,7 @@ def request_revision_snapshot(session_dir, request):
             "selected_take_id": state.get("selected_take"),
             "timeline_revision": timeline.get("timeline_revision"),
             "graph_fingerprint": graph.get("graph_fingerprint"),
+            "evidence_compilation": _current_evidence_compilation(take_dir),
             "source_fingerprint": (
                 graph.get("source") or {}
             ).get("artifact_fingerprint"),
@@ -603,6 +640,28 @@ def request_revision_matches(session_dir, request, expected):
     if current_annotation_snapshot != declared_annotation_snapshot:
         return False, current
     return current == expected, current
+
+
+def _current_evidence_compilation(take_dir):
+    try:
+        result = load_evidence_compilation_result(take_dir)
+    except FileNotFoundError:
+        return {
+            "status": "missing",
+            "evidence_compiled": False,
+            "fingerprint": None,
+        }
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {
+            "status": "invalid",
+            "evidence_compiled": False,
+            "fingerprint": None,
+        }
+    return {
+        "status": result.get("status") or "unknown",
+        "evidence_compiled": bool(result.get("evidence_compiled")),
+        "fingerprint": result.get("result_fingerprint"),
+    }
 
 
 def _declared_annotation_snapshot(request):

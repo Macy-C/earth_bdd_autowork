@@ -6,6 +6,7 @@ import re
 from types import SimpleNamespace
 
 from autowork_core.common.winauto_xpath import find_by_xpath
+from autowork_core.utils.debug_tools.common import make_xpath_predicate
 from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION, public_dict
 from autowork_core.utils.debug_tools.recorder.identity import (
     locator_candidate_id,
@@ -15,6 +16,7 @@ from autowork_core.utils.debug_tools.recorder.identity import (
 
 LOCATOR_PRIORITY = ("child", "xpath", "ocr", "pos")
 EXCLUDED_LOCATOR_METHODS = ("pic",)
+SYSTEM_KEYBOARD_NOISE_KEYS = frozenset({"numlock", "f15"})
 
 
 def derive_actions(events):
@@ -25,24 +27,29 @@ def derive_actions(events):
     key_down_events = []
 
     def flush_keys():
-        if not key_down_events:
+        filtered_key_events, filtered_key_down_events = _filter_system_keyboard_noise(
+            key_events,
+            key_down_events,
+        )
+        if not filtered_key_down_events:
             key_events.clear()
+            key_down_events.clear()
             return
-        first = key_events[0]
-        last = key_events[-1]
+        first = filtered_key_events[0]
+        last = filtered_key_events[-1]
         target_event = next(
             (
                 event
-                for event in key_down_events
+                for event in filtered_key_down_events
                 if _has_structured_target(event.get("target"))
             ),
-            key_down_events[0],
+            filtered_key_down_events[0],
         )
         actions.append({
             "type": "keyboard",
-            "event_ids": [event["id"] for event in key_down_events],
-            "media_event_ids": [event["id"] for event in key_events],
-            "keys": [event.get("key") or {} for event in key_down_events],
+            "event_ids": [event["id"] for event in filtered_key_down_events],
+            "media_event_ids": [event["id"] for event in filtered_key_events],
+            "keys": [event.get("key") or {} for event in filtered_key_down_events],
             "start_ms": first.get("monotonic_ms", 0),
             "end_ms": last.get("monotonic_ms", first.get("monotonic_ms", 0)),
             "commit_event_id": last.get("id"),
@@ -121,17 +128,60 @@ def derive_actions(events):
     return _assign_action_ids(actions)
 
 
-def build_locator_bundle(events, *, tree_snapshots=()):
+def _filter_system_keyboard_noise(key_events, key_down_events):
+    noise_ids = {
+        str(event.get("id") or "")
+        for event in key_events or ()
+        if _is_system_keyboard_noise_event(event)
+    }
+    if not noise_ids:
+        return list(key_events), list(key_down_events)
+    return (
+        [
+            event for event in key_events or ()
+            if str(event.get("id") or "") not in noise_ids
+        ],
+        [
+            event for event in key_down_events or ()
+            if str(event.get("id") or "") not in noise_ids
+        ],
+    )
+
+
+def _is_system_keyboard_noise_event(event):
+    key = (event or {}).get("key") or {}
+    name = str(key.get("name") or "")
+    normalized = name.casefold()
+    if normalized not in SYSTEM_KEYBOARD_NOISE_KEYS:
+        return False
+    pressed = {
+        str(item).casefold()
+        for item in key.get("pressed") or ()
+    }
+    return not pressed or pressed <= {normalized}
+
+
+def build_locator_bundle(events, *, tree_snapshots=(), evidence_events=()):
     events = [public_dict(event) for event in events]
+    evidence_events = [
+        public_dict(event)
+        for event in evidence_events or ()
+    ]
+    all_events = _evidence_event_scope(events, evidence_events)
+    for event in all_events:
+        target = event.get("target") or {}
+        if target and target.get("inspection_mode") != "state":
+            _ensure_event_bound_direct_chain_candidate(target)
     snapshot_roots = [
         (snapshot.get("window_handle"), root)
         for snapshot in tree_snapshots or ()
         for root in [_snapshot_root(snapshot)]
         if root is not None
     ]
-    _validate_deferred_candidates(events, snapshot_roots)
+    _validate_deferred_candidates(all_events, snapshot_roots)
+    _promote_same_target_validated_candidates(events, sources=all_events)
     stability_index = _candidate_stability_index(
-        events,
+        all_events,
         tree_snapshots,
         snapshot_roots=snapshot_roots,
     )
@@ -203,6 +253,21 @@ def build_locator_bundle(events, *, tree_snapshots=()):
     }
 
 
+def _evidence_event_scope(events, evidence_events):
+    primary_ids = {
+        str(event.get("id") or "")
+        for event in events or ()
+        if isinstance(event, dict) and event.get("id")
+    }
+    scoped = [
+        event for event in evidence_events or ()
+        if isinstance(event, dict)
+        and str(event.get("id") or "") not in primary_ids
+    ]
+    scoped.extend(events or [])
+    return scoped
+
+
 def _validated_locator_candidates(candidates, limit=4):
     validated = sorted((
         candidate
@@ -230,6 +295,125 @@ def _validated_locator_candidates(candidates, limit=4):
             "score": candidate.get("score"),
         })
     return result
+
+
+def _ensure_event_bound_direct_chain_candidate(target):
+    if (target or {}).get("inspection_mode") != "event_bound":
+        return
+    candidates = target.setdefault("locator_candidates", [])
+    if any(
+            (item.get("validation") or {}).get("source")
+            == "event_direct_chain"
+            or item.get("reason") == "event direct child chain"
+            for item in candidates
+            if isinstance(item, dict)
+    ):
+        return
+    element = (target or {}).get("element") or {}
+    root_name = (target or {}).get("root_name")
+    steps = []
+    for ancestor in (target or {}).get("ancestors") or ():
+        step = _event_bound_child_step(ancestor)
+        if not step:
+            return
+        steps.append(step)
+    target_step = _event_bound_child_step(element)
+    if not root_name or not steps or not target_step:
+        return
+    candidates.append({
+        "score": 99,
+        "reason": "event direct child chain",
+        "name": _event_bound_candidate_name(element, "by_event_chain"),
+        "locator": {
+            "root": root_name,
+            "by": "xpath",
+            "value": "/".join([*steps, target_step]),
+        },
+        "validation": {
+            "status": "deferred",
+            "count": None,
+            "target_matches": None,
+            "reason": "validate against complete post-capture tree",
+            "source": "event_direct_chain",
+        },
+    })
+
+
+def _promote_same_target_validated_candidates(events, *, sources=None):
+    sources = sources or events
+    validated = {}
+    for event in sources:
+        target = event.get("target") or {}
+        target_key = _target_observation_key(target)
+        if not target_key:
+            continue
+        for candidate in target.get("locator_candidates") or ():
+            if not isinstance(candidate, dict):
+                continue
+            locator = candidate.get("locator") or {}
+            validation = candidate.get("validation") or {}
+            if (
+                    locator.get("by", "child") not in {"child", "xpath"}
+                    or validation.get("status") != "unique"
+                    or validation.get("target_matches") is not True
+            ):
+                continue
+            validated.setdefault(
+                (target_key, _locator_key(locator)),
+                {
+                    **dict(validation),
+                    "source_event_id": event.get("id"),
+                },
+            )
+    if not validated:
+        return
+    for event in events:
+        target = event.get("target") or {}
+        target_key = _target_observation_key(target)
+        if not target_key:
+            continue
+        for candidate in target.get("locator_candidates") or ():
+            if not isinstance(candidate, dict):
+                continue
+            locator = candidate.get("locator") or {}
+            validation = candidate.get("validation") or {}
+            if (
+                    locator.get("by", "child") not in {"child", "xpath"}
+                    or validation.get("status") == "unique"
+                    and validation.get("target_matches") is True
+            ):
+                continue
+            proven = validated.get((target_key, _locator_key(locator)))
+            if proven is not None:
+                candidate["validation"] = dict(proven)
+
+
+def _event_bound_child_step(element):
+    control_type = str((element or {}).get("control_type") or "")
+    if not control_type:
+        return ""
+    for attribute in ("auto_id", "name", "class_name"):
+        value = (element or {}).get(attribute)
+        if value in (None, ""):
+            continue
+        predicate = make_xpath_predicate(attribute, value)
+        if predicate:
+            return f"child::{control_type}[{predicate}]"
+    return ""
+
+
+def _event_bound_candidate_name(element, suffix=""):
+    base = (
+        (element or {}).get("auto_id")
+        or (element or {}).get("name")
+        or (element or {}).get("class_name")
+        or (element or {}).get("control_type")
+        or "element"
+    )
+    text = str(base or "element").strip()
+    text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", text)
+    text = text.strip("_").lower() or "element"
+    return f"{text}_{suffix}" if suffix else text
 
 
 def select_locator_candidate(candidates):
@@ -308,8 +492,9 @@ def _candidate_stability_index(
         if not target_key:
             continue
         targets[target_key] = target.get("element") or {}
-        window_handles[target_key] = (event.get("details") or {}).get(
-            "window_handle"
+        window_handles[target_key] = _event_snapshot_window_handle(
+            event,
+            target,
         )
         for candidate in target.get("locator_candidates") or []:
             locator = candidate.get("locator") or {}
@@ -740,7 +925,7 @@ def _validate_deferred_candidates(events, snapshot_roots):
             continue
         event_snapshot_roots = _snapshot_roots_for_event(
             snapshot_roots,
-            (event.get("details") or {}).get("window_handle"),
+            _event_snapshot_window_handle(event, target),
         )
         if not event_snapshot_roots:
             continue
@@ -967,3 +1152,11 @@ def _snapshot_roots_for_event(snapshot_roots, window_handle):
         for handle, root in snapshot_roots
         if handle not in (None, "") and int(handle) == expected
     ]
+
+
+def _event_snapshot_window_handle(event, target):
+    details_handle = (event.get("details") or {}).get("window_handle")
+    target_handle = (target.get("window") or {}).get("handle")
+    if target.get("inspection_mode") == "event_bound" and details_handle:
+        return details_handle
+    return target_handle or details_handle

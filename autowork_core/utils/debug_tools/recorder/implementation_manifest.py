@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import inspect
 import json
 import re
 from pathlib import Path, PurePosixPath
+
+import yaml
 
 from autowork_core.page import BasePage
 from autowork_core.utils.debug_tools.recorder.ai_capability_registry import (
@@ -14,10 +17,16 @@ from autowork_core.utils.debug_tools.recorder.ai_capability_registry import (
 from autowork_core.utils.debug_tools.recorder.identity import (
     locator_candidate_id as expected_locator_candidate_id,
 )
+from autowork_core.utils.debug_tools.recorder.generation_locator_policy import (
+    top_level_root_requires_locator_fallback,
+)
+from autowork_core.utils.debug_tools.recorder.locator_reuse import (
+    locator_mapping_fingerprint,
+)
 
 
-IMPLEMENTATION_MANIFEST_VERSION = "1.12"
-IMPLEMENTATION_PACKET_VERSION = "1.2"
+IMPLEMENTATION_MANIFEST_VERSION = "1.16"
+IMPLEMENTATION_PACKET_VERSION = "1.5"
 
 
 def compact_implementation_manifest_contract():
@@ -40,6 +49,8 @@ def compact_implementation_manifest_contract():
             "ai_writable": "ai_editable_changes",
             "system_owned": "system_owned_changes",
             "immutable": "read_only_reuse",
+            "protected_locator_keys": "protected_locator_keys",
+            "asset_resolution": "existing snapshot versus planned file/key decisions",
             "protected": "protected_paths",
         },
         "tasks": {
@@ -60,6 +71,10 @@ def compact_implementation_manifest_contract():
                 "authorized exact files under Bdd/data/recorder_pic"
             ),
             "package_markers": "empty_or_docstring_only policy",
+            "asset_resolution": (
+                "Unified file/key ledger for existing, planned, owner route, "
+                "baseline hash, and decision"
+            ),
         },
         "rules": [
             "Prepare derives the Manifest only from validated Plan, Brief, and input snapshot.",
@@ -73,6 +88,8 @@ def compact_implementation_manifest_contract():
             "A top-level Root patch may enrich an existing system-owned mapping only when every existing field already equals the frozen patch; ordinary locator patches remain exact ensure operations.",
             "Text-content read, removal, and assertion locators omit dynamic name/title values while retaining frozen structural identity such as AutoId, control type, and Root; materialization may only remove those two fields from an otherwise identical mapping.",
             "A read-only locator key requires a content-addressed locator/window-root candidate; Page method string references do not prove YAML key existence.",
+            "A reused locator key verified against the current recording is never patched; if its YAML file also receives new keys, the reused key remains fingerprint-protected.",
+            "Existing assets are reconciled through asset_resolution before reuse/write decisions; WindowView locators use their routed View locator_file, not the parent WindowPage root file.",
             "Exact Page method reuse binds the frozen linear call sequence and verifies the Step method call plus its frozen arguments; modify/create remain writable body implementations.",
             "Manifest does not generate implementation bodies or replace Plan-to-Code validation.",
         ],
@@ -88,6 +105,7 @@ def build_implementation_manifest(
         allowed_write_roots,
         protected_write_roots,
         protected_root_files,
+        generation_workspace_projection=None,
     ):
     plan_artifact = plan_artifact if isinstance(plan_artifact, dict) else {}
     plan = plan_artifact.get("plan") or {}
@@ -99,33 +117,51 @@ def build_implementation_manifest(
     )
     baseline = snapshot.get("files") or {}
     errors = []
+    workspace_projection = _workspace_projection_context(
+        generation_workspace_projection,
+        snapshot,
+        errors,
+    )
     files = {}
     methods = {}
     locators = {}
+    protected_locator_keys = {}
+    manifest_issues = []
     steps = []
     owners = plan.get("window_owners") or {}
-    actions = {
-        (str(item.get("step_id") or ""), str(item.get("id") or "")): item
-        for item in brief.get("actions") or ()
-        if item.get("id")
-    }
+    actions = {}
+    action_orders = {}
+    action_counts = {}
+    for item in brief.get("actions") or ():
+        if not isinstance(item, dict) or item.get("role") == "noise":
+            continue
+        step_id = str(item.get("step_id") or "")
+        action_id = str(item.get("id") or "")
+        if not step_id or not action_id:
+            continue
+        action_counts[step_id] = action_counts.get(step_id, 0) + 1
+        actions[(step_id, action_id)] = item
+        action_orders[(step_id, action_id)] = action_counts[step_id]
 
     for owner_id, owner in owners.items():
         owner = owner if isinstance(owner, dict) else {}
         resolution = owner.get("resolution") or {}
         owner_write = resolution.get("strategy") == "create_new"
+        rootless_pos = owner.get("owner_kind") == "rootless_pos"
         _add_file(
             files,
             owner.get("page_object"),
-            "window_page",
+            "rootless_pos_page" if rootless_pos else "window_page",
             write_required=owner_write,
             baseline=baseline,
             errors=errors,
         )
         _add_file(
             files,
-            owner.get("root_locator_file"),
-            "window_locators",
+            owner.get("locator_file") if rootless_pos else owner.get(
+                "root_locator_file"
+            ),
+            "rootless_pos_locators" if rootless_pos else "window_locators",
             write_required=owner_write,
             baseline=baseline,
             errors=errors,
@@ -140,6 +176,10 @@ def build_implementation_manifest(
                 f"view:{view_id}",
                 write_required=owner_write or (
                     bool(view_object) and view_object not in baseline
+                ) or (
+                    bool(view_object)
+                    and view_object in baseline
+                    and bool(view.get("active_locator"))
                 ),
                 baseline=baseline,
                 errors=errors,
@@ -253,6 +293,10 @@ def build_implementation_manifest(
                 "input_binding": _operation_input_binding(operation),
                 "result_binding": operation.get("result_binding"),
                 "target_action_id": operation.get("target_action_id"),
+                "action_order": action_orders.get(
+                    (step_id, str(operation.get("target_action_id") or "")),
+                    order,
+                ),
             })
 
         locator_file = step.get("locator_file")
@@ -281,14 +325,37 @@ def build_implementation_manifest(
                 or locator.get("name")
                 or ""
             )
+            locator_key = str(
+                route.get("root_locator")
+                if str(locator.get("kind") or "") == "top_level"
+                else locator.get("name")
+                or ""
+            )
+            reuse, reuse_error = _frozen_locator_reuse_match(
+                brief,
+                str(routed_locator_file),
+                locator_key,
+                baseline,
+                owner=owner,
+                step_id=step_id,
+                evidence_name=evidence_name,
+                route=route,
+                actions=actions,
+            )
+            if reuse_error:
+                errors.append(reuse_error)
+                continue
             locator_write = bool(
                 (owner.get("resolution") or {}).get("strategy")
                 == "create_new"
                 or str(routed_locator_file) not in baseline
-                or not _frozen_locator_exists(
+                or not (
+                    reuse is not None
+                    or _frozen_locator_exists(
                     brief,
                     str(routed_locator_file),
-                    str(locator.get("name") or ""),
+                    locator_key,
+                    )
                 )
             )
             _add_file(
@@ -299,6 +366,13 @@ def build_implementation_manifest(
                 baseline=baseline,
                 errors=errors,
             )
+            if reuse is not None:
+                _add_protected_locator_key(
+                    protected_locator_keys,
+                    reuse,
+                    route=route,
+                )
+                continue
             patch = _locator_patch(
                 locator,
                 owner,
@@ -308,14 +382,20 @@ def build_implementation_manifest(
                 route.get("action_ids") or [],
                 route.get("operations") or [],
             )
+            issue = _locator_issue(
+                locator,
+                patch,
+                owner,
+                brief,
+                step_id,
+                route.get("action_ids") or [],
+                route.get("operations") or [],
+            )
+            if issue is not None:
+                manifest_issues.append(issue)
             task = {
                 "file": str(routed_locator_file),
-                "key": str(
-                    route.get("root_locator")
-                    if str(locator.get("kind") or "") == "top_level"
-                    else locator.get("name")
-                    or ""
-                ),
+                "key": locator_key,
                 "kind": str(locator.get("kind") or ""),
                 "evidence_name": locator.get("evidence_name"),
                 "window_owner": route.get("owner_id"),
@@ -472,7 +552,11 @@ def build_implementation_manifest(
                 continue
             locators[(task["file"], task["key"])] = task
 
-    package_markers = _package_markers(files, baseline)
+    package_markers = _package_markers(
+        files,
+        baseline,
+        workspace_projection=workspace_projection,
+    )
     for marker in package_markers:
         _add_file(
             files,
@@ -484,6 +568,36 @@ def build_implementation_manifest(
         )
     _finalize_methods(methods, brief, errors)
     file_values = sorted(files.values(), key=lambda item: item["path"])
+    packet = build_implementation_packet({
+        "implementation_manifest_version": IMPLEMENTATION_MANIFEST_VERSION,
+        "implementation_manifest_id": "pending-scaffold-classification",
+        "implementation_manifest_fingerprint": (
+            "pending-scaffold-classification"
+        ),
+        "request_id": str(request_id or ""),
+        "plan_id": str(plan_artifact.get("plan_id") or ""),
+        "plan_fingerprint": str(plan_artifact.get("plan_fingerprint") or ""),
+        "generation_input_snapshot_fingerprint": _fingerprint(snapshot),
+        "allowed_changes": [],
+        "ai_editable_changes": [],
+        "system_owned_changes": [],
+        "read_only_reuse": [],
+        "protected_locator_keys": [],
+        "asset_resolution": {},
+        "window_owners": copy.deepcopy(owners),
+        "files": file_values,
+        "steps": steps,
+        "methods": sorted(
+            methods.values(),
+            key=lambda item: (item["path"], item["symbol"]),
+        ),
+        "locator_patch": sorted(
+            locators.values(),
+            key=lambda item: (item["file"], item["key"]),
+        ),
+        "package_markers": package_markers,
+    }, validate_identity=False)
+    python_scaffolds = _deterministic_python_scaffolds(packet, file_values)
     system_owned_changes = sorted({
         marker["path"]
         for marker in package_markers
@@ -493,7 +607,7 @@ def build_implementation_manifest(
         for item in locators.values()
         if item.get("file") in files
         and files[item["file"]].get("strategy") in {"create", "modify"}
-    })
+    } | set(python_scaffolds))
     allowed_changes = [
         item["path"]
         for item in file_values
@@ -507,6 +621,11 @@ def build_implementation_manifest(
             plan_artifact.get("plan_fingerprint") or ""
         ),
         "generation_input_snapshot_fingerprint": _fingerprint(snapshot),
+        **(
+            {"current_content_projection": workspace_projection}
+            if workspace_projection
+            else {}
+        ),
         "status": "ready" if not errors else "failed",
         "allowed_write_roots": sorted(
             str(item).replace("\\", "/") for item in allowed_write_roots
@@ -531,6 +650,26 @@ def build_implementation_manifest(
             for item in file_values
             if item["strategy"] == "reuse"
         ],
+        "protected_locator_keys": [
+            _public_protected_locator_key(protected_locator_keys[key])
+            for key in sorted(protected_locator_keys)
+        ],
+        "window_owners": copy.deepcopy(owners),
+        "unresolved_issues": sorted(
+            manifest_issues,
+            key=lambda item: (
+                item.get("step_id") or "",
+                item.get("issue_id") or "",
+            ),
+        ),
+        "asset_resolution": _manifest_asset_resolution(
+            file_values,
+            locators,
+            protected_locator_keys,
+            allowed_changes,
+            system_owned_changes,
+            workspace_projection=workspace_projection,
+        ),
         "files": file_values,
         "steps": steps,
         "methods": sorted(
@@ -542,6 +681,10 @@ def build_implementation_manifest(
             key=lambda item: (item["file"], item["key"]),
         ),
         "package_markers": package_markers,
+        "python_scaffolds": [
+            python_scaffolds[path]
+            for path in sorted(python_scaffolds)
+        ],
         "errors": errors,
     }
     fingerprint = implementation_manifest_fingerprint(manifest)
@@ -552,9 +695,9 @@ def build_implementation_manifest(
     return manifest
 
 
-def build_implementation_packet(manifest):
+def build_implementation_packet(manifest, *, validate_identity=True):
     """Project deterministic implementation syntax without adding facts."""
-    if not implementation_manifest_identity_is_valid(manifest):
+    if validate_identity and not implementation_manifest_identity_is_valid(manifest):
         raise ValueError("Implementation Packet要求有效Manifest")
     files = {
         str(item.get("path") or ""): item
@@ -574,6 +717,7 @@ def build_implementation_packet(manifest):
             )
             operations.append({
                 "order": operation.get("order"),
+                "action_order": operation.get("action_order"),
                 "operation": operation.get("operation"),
                 "receiver": (
                     operation_page.get("receiver")
@@ -600,6 +744,7 @@ def build_implementation_packet(manifest):
                 "implementation_method": operation.get(
                     "implementation_method"
                 ),
+                "target_action_id": operation.get("target_action_id"),
             })
         definition = step.get("step_definition") or {}
         steps.append({
@@ -609,6 +754,11 @@ def build_implementation_packet(manifest):
             "python_decorator": definition.get("python_decorator"),
             "function_parameters": definition.get("function_parameters") or [],
             "page": page,
+            "page_bindings": _packet_step_page_bindings(
+                page,
+                operations,
+                pages,
+            ),
             "operations": operations,
             "unresolved_issues": list(
                 step.get("unresolved_issues") or ()
@@ -625,8 +775,15 @@ def build_implementation_packet(manifest):
                             "issue_id": issue.get("issue_id"),
                             "step_id": issue.get("step_id"),
                             "issue_type": issue.get("issue_type"),
+                            "action_order": issue.get("action_order"),
                         }
-                        for issue in step.get("unresolved_issues") or ()
+                        for issue in sorted(
+                            step.get("unresolved_issues") or (),
+                            key=lambda item: (
+                                int(item.get("action_order") or 0),
+                                str(item.get("issue_id") or ""),
+                            ),
+                        )
                     ],
                 }
                 if step.get("unresolved_issues")
@@ -647,6 +804,8 @@ def build_implementation_packet(manifest):
         "system_owned_changes": list(
             manifest.get("system_owned_changes") or ()
         ),
+        "read_only_reuse": list(manifest.get("read_only_reuse") or ()),
+        "asset_resolution": dict(manifest.get("asset_resolution") or {}),
         "pages": sorted(pages.values(), key=lambda item: item["path"]),
         "steps": steps,
         "methods": list(manifest.get("methods") or ()),
@@ -656,6 +815,79 @@ def build_implementation_packet(manifest):
             "beyond the bound Manifest."
         ),
     }
+
+
+def _deterministic_python_scaffolds(packet, files):
+    file_records = {
+        str(item.get("path") or ""): item
+        for item in files
+        if isinstance(item, dict) and item.get("path")
+    }
+    pages = {
+        str(item.get("path") or ""): item
+        for item in packet.get("pages") or ()
+        if isinstance(item, dict) and item.get("path")
+    }
+    result = {}
+    for path, page in pages.items():
+        if (file_records.get(path) or {}).get("strategy") not in {
+            "create",
+            "modify",
+        }:
+            continue
+        if any(
+            str(method.get("path") or "") == path
+            for method in packet.get("methods") or ()
+        ):
+            continue
+        result[path] = {
+            "kind": (
+                "window_view" if page.get("base_class") == "WindowView"
+                else "window_page"
+            ),
+            "path": path,
+            "page": copy.deepcopy(page),
+        }
+    steps_by_path = {}
+    for step in packet.get("steps") or ():
+        if not isinstance(step, dict) or not step.get("path"):
+            continue
+        steps_by_path.setdefault(str(step["path"]), []).append(step)
+    for path, file_steps in steps_by_path.items():
+        if (file_records.get(path) or {}).get("strategy") not in {
+            "create",
+            "modify",
+        }:
+            continue
+        if not all(_step_is_deterministic(step) for step in file_steps):
+            continue
+        result[path] = {
+            "kind": "step_inline",
+            "path": path,
+            "steps": copy.deepcopy(file_steps),
+        }
+    return result
+
+
+def _step_is_deterministic(step):
+    if step.get("unresolved_issues") and not step.get("issue_template"):
+        return False
+    for operation in step.get("operations") or ():
+        if operation.get("implementation_location") != "step_inline_base_api":
+            return False
+        source = str(operation.get("value_source") or "")
+        if source.startswith(("examples.", "table.", "runtime.", "context.")):
+            return False
+        capability = capability_by_name(str(operation.get("operation") or ""))
+        if capability is None or not capability.plan_enabled:
+            return False
+        if capability.ast_match_profile in {
+            "ocr_assertion",
+            "runtime_value_producer",
+            "collection_assertion",
+        }:
+            return False
+    return True
 
 
 def _packet_receiver_expression(step_page, operation_page, receiver):
@@ -668,6 +900,33 @@ def _packet_receiver_expression(step_page, operation_page, receiver):
         if parent:
             return f"{parent}.{operation_page.get('receiver')}"
     return operation_page.get("receiver")
+
+
+def _packet_step_page_bindings(step_page, operations, pages):
+    result = []
+    seen = set()
+    candidates = [step_page] + [
+        operation.get("page")
+        for operation in operations
+        if isinstance(operation, dict)
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        page = candidate
+        if candidate.get("base_class") == "WindowView":
+            page = pages.get(str(candidate.get("parent_path") or ""))
+        if not isinstance(page, dict) or page.get("base_class") not in {
+            "WindowPage",
+            "BasePage",
+        }:
+            continue
+        path = str(page.get("path") or "")
+        if not path or path in seen:
+            continue
+        result.append(copy.deepcopy(page))
+        seen.add(path)
+    return result
 
 
 def _packet_module_name(path):
@@ -685,7 +944,10 @@ def _packet_page_class_name(path):
 
 def _packet_view_class_name(path):
     name = Path(str(path or "")).stem
-    return "".join(part.capitalize() for part in name.split("_")) + "View"
+    parts = [part for part in name.split("_") if part]
+    if parts and parts[-1].casefold() == "view":
+        parts.pop()
+    return "".join(part.capitalize() for part in parts) + "View"
 
 
 def _packet_receiver_name(path):
@@ -733,11 +995,18 @@ def _packet_pages(manifest, files):
         for item in manifest.get("locator_patch") or ()
         if item.get("kind") == "top_level"
     }
+    rootless_pages = {
+        str(owner.get("page_object") or ""): owner
+        for owner in (manifest.get("window_owners") or {}).values()
+        if isinstance(owner, dict)
+        and owner.get("owner_kind") == "rootless_pos"
+        and owner.get("page_object")
+    }
     result = {}
     for page_path in sorted(path for path in page_paths if path):
         view = view_files.get(page_path)
         if view is not None:
-            locator_file = view.get("locator_file")
+            locator_path = view.get("locator_file")
             parent_path = _packet_parent_page_path(page_path)
             result[page_path] = {
                 "path": page_path,
@@ -747,21 +1016,38 @@ def _packet_pages(manifest, files):
                 "base_class": "WindowView",
                 "parent_path": parent_path,
                 "parent_receiver": _packet_receiver_name(parent_path),
-                "locator_file": locator_file,
-                "active_locator": top_level_patches.get(locator_file),
-                "root_locator": top_level_patches.get(locator_file),
+                "locator_file": _packet_locator_resource(locator_path),
+                "active_locator": _packet_view_active_locator(
+                    manifest,
+                    view.get("view_id"),
+                ),
+                "root_locator": None,
                 "strategy": (files.get(page_path) or {}).get("strategy"),
             }
             continue
-        locator_file = _packet_locator_file_for_page(page_path)
+        rootless_owner = rootless_pages.get(page_path)
+        if rootless_owner is not None:
+            result[page_path] = {
+                "path": page_path,
+                "module": _packet_module_name(page_path),
+                "class_name": _packet_page_class_name(page_path),
+                "receiver": _packet_receiver_name(page_path),
+                "base_class": "BasePage",
+                "locator_file": _packet_locator_resource(
+                    rootless_owner.get("locator_file")
+                ),
+                "strategy": (files.get(page_path) or {}).get("strategy"),
+            }
+            continue
+        locator_path = _packet_locator_file_for_page(page_path)
         result[page_path] = {
             "path": page_path,
             "module": _packet_module_name(page_path),
             "class_name": _packet_page_class_name(page_path),
             "receiver": _packet_receiver_name(page_path),
             "base_class": "WindowPage",
-            "root_locator_file": locator_file,
-            "root_locator": top_level_patches.get(locator_file),
+            "root_locator_file": _packet_locator_resource(locator_path),
+            "root_locator": top_level_patches.get(locator_path),
             "strategy": (files.get(page_path) or {}).get("strategy"),
         }
     for page in result.values():
@@ -816,9 +1102,31 @@ def _packet_view_files(files, manifest):
     return {path: {"view_id": Path(path).stem} for path in view_paths if path}
 
 
+def _packet_view_active_locator(manifest, view_id):
+    for step in manifest.get("steps") or ():
+        for operation in step.get("operations") or ():
+            receiver = operation.get("receiver") or {}
+            if str(receiver.get("view_owner") or "") != str(view_id or ""):
+                continue
+            reference = str(
+                (operation.get("target_binding") or {}).get("reference") or ""
+            )
+            if reference.startswith("$loc:") and len(reference) > 5:
+                return reference[5:]
+    raise ValueError(f"WindowView缺少激活locator: {view_id}")
+
+
 def _packet_locator_file_for_page(page_path):
     package = str(page_path).replace("\\", "/").split("/")[-2]
     return f"Bdd/locators/{package}/window.yaml"
+
+
+def _packet_locator_resource(path):
+    value = str(path or "").replace("\\", "/")
+    prefix = "Bdd/locators/"
+    if not value.startswith(prefix) or value == prefix:
+        raise ValueError(f"Locator resource path is invalid: {value!r}")
+    return value[len(prefix):]
 
 
 def _pic_operation_target(step, action_id):
@@ -857,10 +1165,39 @@ def implementation_manifest_identity_is_valid(manifest):
         bool(manifest.get("request_id")),
         bool(manifest.get("plan_id")),
         bool(manifest.get("plan_fingerprint")),
+        _asset_resolution_is_valid(manifest.get("asset_resolution")),
         manifest.get("implementation_manifest_fingerprint") == fingerprint,
         manifest.get("implementation_manifest_id")
         == "implementation-manifest-" + fingerprint[:16],
     ))
+
+
+def _asset_resolution_is_valid(value):
+    if not isinstance(value, dict):
+        return False
+    files = value.get("files")
+    locators = value.get("locators")
+    if any((
+        value.get("asset_resolution_version") != "1.0",
+        not isinstance(files, list),
+        not isinstance(locators, list),
+    )):
+        return False
+    for item in files:
+        if not isinstance(item, dict) or not item.get("path"):
+            return False
+        if not item.get("planned") or not item.get("decision"):
+            return False
+        if not isinstance(item.get("existing"), bool):
+            return False
+    for item in locators:
+        if not isinstance(item, dict) or not item.get("path") or not item.get("key"):
+            return False
+        if not item.get("planned") or not item.get("decision"):
+            return False
+        if not isinstance(item.get("existing"), bool):
+            return False
+    return True
 
 
 def implementation_manifest_matches_transaction(
@@ -873,6 +1210,7 @@ def implementation_manifest_matches_transaction(
         allowed_write_roots,
         protected_write_roots,
         protected_root_files,
+        generation_workspace_projection=None,
     ):
     if not implementation_manifest_identity_is_valid(manifest):
         return False
@@ -884,8 +1222,165 @@ def implementation_manifest_matches_transaction(
         allowed_write_roots=allowed_write_roots,
         protected_write_roots=protected_write_roots,
         protected_root_files=protected_root_files,
+        generation_workspace_projection=generation_workspace_projection,
     )
     return manifest == expected
+
+
+def _workspace_projection_context(projection, snapshot, errors):
+    if not isinstance(projection, dict) or not projection:
+        return {}
+    summary = projection.get("summary") or {}
+    value = {
+        "generation_workspace_projection_version": projection.get(
+            "generation_workspace_projection_version"
+        ),
+        "projection_id": projection.get("projection_id"),
+        "projection_fingerprint": projection.get("projection_fingerprint"),
+        "generation_input_snapshot_fingerprint": projection.get(
+            "generation_input_snapshot_fingerprint"
+        ),
+        "summary": {
+            "file_count": summary.get("file_count"),
+            "package_marker_count": summary.get("package_marker_count"),
+            "missing_package_marker_count": summary.get(
+                "missing_package_marker_count"
+            ),
+            "generated_present_count": summary.get("generated_present_count"),
+            "generated_missing_count": summary.get("generated_missing_count"),
+            "generated_unchanged_count": summary.get("generated_unchanged_count"),
+            "generated_unknown_count": summary.get("generated_unknown_count"),
+            "user_modified_count": summary.get("user_modified_count"),
+        },
+        "required_structure_files": {
+            "package_markers": list(
+                ((projection.get("required_structure_files") or {}).get(
+                    "package_markers"
+                ) or [])
+            ),
+        },
+        "source": "generation_workspace_projection",
+    }
+    if value["generation_input_snapshot_fingerprint"] != _fingerprint(snapshot):
+        errors.append(
+            "Implementation Manifest current content projection与input snapshot不一致"
+        )
+    return value
+
+
+def _manifest_asset_resolution(
+        file_values,
+        locators,
+        protected_locator_keys,
+        allowed_changes,
+        system_owned_changes,
+    *,
+    workspace_projection=None,
+    ):
+    files = []
+    allowed = set(allowed_changes or ())
+    system_owned = set(system_owned_changes or ())
+    for item in sorted(file_values or (), key=lambda value: value["path"]):
+        path = str(item.get("path") or "")
+        strategy = str(item.get("strategy") or "")
+        files.append({
+            "path": path,
+            "roles": list(item.get("roles") or ()),
+            "existing": bool(item.get("baseline_sha256")),
+            "planned": strategy,
+            "baseline_sha256": item.get("baseline_sha256"),
+            "owner": _asset_owner_label(item.get("roles") or ()),
+            "decision": _asset_file_decision(path, strategy, allowed, system_owned),
+        })
+    locator_entries = {}
+    for item in sorted(
+            locators.values(),
+            key=lambda value: (value.get("file"), value.get("key")),
+    ):
+        path = str(item.get("file") or "")
+        key = str(item.get("key") or "")
+        locator_entries[(path, key)] = {
+            "path": path,
+            "key": key,
+            "owner": _locator_owner_label(item),
+            "existing": False,
+            "planned": "ensure",
+            "decision": "write_planned_locator",
+        }
+    for record in sorted(
+            protected_locator_keys.values(),
+            key=lambda value: (value.get("file"), value.get("key")),
+    ):
+        path = str(record.get("file") or "")
+        key = str(record.get("key") or "")
+        entry = locator_entries.setdefault((path, key), {
+            "path": path,
+            "key": key,
+            "owner": str(record.get("_owner") or "verified_locator_reuse"),
+        })
+        entry.update({
+            "path": str(record.get("file") or ""),
+            "key": str(record.get("key") or ""),
+            "existing": True,
+            "planned": "protect",
+            "baseline_sha256": record.get("locator_sha256"),
+            "locator_fingerprint": record.get("locator_fingerprint"),
+            "decision": "protect_verified_reuse",
+        })
+    return {
+        "asset_resolution_version": "1.0",
+        **(
+            {
+                "source": "generation_workspace_projection",
+                "projection_fingerprint": workspace_projection.get(
+                    "projection_fingerprint"
+                ),
+            }
+            if workspace_projection
+            else {}
+        ),
+        "files": files,
+        "locators": [
+            locator_entries[key]
+            for key in sorted(locator_entries)
+        ],
+    }
+
+
+def _asset_file_decision(path, strategy, allowed, system_owned):
+    if strategy == "reuse":
+        return "reuse_read_only"
+    if path in system_owned:
+        return f"system_{strategy}"
+    if path in allowed:
+        return f"ai_{strategy}"
+    return strategy or "unknown"
+
+
+def _asset_owner_label(roles):
+    roles = [str(role or "") for role in roles or ()]
+    view_roles = [role for role in roles if role.startswith("view")]
+    if view_roles:
+        return "WindowView"
+    if any(role.startswith("window") for role in roles):
+        return "WindowPage"
+    if any(role.startswith("step") for role in roles):
+        return "Step"
+    if any(role.startswith("data") for role in roles):
+        return "Data"
+    if any(role.startswith("locators") for role in roles):
+        return "Locator"
+    return "unknown"
+
+
+def _locator_owner_label(item):
+    view_owner = str(item.get("view_owner") or "")
+    window_owner = str(item.get("window_owner") or "")
+    if view_owner:
+        return f"WindowView:{view_owner}"
+    if window_owner:
+        return f"WindowPage:{window_owner}"
+    return "unknown"
 
 
 def _add_file(
@@ -1124,6 +1619,153 @@ def _frozen_locator_exists(brief, path, name):
     )
 
 
+def _frozen_locator_reuse_match(
+        brief,
+        path,
+        key,
+        baseline,
+        *,
+        owner,
+        step_id,
+        evidence_name,
+        route,
+        actions,
+    ):
+    matches = [
+        item
+        for item in ((brief.get("semantics") or {}).get(
+            "locator_reuse_matches"
+        ) or ())
+        if isinstance(item, dict)
+        and str(item.get("locator_file") or "") == str(path or "")
+        and str(item.get("locator_key") or "") == str(key or "")
+    ]
+    if not matches:
+        return None, None
+    action_ids = sorted({
+        str(item)
+        for item in (route or {}).get("action_ids") or ()
+        if item
+    })
+    if not action_ids:
+        return None, (
+            "Implementation Manifest Locator复用匹配缺少当前Action绑定: "
+            f"{path}:{key}"
+        )
+    scoped_matches = [
+        item for item in matches
+        if str(item.get("step_id") or "") == str(step_id or "")
+        and str(item.get("action_id") or "") in action_ids
+    ]
+    matches_by_action = {}
+    for match in scoped_matches:
+        matches_by_action.setdefault(
+            str(match.get("action_id") or ""),
+            [],
+        ).append(match)
+    if any(len(matches_by_action.get(action_id) or ()) != 1
+           for action_id in action_ids):
+        return None, (
+            "Implementation Manifest Locator复用匹配未唯一绑定当前Action: "
+            f"{path}:{key}"
+        )
+    owner_resolution = (owner or {}).get("resolution") or {}
+    expected_owner_id = str(owner_resolution.get("candidate_id") or "")
+    expected_owner_file = str(
+        (route or {}).get("locator_file")
+        or owner.get("root_locator_file")
+        or ""
+    )
+    for action_id in action_ids:
+        match = matches_by_action[action_id][0]
+        action = (actions or {}).get((str(step_id or ""), action_id)) or {}
+        target = action.get("target") or {}
+        expected_sha256 = str(match.get("locator_sha256") or "")
+        expected_fingerprint = str(match.get("locator_fingerprint") or "")
+        expected_target_fingerprint = str(
+            target.get("target_fingerprint") or ""
+        )
+        expected_root_name = str(target.get("root_name") or "")
+        proof = match.get("snapshot_proof") or {}
+        if any((
+                not action,
+                match.get("status") != "unique_same_target",
+                str(match.get("evidence_name") or "")
+                != str(evidence_name or ""),
+                str((target or {}).get("locator_name") or "")
+                != str(evidence_name or ""),
+                not expected_sha256,
+                not expected_fingerprint,
+                not expected_target_fingerprint,
+                not expected_root_name,
+                str(match.get("target_fingerprint") or "")
+                != expected_target_fingerprint,
+                str(match.get("root_name") or "") != expected_root_name,
+                (baseline.get(path) or {}).get("sha256") != expected_sha256,
+                str(path or "") != expected_owner_file,
+                owner_resolution.get("strategy") != "reuse_existing",
+                expected_owner_id != str(match.get("owner_candidate_id") or ""),
+                not _locator_reuse_proof_is_valid(proof),
+        )):
+            return None, (
+                "Implementation Manifest Locator复用匹配与当前Action、"
+                f"证据或WindowPage不一致: {path}:{key}"
+            )
+    return matches_by_action[action_ids[0]][0], None
+
+
+def _locator_reuse_proof_is_valid(proof):
+    proof = proof if isinstance(proof, dict) else {}
+    if proof.get("source") == "complete_tree_snapshot":
+        return proof.get("status") in {
+            "single_snapshot_unique",
+            "cross_snapshot_unique",
+        }
+    if proof.get("source") == "recorded_locator_identity":
+        return bool(
+            proof.get("status") == "recorded_unique_locator_match"
+            and proof.get("recorded_locator_validation") == "unique_target_match"
+            and proof.get("recorded_locator_strategy") == "stable_auto_id"
+        )
+    return False
+
+
+def _add_protected_locator_key(records, match, *, route=None):
+    route = route or {}
+    record = {
+        "file": str(match.get("locator_file") or ""),
+        "key": str(match.get("locator_key") or ""),
+        "locator_sha256": str(match.get("locator_sha256") or ""),
+        "locator_fingerprint": str(
+            match.get("locator_fingerprint") or ""
+        ),
+        "_owner": _locator_owner_label({
+            "window_owner": route.get("owner_id"),
+            "view_owner": route.get("view_owner"),
+        }),
+    }
+    identity = (record["file"], record["key"])
+    existing = records.get(identity)
+    if existing is not None and existing != record:
+        raise ValueError(
+            "Implementation Manifest同一Locator key保护记录冲突: "
+            f"{record['file']}:{record['key']}"
+        )
+    records[identity] = record
+
+
+def _public_protected_locator_key(record):
+    return {
+        key: record.get(key)
+        for key in (
+            "file",
+            "key",
+            "locator_sha256",
+            "locator_fingerprint",
+        )
+    }
+
+
 def _operation_input_binding(operation):
     value = _required_input(operation)
     if value is None:
@@ -1317,12 +1959,11 @@ def _locator_route_value(owner_id, owner, view_owner, operations):
         "locator_file": (
             view.get("locator_file")
             if view_owner
-            else (owner or {}).get("root_locator_file")
+            else (owner or {}).get("locator_file")
+            or (owner or {}).get("root_locator_file")
         ),
         "root_locator": (
-            view.get("active_locator")
-            if view_owner
-            else (owner or {}).get("root_locator")
+            (owner or {}).get("root_locator")
         ),
         "operations": list(operations),
         "action_ids": [
@@ -1396,9 +2037,25 @@ def _locator_patch(
             )
         candidate = candidates[0]
         validation = candidate.get("validation") or {}
-        if any((
+        candidate_locator = candidate.get("locator") or {}
+        locator_kind = str(candidate_locator.get("by") or "child")
+        if locator_kind == "pos":
+            if any((
+                candidate_id != expected_locator_candidate_id(
+                    candidate_locator,
+                    candidate.get("reason"),
+                ),
+                validation.get("status") not in {"fallback", "unique"},
+                validation.get("target_matches") is not True,
+            )):
+                raise ValueError(
+                    f"Implementation Manifest POS locator candidate未验证: "
+                    f"{candidate_id}"
+                )
+            patch = dict(candidate_locator)
+        elif any((
             candidate_id != expected_locator_candidate_id(
-                candidate.get("locator") or {},
+                candidate_locator,
                 candidate.get("reason"),
             ),
             validation.get("status") != "unique",
@@ -1408,7 +2065,8 @@ def _locator_patch(
                 f"Implementation Manifest locator candidate未验证: "
                 f"{candidate_id}"
             )
-        patch = dict(candidate.get("locator") or {})
+        else:
+            patch = dict(candidate_locator)
     else:
         patch = dict(target.get("locator") or {})
     if not patch:
@@ -1424,18 +2082,76 @@ def _locator_patch(
     if _locator_content_is_observed(target, routed_operations):
         patch.pop("name", None)
         patch.pop("title", None)
-    route_roots = {
-        str(item.get("view_owner") or "")
-        for item in routed_operations or ()
-        if item.get("view_owner")
-    }
-    if len(route_roots) == 1:
-        view = (owner.get("views") or {}).get(next(iter(route_roots))) or {}
-        if view.get("active_locator") and "root" not in patch:
-            patch["root"] = view["active_locator"]
-    elif owner.get("root_locator") and "root" not in patch:
+    if (
+            owner.get("root_locator")
+            and "root" not in patch
+            and str(patch.get("by") or "child") in {"child", "xpath", "default"}
+    ):
         patch["root"] = owner["root_locator"]
     return patch
+
+
+def _locator_issue(
+        locator,
+        patch,
+        owner,
+        brief,
+        step_id,
+        routed_action_ids,
+        routed_operations,
+    ):
+    if str((patch or {}).get("by") or "") != "pos":
+        return None
+    root_name = str(owner.get("evidence_root") or owner.get("root_locator") or "")
+    if not _root_without_locator_criteria(brief, root_name):
+        return None
+    action_ids = [str(item) for item in routed_action_ids or () if item]
+    locator_name = str(locator.get("name") or locator.get("evidence_name") or "")
+    issue_id = "generation-issue-" + hashlib.sha256(
+        json.dumps(
+            {
+                "code": "top_level_root_without_criteria_pos_fallback",
+                "step_id": step_id,
+                "action_ids": action_ids,
+                "root_name": root_name,
+                "locator_name": locator_name,
+                "coords": patch.get("coords"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "issue_id": issue_id,
+        "issue_type": "top_level_root_without_criteria_pos_fallback",
+        "issue_domain": "technical_evidence_gap",
+        "severity": "action_required",
+        "reuse_policy": "not_eligible_for_strong_reuse",
+        "step_id": str(step_id or ""),
+        "action_ids": action_ids,
+        "locator_name": locator_name,
+        "root_name": root_name,
+        "locator_strategy": "pos_fallback",
+        "coords": list(patch.get("coords") or ()),
+        "reason": (
+            "Top-level root has no stable locator criteria; "
+            "using recorded POS coordinates for this action."
+        ),
+    }
+
+
+def _root_without_locator_criteria(brief, root_name):
+    window = next((
+        item
+        for item in ((brief or {}).get("window_ownership") or {}).get(
+            "windows"
+        ) or ()
+        if str(item.get("root_name") or "") == str(root_name or "")
+    ), None)
+    if window is None:
+        return False
+    return top_level_root_requires_locator_fallback(window)
 
 
 def _window_root_patch(window):
@@ -1496,7 +2212,8 @@ def _has_text_content_operation(operations):
     )
 
 
-def _package_markers(files, baseline):
+def _package_markers(files, baseline, *, workspace_projection=None):
+    projection_markers = _projection_package_markers(workspace_projection)
     markers = {}
     for record in files.values():
         path = PurePosixPath(record["path"])
@@ -1508,12 +2225,37 @@ def _package_markers(files, baseline):
         ):
             continue
         marker = (path.parent / "__init__.py").as_posix()
+        projected = projection_markers.get(marker) or {}
+        status = projected.get("status")
         markers[marker] = {
             "path": marker,
-            "strategy": "reuse" if marker in baseline else "create",
+            "strategy": (
+                "reuse"
+                if status == "present"
+                else "create"
+                if status == "missing"
+                else "reuse"
+                if marker in baseline
+                else "create"
+            ),
             "policy": "empty_or_docstring_only",
         }
     return [markers[key] for key in sorted(markers)]
+
+
+def _projection_package_markers(workspace_projection):
+    if not isinstance(workspace_projection, dict):
+        return {}
+    markers = (
+        (workspace_projection.get("required_structure_files") or {}).get(
+            "package_markers"
+        ) or []
+    )
+    return {
+        str(item.get("path") or ""): item
+        for item in markers
+        if isinstance(item, dict) and item.get("path")
+    }
 
 
 def _step_text(brief, step_id):

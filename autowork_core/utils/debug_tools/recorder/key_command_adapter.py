@@ -28,6 +28,11 @@ _KEY_ALIASES = {
     "page up": "PGUP",
     "page down": "PGDN",
 }
+_NUMPAD_DIGITS = {
+    f"numpad{digit}": digit
+    for digit in "0123456789"
+}
+_SYSTEM_KEYBOARD_NOISE_KEYS = frozenset({"numlock", "f15"})
 _LITERAL_ESCAPES = frozenset("+^%~(){}")
 
 
@@ -43,6 +48,8 @@ def encode_pywinauto_command(command):
         normalized = name.casefold()
         if not name:
             raise ValueError("键盘命令缺少key name")
+        if _is_system_keyboard_noise_event(event):
+            continue
         if event.get("is_modifier"):
             continue
         modifiers = {
@@ -73,8 +80,21 @@ def encode_pywinauto_command(command):
     return result
 
 
+def _is_system_keyboard_noise_event(event):
+    normalized = str((event or {}).get("name") or "").casefold()
+    if normalized not in _SYSTEM_KEYBOARD_NOISE_KEYS:
+        return False
+    modifiers = {
+        str(item).casefold()
+        for item in (event or {}).get("modifiers") or ()
+    }
+    return not modifiers
+
+
 def _encode_key_name(name):
     normalized = str(name).casefold()
+    if normalized in _NUMPAD_DIGITS:
+        return _NUMPAD_DIGITS[normalized]
     code = _KEY_ALIASES.get(normalized, str(name).upper())
     if code in CODES:
         return "{" + code + "}"

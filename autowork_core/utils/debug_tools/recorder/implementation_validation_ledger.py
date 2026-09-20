@@ -97,10 +97,16 @@ def validation_ledger_fingerprint(ledger):
     })
 
 
-def snapshot_ai_editable_files(project_root, manifest):
+def snapshot_implementation_files(project_root, manifest):
     project_root = Path(project_root).resolve()
     records = []
-    for relative in sorted(manifest.get("ai_editable_changes") or ()):
+    paths = {
+        str(relative)
+        for key in ("ai_editable_changes", "system_owned_changes")
+        for relative in manifest.get(key) or ()
+        if str(relative)
+    }
+    for relative in sorted(paths):
         path = (project_root / relative).resolve()
         path.relative_to(project_root)
         if path.is_file() and not path.is_symlink():
@@ -119,6 +125,10 @@ def snapshot_ai_editable_files(project_root, manifest):
                 "size": 0,
             })
     return records
+
+
+def snapshot_ai_editable_files(project_root, manifest):
+    return snapshot_implementation_files(project_root, manifest)
 
 
 def _validate_ledger(ledger, *, transaction_id, manifest_fingerprint):

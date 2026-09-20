@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import secrets
@@ -9,7 +10,8 @@ from pathlib import Path
 from autowork_core.utils.debug_tools.recorder.writer import write_json_atomic
 
 
-WORKFLOW_STATE_VERSION = "5.0"
+WORKFLOW_STATE_VERSION = "5.1"
+SERVICE_LEVEL_TIMING_VERSION = "1.1"
 JOB_LIFECYCLE_TIMING_LEDGER_VERSION = "1.0"
 JOB_LIFECYCLE_TIMING_STATUSES = {
     "active",
@@ -120,6 +122,48 @@ def unavailable_generation_job_lifecycle_timing():
     }
 
 
+def record_generation_job_interaction(
+        session_dir,
+        request_id,
+        *,
+        event,
+        status,
+        next_action,
+        job_id,
+        job_fingerprint,
+        claim_id,
+        expected_epoch,
+        expected_phase="design",
+        details=None,
+    ):
+    state = load_workflow_state(session_dir, request_id)
+    _assert_job_cas(
+        state,
+        job_id=job_id,
+        job_fingerprint=job_fingerprint,
+        expected_epoch=expected_epoch,
+        claim_id=claim_id,
+        expected_phase=expected_phase,
+    )
+    execution = dict(state.get("job_execution") or {})
+    observed_at = datetime.now().isoformat(timespec="milliseconds")
+    timing = _normalized_job_interaction_timing(execution)
+    timing["events"].append({
+        "event": str(event),
+        "at": observed_at,
+        "phase": str(execution.get("phase") or expected_phase),
+        "status": str(status or state.get("status") or ""),
+        "next_action": str(next_action or state.get("next_action") or ""),
+        "epoch": int(execution.get("epoch") or expected_epoch),
+        "details": copy.deepcopy(details or {}),
+    })
+    execution["interaction_timing"] = timing
+    state["job_execution"] = execution
+    state["updated_at"] = observed_at
+    write_workflow_state(session_dir, state)
+    return state
+
+
 def project_generation_job_lifecycle_timing(
         execution,
         *,
@@ -204,6 +248,80 @@ def generation_job_lifecycle_timing_is_valid(value):
     return not (
         value.get("status") in {"completed", "failed", "unavailable"}
         and active is not None
+    )
+
+
+def generation_service_level_timing_is_valid(value):
+    if not isinstance(value, dict) or set(value) != {
+        "service_level_timing_version",
+        "scope",
+        "target_seconds",
+        "command_sent_at",
+        "agent_started_at",
+        "timing_source",
+        "coverage",
+    }:
+        return False
+    if any((
+        value.get("service_level_timing_version")
+        != SERVICE_LEVEL_TIMING_VERSION,
+        value.get("scope") != "command_to_static_terminal",
+        not isinstance(value.get("target_seconds"), int),
+        isinstance(value.get("target_seconds"), bool),
+        value.get("target_seconds", 0) <= 0,
+        not _generation_timestamp_is_valid(value.get("agent_started_at")),
+    )):
+        return False
+    command_sent_at = value.get("command_sent_at")
+    if value.get("coverage") == "complete":
+        return bool(
+            value.get("timing_source") in {
+                "host_command_metadata",
+                "workbench_generation_command",
+                "host_user_prompt_hook",
+            }
+            and _generation_timestamp_is_valid(command_sent_at)
+            and _generation_timestamp_not_after(
+                command_sent_at,
+                value.get("agent_started_at"),
+            )
+        )
+    return bool(
+        value.get("coverage") == "incomplete"
+        and value.get("timing_source")
+        == "missing_host_command_timestamp"
+        and command_sent_at is None
+    )
+
+
+def _normalized_job_interaction_timing(execution):
+    value = (execution or {}).get("interaction_timing") or {}
+    events = [
+        copy.deepcopy(item)
+        for item in value.get("events") or []
+        if _job_interaction_event_is_valid(item)
+    ]
+    return {
+        "interaction_timing_version": "1.0",
+        "source": "workflow_state",
+        "events": events,
+    }
+
+
+def _job_interaction_event_is_valid(value):
+    return bool(
+        isinstance(value, dict)
+        and isinstance(value.get("event"), str)
+        and value.get("event")
+        and isinstance(value.get("at"), str)
+        and value.get("at")
+        and isinstance(value.get("phase"), str)
+        and value.get("phase")
+        and isinstance(value.get("status"), str)
+        and isinstance(value.get("next_action"), str)
+        and isinstance(value.get("epoch"), int)
+        and not isinstance(value.get("epoch"), bool)
+        and isinstance(value.get("details", {}), dict)
     )
 
 
@@ -395,6 +513,7 @@ def publish_generation_job(
         pointer,
         *,
         expected_epoch=0,
+    admission_snapshot=None,
     ):
     state = load_workflow_state(session_dir, request_id)
     if not state:
@@ -415,6 +534,7 @@ def publish_generation_job(
         "status": "ready",
         "next_action": "start_generation_job",
         "updated_at": published_at,
+        **_generation_admission_snapshot_fields(admission_snapshot),
         "current_job": dict(pointer),
         "job_execution": {
             "phase": "ready",
@@ -448,13 +568,21 @@ def replace_generation_job(
         expected_job_pointer,
         expected_epoch,
     retire_reason="new_generation_job",
+    allow_active=False,
+    admission_snapshot=None,
     ):
     state = load_workflow_state(session_dir, request_id)
     execution = state.get("job_execution") or {}
+    active_phase = execution.get("phase") in {
+        "design",
+        "implementation",
+        "runtime",
+        "oracle",
+    }
     if any((
         state.get("workflow_state_version") != WORKFLOW_STATE_VERSION,
-        state.get("status") == "running",
-        execution.get("phase") in {"design", "implementation", "runtime", "oracle"},
+        state.get("status") == "running" and not allow_active,
+        active_phase and state.get("status") != "failed" and not allow_active,
         execution.get("epoch") != expected_epoch,
         state.get("current_job") != expected_job_pointer,
     )):
@@ -475,6 +603,7 @@ def replace_generation_job(
         "status": "ready",
         "next_action": "start_generation_job",
         "updated_at": replaced_at,
+        **_generation_admission_snapshot_fields(admission_snapshot),
         "current_job": dict(pointer),
         "job_execution": {
             "phase": "ready",
@@ -503,6 +632,95 @@ def replace_generation_job(
     return state
 
 
+def refresh_running_generation_job(
+        session_dir,
+        request_id,
+        pointer,
+        *,
+        expected_job_pointer,
+        expected_epoch,
+        claim_id,
+        expected_phase,
+        retire_reason="refresh_generation_job",
+        errors=None,
+        admission_snapshot=None,
+    ):
+    state = load_workflow_state(session_dir, request_id)
+    execution = state.get("job_execution") or {}
+    if any((
+        state.get("workflow_state_version") != WORKFLOW_STATE_VERSION,
+        state.get("status") != "running",
+        execution.get("phase") not in {"design", "implementation"},
+        execution.get("phase") != expected_phase,
+        execution.get("epoch") != expected_epoch,
+        execution.get("claim_id") != claim_id,
+        state.get("current_job") != expected_job_pointer,
+        execution.get("transaction"),
+        state.get("active_transaction"),
+    )):
+        raise ValueError("Generation Job running refresh CAS冲突")
+    _assert_job_pointer(pointer, request_id=request_id)
+    retired = list(state.get("retired_jobs") or [])
+    retired.append(_retired_job_entry(
+        expected_job_pointer,
+        status="stale",
+        execution=execution,
+        reason=retire_reason or "refresh_generation_job",
+        last_job_result=None,
+        errors=errors,
+    ))
+    refreshed_at = datetime.now().isoformat(timespec="milliseconds")
+    next_epoch = int(execution["epoch"]) + 1
+    state.update({
+        "status": "ready",
+        "next_action": "start_generation_job",
+        "updated_at": refreshed_at,
+        **_generation_admission_snapshot_fields(admission_snapshot),
+        "current_job": dict(pointer),
+        "job_execution": {
+            "phase": "ready",
+            "epoch": next_epoch,
+            "claim_id": None,
+            "claimed_at": None,
+            "attempt_no": 0,
+            "plan": None,
+            "transaction": None,
+            "last_issue_fingerprint": None,
+            "job_lifecycle_timing": new_generation_job_lifecycle_timing(
+                started_at=refreshed_at,
+                epoch=next_epoch,
+            ),
+        },
+        "retired_jobs": retired,
+        "attempt_history": [],
+        "last_result": None,
+        "plan": {},
+        "active_transaction": None,
+        "errors": [],
+        "warnings": [],
+    })
+    write_workflow_state(session_dir, state)
+    return state
+
+
+def _generation_admission_snapshot_fields(snapshot):
+    if not isinstance(snapshot, dict):
+        return {}
+    return {
+        key: copy.deepcopy(snapshot[key])
+        for key in (
+            "revision",
+            "brief",
+            "decision",
+            "ambiguity",
+            "risk",
+            "adjustment",
+            "required_forensic_evidence",
+        )
+        if key in snapshot
+    }
+
+
 def claim_generation_job(
         session_dir,
         request_id,
@@ -510,6 +728,9 @@ def claim_generation_job(
         job_id,
         job_fingerprint,
         expected_epoch,
+        service_level_target_seconds,
+        command_sent_at=None,
+        timing_source=None,
     ):
     state = load_workflow_state(session_dir, request_id)
     _assert_job_cas(
@@ -523,10 +744,45 @@ def claim_generation_job(
     execution = state["job_execution"]
     claim_id = f"claim-{secrets.token_hex(16)}"
     claimed_at = datetime.now().isoformat(timespec="milliseconds")
+    target_seconds = int(service_level_target_seconds or 0)
+    if target_seconds <= 0:
+        raise ValueError("Generation Job缺少有效静态SLA目标")
+    next_action = "submit_generation_design"
+    if command_sent_at is not None:
+        if timing_source not in {
+            "host_user_prompt_hook",
+            "workbench_generation_command",
+        } or not (
+                _generation_timestamp_is_valid(command_sent_at)
+                and _generation_timestamp_not_after(
+                    command_sent_at,
+                    claimed_at,
+                )
+        ):
+            raise ValueError("Generation Job宿主提交时间无效")
+        service_level_timing = {
+            "service_level_timing_version": SERVICE_LEVEL_TIMING_VERSION,
+            "scope": "command_to_static_terminal",
+            "target_seconds": target_seconds,
+            "command_sent_at": command_sent_at,
+            "agent_started_at": claimed_at,
+            "timing_source": timing_source,
+            "coverage": "complete",
+        }
+    else:
+        service_level_timing = {
+            "service_level_timing_version": SERVICE_LEVEL_TIMING_VERSION,
+            "scope": "command_to_static_terminal",
+            "target_seconds": target_seconds,
+            "command_sent_at": None,
+            "agent_started_at": claimed_at,
+            "timing_source": "missing_host_command_timestamp",
+            "coverage": "incomplete",
+        }
     next_epoch = int(execution["epoch"]) + 1
     state.update({
         "status": "running",
-        "next_action": "submit_generation_design",
+        "next_action": next_action,
         "updated_at": claimed_at,
         "job_execution": {
             **execution,
@@ -534,11 +790,12 @@ def claim_generation_job(
             "epoch": next_epoch,
             "claim_id": claim_id,
             "claimed_at": claimed_at,
+            "service_level_timing": service_level_timing,
             "job_lifecycle_timing": project_generation_job_lifecycle_timing(
                 execution,
                 previous_next_action=state.get("next_action"),
                 phase="design",
-                next_action="submit_generation_design",
+                next_action=next_action,
                 transitioned_at=claimed_at,
                 event="claimed",
             ),
@@ -554,15 +811,25 @@ def fail_generation_job_integrity(
         *,
         expected_epoch,
         error_code,
+        claim_id=None,
     ):
     state = load_workflow_state(session_dir, request_id)
     execution = state.get("job_execution") or {}
+    phase = execution.get("phase")
+    claimed_phase = phase in {"design", "implementation"}
     if any((
         state.get("workflow_state_version") != WORKFLOW_STATE_VERSION,
         not state.get("current_job"),
-        state.get("status") != "ready",
-        execution.get("phase") != "ready",
-        execution.get("claim_id") is not None,
+        phase not in {"ready", "design", "implementation"},
+        state.get("status") != (
+            "running" if claimed_phase else "ready"
+        ),
+        execution.get("claim_id") != (
+            claim_id if claimed_phase else None
+        ),
+        claimed_phase and not claim_id,
+        execution.get("transaction") is not None,
+        state.get("active_transaction") is not None,
         execution.get("epoch") != expected_epoch,
     )):
         raise ValueError("Generation Job integrity CAS冲突")
@@ -839,6 +1106,13 @@ def _assert_state(state):
             execution.get("epoch", 0) < 1,
         )):
             raise ValueError("WorkflowStateV5 active Job execution无效")
+        if (
+            execution.get("phase") != "ready"
+            and not generation_service_level_timing_is_valid(
+                execution.get("service_level_timing")
+            )
+        ):
+            raise ValueError("WorkflowStateV5 service_level_timing无效")
     elif execution is not None:
         raise ValueError("WorkflowStateV5无活动Job时不能保留job_execution")
     for entry in state.get("retired_jobs") or []:
@@ -901,6 +1175,30 @@ def _assert_job_pointer(pointer, *, request_id):
         pointer.get("activation") != "active",
     )):
         raise ValueError("WorkflowStateV4 Generation Job pointer无效")
+
+
+def _generation_timestamp_is_valid(value):
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _generation_timestamp_not_after(started_at, finished_at):
+    try:
+        started = _comparable_generation_timestamp(started_at)
+        finished = _comparable_generation_timestamp(finished_at)
+    except (TypeError, ValueError):
+        return False
+    return started <= finished
+
+
+def _comparable_generation_timestamp(value):
+    parsed = datetime.fromisoformat(str(value))
+    return parsed.astimezone() if parsed.tzinfo is None else parsed
 
 
 def _state_path(session_dir, request_id):

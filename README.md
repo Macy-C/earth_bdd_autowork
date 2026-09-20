@@ -53,7 +53,7 @@ resources/           # OCR 模型、Allure 等资源
 artifacts/           # logs、reports、screenshots 输出产物
 docs/                # 框架详细文档
 ai/                  # 版本化 AI 上下文、Prompt 和本地知识
-.github/             # VS Code Copilot 自动发现入口与 Hook
+.github/             # Copilot Skill、Agent、Prompt 和本地 Hook 发现入口
 framework_validation/ # 仅框架开发/发布使用，不同步宿主项目
 ```
 
@@ -65,4 +65,5 @@ framework_validation/ # 仅框架开发/发布使用，不同步宿主项目
 
 完整流程见 [2.编写自动化脚本](docs/2.编写自动化脚本.md)。动作与定位配置分别以
 [3.动作参考](docs/3.动作参考.md) 和 [4.定位器与配置](docs/4.定位器与配置.md) 为准；
-Recorder 内部协议见 [维护/3.Recorder设计](docs/维护/3.Recorder设计.md)。
+Recorder 普通使用见脚本文档，内部协议只在维护时查阅
+[维护/3.Recorder设计](docs/维护/3.Recorder设计.md)。

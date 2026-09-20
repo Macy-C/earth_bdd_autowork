@@ -45,6 +45,7 @@ _OPERATION_NAMES = {
     "expand_dropdown",
     "focus",
     "input_text",
+    "remove_text",
     "right_click",
     "scroll_to",
     "select_dropdown_option",
@@ -304,11 +305,17 @@ def _reuse_candidate(entry):
 def build_window_asset_catalog(index):
     pages = []
     roots = []
+    views = []
+    locator_file_sha256 = {}
     methods_by_path = {}
-    for file_value in (index.get("files") or {}).values():
+    for relative_path, file_value in (index.get("files") or {}).items():
+        if Path("Bdd/locators") in Path(relative_path).parents:
+            locator_file_sha256[relative_path] = file_value.get("sha256")
         for entry in file_value.get("entries") or ():
             if entry.get("kind") == "window_page":
                 pages.append(entry)
+            elif entry.get("kind") == "window_view":
+                views.append(entry)
             elif entry.get("kind") == "window_root":
                 roots.append(entry)
             elif (
@@ -323,6 +330,21 @@ def build_window_asset_catalog(index):
         (entry.get("path"), entry.get("key")): entry
         for entry in roots
     }
+    views_by_package = {}
+    for view in views:
+        view_value = view.get("window_view") or {}
+        locator_path = _project_locator_path(view_value.get("locator_file"))
+        if not locator_path:
+            continue
+        package = Path(locator_path).parent.as_posix()
+        views_by_package.setdefault(package, []).append({
+            "view_object": view_value.get("view_object"),
+            "view_class": view_value.get("view_class"),
+            "locator_file": locator_path,
+            "active_locator": view_value.get("active_locator"),
+            "page_sha256": view.get("file_sha256"),
+            "locator_sha256": locator_file_sha256.get(locator_path),
+        })
     used_roots = set()
     candidates = []
     for page in pages:
@@ -339,6 +361,7 @@ def build_window_asset_catalog(index):
             root,
             page=page,
             methods=methods_by_path.get(page.get("path")) or [],
+            views=views_by_package.get(Path(locator_path).parent.as_posix()) or [],
         ))
     for root in roots:
         identity = (root.get("path"), root.get("key"))
@@ -397,7 +420,8 @@ def match_window_owner_candidates(catalog, recorded_window):
     canonical = [
         item for item in strong if item["kind"] == "canonical_window"
     ]
-    if len(strong) == 1 and len(canonical) == 1:
+    decisive_canonical = selected_window_owner_candidate(strong)
+    if decisive_canonical is not None:
         strategy = "reuse_existing"
     elif len(strong) == 1 and strong[0]["kind"] == "legacy_root":
         strategy = "create_new"
@@ -414,6 +438,22 @@ def match_window_owner_candidates(catalog, recorded_window):
         "candidates": matches,
         "advisory_only": True,
     }
+
+
+def selected_window_owner_candidate(candidates):
+    if not candidates:
+        return None
+    top_score = max(int(item.get("score") or 0) for item in candidates)
+    top = [item for item in candidates if int(item.get("score") or 0) == top_score]
+    if len(top) != 1:
+        return None
+    candidate = top[0]
+    if candidate.get("kind") != "canonical_window":
+        return None
+    reasons = set(candidate.get("reasons") or ())
+    if reasons & {"auto_id_exact", "title_exact", "root_name_exact"}:
+        return candidate
+    return None
 
 
 def append_capability_candidates(
@@ -606,7 +646,10 @@ def _index_python(path, relative, digest):
         )
         for name, node in functions.items()
     }
-    entries = _window_page_entries(tree, relative, digest)
+    entries = [
+        *_window_page_entries(tree, relative, digest),
+        *_window_view_entries(tree, relative, digest),
+    ]
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -1498,6 +1541,54 @@ def _window_page_entries(tree, relative, digest):
     return entries
 
 
+def _window_view_entries(tree, relative, digest):
+    entries = []
+    for node in (getattr(tree, "body", None) or []):
+        if not isinstance(node, ast.ClassDef) or not any(
+            _base_name(base) == "WindowView" for base in node.bases
+        ):
+            continue
+        attributes = {
+            target.id: statement.value.value
+            for statement in node.body
+            if isinstance(statement, (ast.Assign, ast.AnnAssign))
+            for target in (
+                statement.targets
+                if isinstance(statement, ast.Assign)
+                else [statement.target]
+            )
+            if isinstance(target, ast.Name)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        }
+        locator_file = attributes.get("locator_file")
+        active_locator = _locator_reference_name(attributes.get("active_locator"))
+        if not locator_file or not active_locator:
+            continue
+        entries.append({
+            "kind": "window_view",
+            "path": relative,
+            "symbol": node.name,
+            "key": active_locator,
+            "line": getattr(node, "lineno", 0),
+            "file_sha256": digest,
+            "operations": [],
+            "references": [active_locator],
+            "window_view": {
+                "view_object": relative,
+                "view_class": node.name,
+                "locator_file": locator_file,
+                "active_locator": active_locator,
+            },
+            "tokens": _tokens(" ".join((
+                node.name,
+                locator_file,
+                active_locator,
+            ))),
+        })
+    return entries
+
+
 def _base_name(value):
     if isinstance(value, ast.Name):
         return value.id
@@ -1525,7 +1616,7 @@ def _project_locator_path(value):
     return (Path("Bdd/locators") / path).as_posix()
 
 
-def _window_candidate(kind, root, *, page=None, methods=()):
+def _window_candidate(kind, root, *, page=None, methods=(), views=()):
     page_value = (page or {}).get("window_page") or {}
     root_value = root.get("window_root") or {}
     candidate_id = "window-owner-" + _stable_hash({
@@ -1548,6 +1639,7 @@ def _window_candidate(kind, root, *, page=None, methods=()):
             _reuse_candidate(method)
             for method in methods
         ],
+        "views": [dict(item) for item in views],
     }
 
 

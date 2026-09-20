@@ -7,18 +7,30 @@ from pathlib import Path
 
 from autowork_core.utils.debug_tools.recorder.ai_capability_registry import (
     capability_by_name,
+    operations_for_recorded_action,
+    plan_operation_names,
 )
 from autowork_core.utils.debug_tools.recorder.action_knowledge import (
     operation_compatibility,
 )
 from autowork_core.utils.debug_tools.recorder.code_reuse_index import (
     candidate_step_pattern_contracts,
+    selected_window_owner_candidate,
     step_pattern_contract_matches,
 )
 from autowork_core.utils.debug_tools.recorder.identity import (
+    assertion_candidate_key,
     locator_candidate_id as expected_locator_candidate_id,
+    operation_choice_key,
+)
+from autowork_core.utils.debug_tools.recorder.generation_locator_policy import (
+    best_verified_pos_locator_candidate,
+    top_level_root_uses_pos_only,
+    target_uses_pos_locator,
+    top_level_root_requires_locator_fallback,
 )
 from autowork_core.utils.debug_tools.recorder.table_usage import (
+    infer_table_usage,
     validate_table_usage,
 )
 from autowork_core.utils.debug_tools.recorder.value_authority import (
@@ -29,10 +41,17 @@ from autowork_core.utils.debug_tools.recorder.value_authority import (
     resolve_feature_literal,
     resolve_implementation_parameters,
     resolve_recorded_action_value,
+    qualify_value_sources,
 )
 
 
-GENERATION_DESIGN_VERSION = "1.1"
+GENERATION_DESIGN_VERSION = "1.2"
+GENERATION_NAMING_PATCH_VERSION = "1.0"
+GENERATION_AMBIGUITY_CHOICE_PATCH_VERSION = "1.0"
+GENERATION_VALUE_SOURCE_CHOICE_PATCH_VERSION = "1.0"
+GENERATION_ASSERTION_CHOICE_PATCH_VERSION = "1.0"
+GENERATION_METHOD_CHOICE_PATCH_VERSION = "1.0"
+GENERATION_OPERATION_CHOICE_PATCH_VERSION = "1.0"
 VALUE_SOURCE_KINDS = frozenset({
     "recorded_action",
     "feature_literal",
@@ -48,15 +67,2471 @@ ACTION_RELATIONSHIP_KINDS = frozenset({
 })
 MAX_DESIGN_MEMORY_ITEMS = 6
 MAX_DESIGN_MEMORY_REASON = 96
+_PUBLIC_LOCATOR_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_TECHNICAL_LOCATOR_SUFFIXES = (
+    "_by_name",
+    "_by_class",
+    "_by_event_chain",
+    "_by_ancestor",
+    "_by_sibling",
+    "_xpath",
+    "_ocr",
+    "_pos",
+    "_index",
+)
+
+
+class GenerationDesignValidationError(ValueError):
+    pass
+
+
+class GenerationAmbiguityChoiceRequired(ValueError):
+    def __init__(self, ambiguity_id, *, outcomes=None):
+        self.ambiguity_id = str(ambiguity_id or "")
+        self.outcomes = deepcopy(list(outcomes or ()))
+        super().__init__(
+            "Baseline Design无法唯一决定ambiguity: "
+            f"{self.ambiguity_id}"
+        )
+
+
+class GenerationValueSourceChoiceRequired(ValueError):
+    def __init__(self, step_id, action_id, operation, *, sources=None):
+        self.step_id = str(step_id or "")
+        self.action_id = str(action_id or "")
+        self.operation = str(operation or "")
+        self.sources = deepcopy(list(sources or ()))
+        super().__init__(
+            "Baseline Design缺少AI value_source选择: "
+            f"{self.step_id}/{self.action_id}/{self.operation}"
+        )
+
+
+class GenerationAssertionChoiceRequired(ValueError):
+    def __init__(self, ambiguity_id, *, candidates=None):
+        self.ambiguity_id = str(ambiguity_id or "")
+        self.candidates = deepcopy(list(candidates or ()))
+        super().__init__(
+            "Baseline Design缺少AI assertion候选选择: "
+            f"{self.ambiguity_id}"
+        )
+
+
+class GenerationMethodChoiceRequired(ValueError):
+    def __init__(self, step_id, *, candidates=None):
+        self.step_id = str(step_id or "")
+        self.candidates = deepcopy(list(candidates or ()))
+        super().__init__(
+            "Baseline Design缺少AI Page method候选选择: "
+            f"{self.step_id}"
+        )
+
+
+class GenerationOperationChoiceRequired(ValueError):
+    def __init__(self, step_id, action_id, *, candidates=None):
+        self.step_id = str(step_id or "")
+        self.action_id = str(action_id or "")
+        self.candidates = deepcopy(list(candidates or ()))
+        super().__init__(
+            "Baseline Design缺少AI operation选择: "
+            f"{self.step_id}/{self.action_id}"
+        )
+
+
+def build_generation_baseline_design(
+        brief,
+        *,
+        decision_constraints=None,
+        naming_overrides=None,
+        ambiguity_choice_patch=None,
+        value_source_choice_patch=None,
+        assertion_choice_patch=None,
+        method_choice_patch=None,
+        operation_choice_patch=None,
+    ):
+    brief = deepcopy(dict(brief or {}))
+    decision_constraints = deepcopy(dict(decision_constraints or {}))
+    naming_overrides = naming_overrides or {}
+    ambiguity_choice_overrides = _ambiguity_choice_patch_choices(
+        ambiguity_choice_patch,
+        brief,
+    )
+    value_source_choices = _value_source_choice_patch_choices(
+        value_source_choice_patch,
+        brief,
+    )
+    consumed_value_source_choices = set()
+    assertion_choices = _assertion_choice_patch_choices(
+        assertion_choice_patch,
+        brief,
+    )
+    consumed_assertion_choices = set()
+    assertion_ambiguity_choices = {
+        ambiguity_id: value["ambiguity_choice"]
+        for ambiguity_id, value in assertion_choices.items()
+    }
+    method_choices = _method_choice_patch_choices(method_choice_patch, brief)
+    consumed_method_choices = set()
+    operation_choices = _operation_choice_patch_choices(
+        operation_choice_patch,
+        brief,
+    )
+    consumed_operation_choices = set()
+    target_name_overrides = naming_overrides.get("target_names") or {}
+    target_steps = list((brief.get("target") or {}).get("steps") or ())
+    actions_by_step = {}
+    for action in brief.get("actions") or ():
+        if action.get("role") == "noise":
+            continue
+        actions_by_step.setdefault(str(action.get("step_id") or ""), []).append(
+            action
+        )
+    for actions in actions_by_step.values():
+        actions.sort(key=_baseline_action_order)
+    runtime_roles = _baseline_runtime_roles(
+        target_steps,
+        actions_by_step,
+    )
+    placeholder_action_ids = _baseline_placeholder_action_ids(
+        brief,
+        ambiguity_choice_overrides,
+    )
+    baseline_step_reuse, baseline_ambiguity_choices = (
+        _baseline_step_reuse_choices(brief, target_steps, actions_by_step)
+    )
+    overlap = sorted(
+        set(ambiguity_choice_overrides) & (
+            set(baseline_ambiguity_choices) | set(assertion_ambiguity_choices)
+        )
+    )
+    if overlap:
+        raise ValueError(
+            "AmbiguityChoicePatch不能覆盖系统已证明选择: "
+            f"{overlap}"
+        )
+    assertion_overlap = sorted(
+        set(assertion_ambiguity_choices) & set(baseline_ambiguity_choices)
+    )
+    if assertion_overlap:
+        raise ValueError(
+            "AssertionChoicePatch不能覆盖系统已证明选择: "
+            f"{assertion_overlap}"
+        )
+
+    steps = []
+    referenced_roots = []
+    for target_step in target_steps:
+        step_id = str(target_step.get("id") or "")
+        table_use = _baseline_table_use(
+            brief,
+            target_step,
+            (decision_constraints.get("steps") or {}).get(step_id) or {},
+        )
+        operations = []
+        step_reuse = baseline_step_reuse.get(step_id)
+        if step_reuse is None:
+            for action in actions_by_step.get(step_id, ()):
+                if str(action.get("id") or "") in (
+                        placeholder_action_ids.get(step_id) or set()
+                ):
+                    continue
+                operation = _baseline_operation(
+                    brief,
+                    target_step,
+                    action,
+                    table_use=table_use,
+                    runtime_role=runtime_roles.get((step_id, str(action.get("id") or ""))),
+                    target_name_override=target_name_overrides.get((
+                        step_id,
+                        str(action.get("id") or ""),
+                    )),
+                    value_source_choices=value_source_choices,
+                    consumed_value_source_choices=consumed_value_source_choices,
+                    business_facts=decision_constraints.get("business_facts") or [],
+                    assertion_choices=assertion_choices,
+                    consumed_assertion_choices=consumed_assertion_choices,
+                    operation_choices=operation_choices,
+                    consumed_operation_choices=consumed_operation_choices,
+                )
+                operations.append(operation)
+                root_name = operation["window_root"]
+                if root_name not in referenced_roots:
+                    referenced_roots.append(root_name)
+        if not operations and step_reuse is None:
+            action_ids = {
+                str(action.get("id") or "")
+                for action in actions_by_step.get(step_id, ())
+                if action.get("id")
+            }
+            if (
+                    step_id not in placeholder_action_ids
+                    or (
+                    action_ids
+                    and not action_ids <= (
+                        placeholder_action_ids.get(step_id) or set()
+                    )
+                    )
+            ):
+                raise ValueError(
+                    f"Baseline Design Step缺少可生成Action: {step_id}"
+                )
+        step = {
+            "step_id": step_id,
+            "intent": str(target_step.get("text") or step_id),
+            "implementation_strategy": "step_inline",
+        }
+        exact_candidates = _exact_step_behavior_candidates(
+            brief,
+            target_step,
+            _step_file_from_brief(brief, step_id=step_id),
+        )
+        if step_reuse is not None:
+            step["step_behavior"] = step_reuse
+        elif len(exact_candidates) == 1 and operations:
+            step["step_behavior"] = {
+                "strategy": "modify",
+                "candidate_id": str(
+                    exact_candidates[0].get("candidate_id") or ""
+                ),
+                "reason": (
+                    "Keep the one exact current-scope Step definition as "
+                    "the editable baseline while AI reviews its behavior."
+                ),
+            }
+        elif len(exact_candidates) > 1:
+            raise ValueError(
+                "Baseline Design当前Step范围存在多个精确匹配定义，"
+                f"不能选择修改目标: {step_id}"
+            )
+        page_method_reuse = _baseline_page_method_reuse(
+            brief,
+            step_id,
+            operations,
+            actions_by_step.get(step_id, ()),
+            method_choices=method_choices,
+            consumed_method_choices=consumed_method_choices,
+        ) if operations and "step_behavior" not in step else None
+        if page_method_reuse is not None:
+            step["implementation_strategy"] = "page_method"
+            for operation in operations:
+                operation["method_resolution"] = dict(page_method_reuse)
+        if operations:
+            step["operations"] = operations
+        produced = _baseline_step_runtime_concepts(
+            runtime_roles,
+            step_id,
+            "producer",
+        )
+        consumed = _baseline_step_runtime_concepts(
+            runtime_roles,
+            step_id,
+            "consumer",
+        )
+        if produced:
+            step["produces"] = produced
+        if consumed:
+            step["consumes"] = consumed
+        if table_use is not None:
+            step["table_use"] = table_use
+        steps.append(step)
+
+    unused_value_source_choices = sorted(
+        _value_source_choice_key_text(key)
+        for key in set(value_source_choices) - consumed_value_source_choices
+    )
+    if unused_value_source_choices:
+        raise ValueError(
+            "ValueSourceChoicePatch包含未被baseline消费的选择: "
+            f"{unused_value_source_choices}"
+        )
+    unused_assertion_choices = sorted(
+        set(assertion_choices) - consumed_assertion_choices
+    )
+    if unused_assertion_choices:
+        raise ValueError(
+            "AssertionChoicePatch包含未被baseline消费的选择: "
+            f"{unused_assertion_choices}"
+        )
+    unused_method_choices = sorted(
+        set(method_choices) - consumed_method_choices
+    )
+    if unused_method_choices:
+        raise ValueError(
+            "MethodChoicePatch包含未被baseline消费的选择: "
+            f"{unused_method_choices}"
+        )
+    unused_operation_choices = sorted(
+        _operation_choice_key_text(key)
+        for key in set(operation_choices) - consumed_operation_choices
+    )
+    if unused_operation_choices:
+        raise ValueError(
+            "OperationChoicePatch包含未被baseline消费的选择: "
+            f"{unused_operation_choices}"
+        )
+
+    summary = _baseline_summary(brief)
+    target_names_by_action = {
+        (str(step.get("step_id") or ""), str(operation.get("target_action_id") or "")): str(
+            operation.get("target_name") or ""
+        )
+        for step in steps
+        for operation in step.get("operations") or ()
+        if operation.get("target_name") and operation.get("target_action_id")
+    }
+    design = {
+        "design_version": GENERATION_DESIGN_VERSION,
+        "summary": summary,
+        "scenario_intent": summary,
+        "window_ownership": _baseline_window_ownership(
+            brief,
+            referenced_roots,
+            actions_by_step,
+            target_names_by_action,
+            naming_overrides.get("business_names") or {},
+        ),
+        "steps": steps,
+        "ambiguity_choices": _baseline_ambiguity_choices(
+            brief,
+            {
+                **ambiguity_choice_overrides,
+                **assertion_ambiguity_choices,
+                **baseline_ambiguity_choices,
+            },
+        ),
+    }
+    if (brief.get("memory_digest") or {}).get("items"):
+        design["memory_trace"] = {"applied": [], "dismissed": []}
+    compile_generation_design(design, brief)
+    return design
+
+
+def _baseline_placeholder_action_ids(brief, system_choices=None):
+    system_choices = system_choices or {}
+    result = {}
+    for ambiguity in brief.get("ambiguities") or ():
+        ambiguity_id = str(ambiguity.get("ambiguity_id") or "")
+        selected = system_choices.get(ambiguity_id) or {}
+        if selected.get("outcome") != "generate_issue_placeholder":
+            outcomes = [
+                item
+                for item in ambiguity.get("allowed_outcomes") or ()
+                if item.get("authority") == "ai"
+            ]
+            if not (
+                    len(outcomes) == 1
+                    and outcomes[0].get("outcome")
+                    == "generate_issue_placeholder"
+            ):
+                continue
+        step_id = str(ambiguity.get("step_id") or "")
+        action_ids = {
+            str(action_id)
+            for action_id in ambiguity.get("action_ids") or ()
+            if action_id
+        }
+        if step_id:
+            result.setdefault(step_id, set()).update(action_ids)
+    return result
+
+
+def apply_generation_naming_patch(
+        design,
+        patch,
+        brief,
+        *,
+        decision_constraints=None,
+    baseline_kwargs=None,
+    ):
+    baseline = deepcopy(design if isinstance(design, dict) else {})
+    patch = patch if isinstance(patch, dict) else {}
+    allowed_keys = {
+        "naming_patch_version",
+        "patch_type",
+        "target_names",
+        "business_names",
+    }
+    unknown_keys = sorted(set(patch) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"NamingPatch包含不允许字段: {unknown_keys}")
+    if any((
+        patch.get("naming_patch_version") != GENERATION_NAMING_PATCH_VERSION,
+        patch.get("patch_type") != "naming",
+    )):
+        raise ValueError("NamingPatch版本或类型无效")
+    target_names = patch["target_names"] if "target_names" in patch else {}
+    business_names = (
+        patch["business_names"] if "business_names" in patch else {}
+    )
+    if not isinstance(target_names, dict) or not isinstance(business_names, dict):
+        raise ValueError("NamingPatch target_names/business_names必须是对象")
+    steps = {
+        str(step.get("step_id") or ""): step
+        for step in baseline.get("steps") or ()
+        if isinstance(step, dict)
+    }
+    required_target_scopes = set()
+    for step in baseline.get("steps") or ():
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("step_id") or "")
+        for operation in step.get("operations") or ():
+            if not isinstance(operation, dict):
+                continue
+            action_id = str(operation.get("target_action_id") or "")
+            if action_id and not str(operation.get("target_name") or "").strip():
+                required_target_scopes.add(f"{step_id}/{action_id}")
+    filled_target_scopes = set()
+    for scope, value in target_names.items():
+        step_id, action_id = _naming_patch_scope(scope)
+        scope_key = f"{step_id}/{action_id}"
+        public_name = str(value or "").strip()
+        if not _is_public_locator_name(public_name):
+            raise ValueError(f"NamingPatch target_name无效: {scope}")
+        step = steps.get(step_id)
+        if step is None:
+            raise ValueError(f"NamingPatch引用未知Step: {scope}")
+        matches = [
+            operation
+            for operation in step.get("operations") or ()
+            if isinstance(operation, dict)
+            and str(operation.get("target_action_id") or "") == action_id
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"NamingPatch引用未知或重复Action: {scope}")
+        existing = str(matches[0].get("target_name") or "").strip()
+        if existing:
+            raise ValueError(f"NamingPatch不能覆盖已确定target_name: {scope}")
+        filled_target_scopes.add(scope_key)
+    missing_target_scopes = sorted(required_target_scopes - filled_target_scopes)
+    if missing_target_scopes:
+        raise ValueError(f"NamingPatch缺少target_name: {missing_target_scopes}")
+    owners = {
+        str(owner.get("root_name") or ""): owner
+        for owner in baseline.get("window_ownership") or ()
+        if isinstance(owner, dict)
+    }
+    required_business_roots = {
+        str(owner.get("root_name") or "")
+        for owner in baseline.get("window_ownership") or ()
+        if isinstance(owner, dict)
+        and owner.get("root_name")
+        and not str(owner.get("business_name") or "").strip()
+    }
+    filled_business_roots = set()
+    for root_name, value in business_names.items():
+        root_name = str(root_name or "").strip()
+        public_name = str(value or "").strip()
+        if not root_name or not public_name:
+            raise ValueError(f"NamingPatch business_name无效: {root_name}")
+        public_name = _public_owner_name(root_name, public_name)
+        owner = owners.get(root_name)
+        if owner is None:
+            raise ValueError(f"NamingPatch引用未知Window Root: {root_name}")
+        existing = str(owner.get("business_name") or "").strip()
+        if existing:
+            raise ValueError(
+                f"NamingPatch不能覆盖已确定business_name: {root_name}"
+            )
+        filled_business_roots.add(root_name)
+    missing_business_roots = sorted(required_business_roots - filled_business_roots)
+    if missing_business_roots:
+        raise ValueError(f"NamingPatch缺少business_name: {missing_business_roots}")
+    patched = build_generation_baseline_design(
+        brief,
+        decision_constraints=decision_constraints,
+        naming_overrides={
+            "target_names": {
+                _naming_patch_scope(scope): str(value or "").strip()
+                for scope, value in target_names.items()
+            },
+            "business_names": {
+                str(root_name or "").strip(): str(value or "").strip()
+                for root_name, value in business_names.items()
+            },
+        },
+        **dict(baseline_kwargs or {}),
+    )
+    compile_generation_design(patched, brief, require_public_locator_names=True)
+    return patched
+
+
+def _ambiguity_choice_patch_choices(patch, brief):
+    if patch is None:
+        return {}
+    patch = patch if isinstance(patch, dict) else {}
+    allowed_keys = {
+        "ambiguity_choice_patch_version",
+        "patch_type",
+        "choices",
+    }
+    unknown_keys = sorted(set(patch) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(
+            f"AmbiguityChoicePatch包含不允许字段: {unknown_keys}"
+        )
+    if any((
+        patch.get("ambiguity_choice_patch_version")
+        != GENERATION_AMBIGUITY_CHOICE_PATCH_VERSION,
+        patch.get("patch_type") != "ambiguity_choice",
+    )):
+        raise ValueError("AmbiguityChoicePatch版本或类型无效")
+    choices = patch.get("choices")
+    if not isinstance(choices, list) or not all(
+            isinstance(item, dict) for item in choices
+    ):
+        raise ValueError("AmbiguityChoicePatch choices必须是object array")
+    ambiguities = {
+        str(item.get("ambiguity_id") or ""): item
+        for item in brief.get("ambiguities") or ()
+        if isinstance(item, dict) and item.get("ambiguity_id")
+    }
+    result = {}
+    for choice in choices:
+        _reject_unknown_fields(
+            choice,
+            {"ambiguity_id", "outcome", "candidate_id"},
+            "AmbiguityChoicePatch choice",
+        )
+        ambiguity_id = str(choice.get("ambiguity_id") or "").strip()
+        outcome = str(choice.get("outcome") or "").strip()
+        if not ambiguity_id or not outcome:
+            raise ValueError("AmbiguityChoicePatch choice缺少ambiguity_id或outcome")
+        if ambiguity_id in result:
+            raise ValueError(
+                f"AmbiguityChoicePatch重复声明ambiguity: {ambiguity_id}"
+            )
+        ambiguity = ambiguities.get(ambiguity_id)
+        if ambiguity is None:
+            raise ValueError(
+                f"AmbiguityChoicePatch引用未知ambiguity: {ambiguity_id}"
+            )
+        allowed = [
+            item for item in ambiguity.get("allowed_outcomes") or ()
+            if item.get("authority") == "ai"
+            and str(item.get("outcome") or "") == outcome
+        ]
+        if len(allowed) != 1:
+            raise ValueError(
+                f"AmbiguityChoicePatch未允许的AI outcome: "
+                f"{ambiguity_id}/{outcome}"
+            )
+        allowed_outcome = allowed[0]
+        if allowed_outcome.get("effect") not in {
+            "plan_coverage",
+            "issue_placeholder",
+        }:
+            raise ValueError(
+                "AmbiguityChoicePatchV1只允许AI-authority frozen "
+            f"plan_coverage或issue_placeholder outcome: "
+            f"{ambiguity_id}/{outcome}"
+            )
+        if allowed_outcome.get("candidate_id") or allowed_outcome.get(
+                "candidate_ids"
+        ):
+            raise ValueError(
+                "AmbiguityChoicePatchV1不能选择需要candidate映射的outcome: "
+                f"{ambiguity_id}/{outcome}"
+            )
+        if "candidate_id" in choice:
+            raise ValueError(
+                "AmbiguityChoicePatchV1不能提交candidate_id: "
+                f"{ambiguity_id}/{outcome}"
+            )
+        result[ambiguity_id] = {
+            "ambiguity_id": ambiguity_id,
+            "outcome": outcome,
+            "reason": "Use the AI-selected frozen ambiguity outcome.",
+        }
+    return result
+
+
+def _value_source_choice_patch_choices(patch, brief):
+    if patch is None:
+        return {}
+    patch = patch if isinstance(patch, dict) else {}
+    allowed_keys = {
+        "value_source_choice_patch_version",
+        "patch_type",
+        "choices",
+    }
+    unknown_keys = sorted(set(patch) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(
+            f"ValueSourceChoicePatch包含不允许字段: {unknown_keys}"
+        )
+    if any((
+        patch.get("value_source_choice_patch_version")
+        != GENERATION_VALUE_SOURCE_CHOICE_PATCH_VERSION,
+        patch.get("patch_type") != "value_source_choice",
+    )):
+        raise ValueError("ValueSourceChoicePatch版本或类型无效")
+    choices = patch.get("choices")
+    if not isinstance(choices, list) or not all(
+            isinstance(item, dict) for item in choices
+    ):
+        raise ValueError("ValueSourceChoicePatch choices必须是object array")
+    actions = {
+        (
+            str(action.get("step_id") or ""),
+            str(action.get("id") or ""),
+        ): action
+        for action in brief.get("actions") or ()
+        if isinstance(action, dict)
+        and action.get("step_id")
+        and action.get("id")
+    }
+    result = {}
+    for choice in choices:
+        _reject_unknown_fields(
+            choice,
+            {"step_id", "action_id", "operation", "source"},
+            "ValueSourceChoicePatch choice",
+        )
+        step_id = str(choice.get("step_id") or "").strip()
+        action_id = str(choice.get("action_id") or "").strip()
+        operation = str(choice.get("operation") or "").strip()
+        if not step_id or not action_id or not operation:
+            raise ValueError(
+                "ValueSourceChoicePatch choice缺少step_id/action_id/operation"
+            )
+        key = _value_source_choice_key(step_id, action_id, operation)
+        if key in result:
+            raise ValueError(
+                "ValueSourceChoicePatch重复声明: "
+                f"{_value_source_choice_key_text(key)}"
+            )
+        action = actions.get((step_id, action_id))
+        if action is None:
+            raise ValueError(
+                "ValueSourceChoicePatch引用未知Action: "
+                f"{step_id}/{action_id}"
+            )
+        capability = capability_by_name(operation)
+        if capability is None or not capability.plan_enabled:
+            raise ValueError(
+                f"ValueSourceChoicePatch operation不可用于Plan: {operation}"
+            )
+        if not capability.requires_value_action:
+            raise ValueError(
+                "ValueSourceChoicePatch只能选择需要value的operation: "
+                f"{operation}"
+            )
+        if operation_compatibility(operation, action)["status"] == "incompatible":
+            raise ValueError(
+                "ValueSourceChoicePatch operation与冻结Action不兼容: "
+                f"{step_id}/{action_id}/{operation}"
+            )
+        source = _normalize_value_source_choice_shape(choice.get("source"))
+        available = _baseline_available_value_sources(
+            brief,
+            step_id,
+            operation,
+        )
+        if source not in available:
+            raise ValueError(
+                "ValueSourceChoicePatch未允许的source: "
+                f"{_value_source_choice_key_text(key)}"
+            )
+        result[key] = source
+    return result
+
+
+def _normalize_value_source_choice_shape(source):
+    if not isinstance(source, dict):
+        raise ValueError("ValueSourceChoicePatch source必须是object")
+    kind = str(source.get("kind") or "")
+    fields = {
+        "recorded_action": {"kind", "action_id"},
+        "feature_literal": {"kind", "reference"},
+        "examples": {"kind", "reference"},
+        "data_table": {"kind", "reference"},
+    }
+    if kind not in fields:
+        raise ValueError(f"ValueSourceChoicePatch不支持source kind: {kind}")
+    _reject_unknown_fields(source, fields[kind], "ValueSourceChoicePatch source")
+    required = fields[kind] - {"kind"}
+    missing = sorted(field for field in required if not str(source.get(field) or ""))
+    if missing:
+        raise ValueError(f"ValueSourceChoicePatch source缺少字段: {missing}")
+    result = {"kind": kind}
+    for field in sorted(required):
+        result[field] = str(source.get(field) or "")
+    return result
+
+
+def _assertion_choice_patch_choices(patch, brief):
+    if patch is None:
+        return {}
+    patch = patch if isinstance(patch, dict) else {}
+    allowed_keys = {
+        "assertion_choice_patch_version",
+        "patch_type",
+        "choices",
+    }
+    unknown_keys = sorted(set(patch) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(
+            f"AssertionChoicePatch包含不允许字段: {unknown_keys}"
+        )
+    if any((
+        patch.get("assertion_choice_patch_version")
+        != GENERATION_ASSERTION_CHOICE_PATCH_VERSION,
+        patch.get("patch_type") != "assertion_choice",
+    )):
+        raise ValueError("AssertionChoicePatch版本或类型无效")
+    choices = patch.get("choices")
+    if not isinstance(choices, list) or not all(
+            isinstance(item, dict) for item in choices
+    ):
+        raise ValueError("AssertionChoicePatch choices必须是object array")
+    ambiguities = {
+        str(item.get("ambiguity_id") or ""): item
+        for item in brief.get("ambiguities") or ()
+        if isinstance(item, dict) and item.get("ambiguity_id")
+    }
+    result = {}
+    for choice in choices:
+        _reject_unknown_fields(
+            choice,
+            {"ambiguity_id", "candidate_key"},
+            "AssertionChoicePatch choice",
+        )
+        ambiguity_id = str(choice.get("ambiguity_id") or "").strip()
+        candidate_key = str(choice.get("candidate_key") or "").strip()
+        if not ambiguity_id or not candidate_key:
+            raise ValueError(
+                "AssertionChoicePatch choice缺少ambiguity_id或candidate_key"
+            )
+        if ambiguity_id in result:
+            raise ValueError(
+                f"AssertionChoicePatch重复声明ambiguity: {ambiguity_id}"
+            )
+        ambiguity = ambiguities.get(ambiguity_id)
+        if ambiguity is None:
+            raise ValueError(
+                f"AssertionChoicePatch引用未知ambiguity: {ambiguity_id}"
+            )
+        if str(ambiguity.get("code") or "") != "assertion_implementation":
+            raise ValueError(
+                f"AssertionChoicePatch只能选择assertion_implementation: {ambiguity_id}"
+            )
+        allowed = [
+            item for item in ambiguity.get("allowed_outcomes") or ()
+            if item.get("authority") == "ai"
+            and item.get("outcome") == "select_assertion_implementation"
+            and item.get("effect") == "plan_coverage"
+        ]
+        if len(allowed) != 1:
+            raise ValueError(
+                f"AssertionChoicePatch未允许的AI assertion outcome: {ambiguity_id}"
+            )
+        candidates = [
+            item for item in (ambiguity.get("facts") or {}).get(
+                "assertion_candidates"
+            ) or ()
+            if isinstance(item, dict)
+            and capability_by_name(item.get("operation")) is not None
+        ]
+        matches = [
+            item for item in candidates
+            if assertion_candidate_key(item) == candidate_key
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "AssertionChoicePatch未允许的candidate_key: "
+                f"{ambiguity_id}/{candidate_key}"
+            )
+        result[ambiguity_id] = {
+            "candidate_key": candidate_key,
+            "candidate": dict(matches[0]),
+            "ambiguity_choice": {
+                "ambiguity_id": ambiguity_id,
+                "outcome": "select_assertion_implementation",
+                "reason": "Use the AI-selected frozen assertion candidate.",
+            },
+        }
+    return result
+
+
+def _method_choice_patch_choices(patch, brief):
+    if patch is None:
+        return {}
+    patch = patch if isinstance(patch, dict) else {}
+    allowed_keys = {
+        "method_choice_patch_version",
+        "patch_type",
+        "choices",
+    }
+    unknown_keys = sorted(set(patch) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"MethodChoicePatch包含不允许字段: {unknown_keys}")
+    if any((
+        patch.get("method_choice_patch_version")
+        != GENERATION_METHOD_CHOICE_PATCH_VERSION,
+        patch.get("patch_type") != "method_choice",
+    )):
+        raise ValueError("MethodChoicePatch版本或类型无效")
+    choices = patch.get("choices")
+    if not isinstance(choices, list) or not all(
+            isinstance(item, dict) for item in choices
+    ):
+        raise ValueError("MethodChoicePatch choices必须是object array")
+    step_ids = {
+        str(step.get("id") or "")
+        for step in (brief.get("target") or {}).get("steps") or ()
+        if isinstance(step, dict) and step.get("id")
+    }
+    result = {}
+    for choice in choices:
+        _reject_unknown_fields(
+            choice,
+            {"step_id", "candidate_id"},
+            "MethodChoicePatch choice",
+        )
+        step_id = str(choice.get("step_id") or "").strip()
+        candidate_id = str(choice.get("candidate_id") or "").strip()
+        if not step_id or not candidate_id:
+            raise ValueError("MethodChoicePatch choice缺少step_id或candidate_id")
+        if step_id not in step_ids:
+            raise ValueError(f"MethodChoicePatch引用未知Step: {step_id}")
+        if step_id in result:
+            raise ValueError(f"MethodChoicePatch重复声明Step: {step_id}")
+        result[step_id] = candidate_id
+    return result
+
+
+def _operation_choice_patch_choices(patch, brief):
+    if patch is None:
+        return {}
+    patch = patch if isinstance(patch, dict) else {}
+    allowed_keys = {
+        "operation_choice_patch_version",
+        "patch_type",
+        "choices",
+    }
+    unknown_keys = sorted(set(patch) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"OperationChoicePatch包含不允许字段: {unknown_keys}")
+    if any((
+        patch.get("operation_choice_patch_version")
+        != GENERATION_OPERATION_CHOICE_PATCH_VERSION,
+        patch.get("patch_type") != "operation_choice",
+    )):
+        raise ValueError("OperationChoicePatch版本或类型无效")
+    choices = patch.get("choices")
+    if not isinstance(choices, list) or not all(
+            isinstance(item, dict) for item in choices
+    ):
+        raise ValueError("OperationChoicePatch choices必须是object array")
+    actions = {
+        (
+            str(action.get("step_id") or ""),
+            str(action.get("id") or ""),
+        ): action
+        for action in brief.get("actions") or ()
+        if isinstance(action, dict)
+        and action.get("step_id")
+        and action.get("id")
+    }
+    steps = {
+        str(step.get("id") or ""): step
+        for step in (brief.get("target") or {}).get("steps") or ()
+        if isinstance(step, dict) and step.get("id")
+    }
+    result = {}
+    for choice in choices:
+        _reject_unknown_fields(
+            choice,
+            {"step_id", "action_id", "choice_key"},
+            "OperationChoicePatch choice",
+        )
+        step_id = str(choice.get("step_id") or "").strip()
+        action_id = str(choice.get("action_id") or "").strip()
+        selected_key = str(choice.get("choice_key") or "").strip()
+        if not step_id or not action_id or not selected_key:
+            raise ValueError(
+                "OperationChoicePatch choice缺少step_id/action_id/choice_key"
+            )
+        key = _operation_choice_scope_key(step_id, action_id)
+        if key in result:
+            raise ValueError(
+                "OperationChoicePatch重复声明Action: "
+                f"{_operation_choice_key_text(key)}"
+            )
+        action = actions.get(key)
+        step = steps.get(step_id)
+        if action is None or step is None:
+            raise ValueError(
+                f"OperationChoicePatch引用未知Step/Action: {step_id}/{action_id}"
+            )
+        candidates = _baseline_operation_choice_candidates(
+            brief,
+            step,
+            action,
+        )
+        matches = [
+            item for item in candidates
+            if item.get("choice_key") == selected_key
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "OperationChoicePatch未允许的choice_key: "
+                f"{step_id}/{action_id}/{selected_key}"
+            )
+        result[key] = matches[0]
+    return result
+
+
+def _naming_patch_scope(value):
+    parts = str(value or "").split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"NamingPatch scope无效: {value}")
+    return parts[0], parts[1]
+
+
+def _baseline_operation(
+        brief,
+        target_step,
+        action,
+        *,
+        table_use=None,
+        runtime_role=None,
+        target_name_override=None,
+    value_source_choices=None,
+    consumed_value_source_choices=None,
+    business_facts=None,
+    assertion_choices=None,
+    consumed_assertion_choices=None,
+    operation_choices=None,
+    consumed_operation_choices=None,
+    ):
+    step_id = str(target_step.get("id") or "")
+    action_id = str(action.get("id") or "")
+    root_name = str((action.get("target") or {}).get("root_name") or "")
+    if not action_id or not root_name:
+        raise ValueError(f"Baseline Design Action身份不完整: {step_id}")
+    action_type = str(action.get("type") or "")
+    direct = operations_for_recorded_action(action_type)
+    command = (action.get("canonical_action") or {}).get("command") or {}
+    command_kind = str(command.get("kind") or action_type)
+    operation_name = {
+        "click": "click",
+        "double_click": "double_click",
+        "right_click": "right_click",
+        "focus": "focus",
+        "scroll": "scroll_to",
+        "drag": "drag_by_offset",
+    }.get(command_kind)
+    value_source = None
+    runtime_value = None
+    constrained = _baseline_constrained_operation(
+        brief,
+        target_step,
+        action,
+        value_source_choices=value_source_choices,
+        consumed_value_source_choices=consumed_value_source_choices,
+    )
+    semantic = _baseline_semantic_operation(action)
+    assertion = _baseline_assertion_candidate(
+        brief,
+        step_id,
+        action,
+        value_source_choices=value_source_choices,
+        consumed_value_source_choices=consumed_value_source_choices,
+        assertion_choices=assertion_choices,
+        consumed_assertion_choices=consumed_assertion_choices,
+    )
+    append_command = _is_append_keyboard_command(command)
+    if runtime_role and runtime_role["role"] == "producer":
+        operation_name = "save_text"
+        runtime_value = {"produces": runtime_role["concept"]}
+    elif runtime_role and runtime_role["role"] == "consumer":
+        operation_name = "send_text_keys" if append_command else "input_text"
+        value_source = {
+            "kind": "runtime",
+            "producer": runtime_role["concept"],
+            "argument": None,
+        }
+    elif (
+            business_authority := _business_value_authority_source(
+                brief,
+                step_id,
+                action_id,
+                business_facts,
+            )
+    ) is not None:
+        operation_name, value_source = business_authority
+    elif constrained is not None:
+        operation_name, value_source = constrained
+    elif semantic is not None:
+        operation_name, value_source = semantic
+    elif assertion is not None:
+        operation_name, value_source = assertion
+    elif command_kind in {"keyboard", "input_text"}:
+        table_source = _baseline_table_value_source(table_use)
+        literal = _baseline_declared_literal(
+            str(target_step.get("text") or "")
+        )
+        example_source = _baseline_example_source(
+            brief,
+            step_id,
+            command.get("text"),
+        )
+        control_type = str(
+            (action.get("target") or {}).get("control_type") or ""
+        )
+        if append_command and "send_text_keys" in direct:
+            operation_name = "send_text_keys"
+            value_source = {
+                "kind": "recorded_action",
+                "action_id": action_id,
+            }
+        elif table_source is not None and "input_text" in direct:
+            operation_name = "input_text"
+            value_source = table_source
+        elif example_source is not None and "input_text" in direct:
+            operation_name = "input_text"
+            value_source = example_source
+        elif (
+            literal is not None
+            and command.get("text") == literal
+            and "input_text" in direct
+        ):
+            operation_name = "input_text"
+            value_source = _baseline_feature_source(literal)
+        elif (
+            literal is not None
+            and _baseline_delete_count(command) == len(literal)
+            and control_type in {"Document", "Edit"}
+            and "remove_text" in direct
+        ):
+            operation_name = "remove_text"
+            value_source = _baseline_feature_source(literal)
+        else:
+            operation_name = "send_text_keys"
+            value_source = {
+                "kind": "recorded_action",
+                "action_id": action_id,
+            }
+    elif action_type == "observe":
+        observation = _baseline_observation_operation(
+            target_step,
+            action,
+        )
+        if observation is not None:
+            operation_name, value_source = observation
+        else:
+            literal = _baseline_declared_literal(
+                str(target_step.get("text") or "")
+            )
+            if literal is not None:
+                operation_name = "assert_text_equal"
+                value_source = _baseline_feature_source(literal)
+            else:
+                operation_name = "assert_exists"
+    if not operation_name:
+        operation_choice = _baseline_selected_operation_choice(
+            brief,
+            target_step,
+            action,
+            operation_choices,
+            consumed_operation_choices,
+        )
+        if operation_choice is not None:
+            operation_name, value_source = operation_choice
+    if not operation_name or operation_compatibility(
+            operation_name,
+            action,
+    )["status"] == "incompatible":
+        raise ValueError(
+            "Baseline Design缺少录制命令的直接operation: "
+            f"{step_id}/{action_id}/{action_type}"
+        )
+    result = {
+        "operation": operation_name,
+        "window_root": root_name,
+        "target_action_id": action_id,
+        "reason": "Replay the frozen command through a registered BasePage API.",
+    }
+    locator_reuse = _locator_reuse_match(
+        brief,
+        step_id,
+        action_id,
+        root_name,
+    )
+    if locator_reuse is not None:
+        result["target_name"] = locator_reuse["locator_key"]
+    elif target_name_override:
+        result["target_name"] = str(target_name_override)
+    else:
+        target_name = _baseline_target_name(action)
+        if target_name:
+            result["target_name"] = target_name
+    if value_source is not None:
+        result["value_source"] = value_source
+    if runtime_value is not None:
+        result["runtime_value"] = runtime_value
+    return result
+
+
+def _business_value_authority_source(brief, step_id, action_id, facts):
+    matches = [
+        fact for fact in facts or ()
+        if isinstance(fact, dict)
+        and fact.get("fact_type") == "value_authority"
+        and str(fact.get("step_id") or "") == str(step_id)
+        and str(((fact.get("applies_to") or {}).get("action_id")) or "")
+        == str(action_id)
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise ValueError(
+            f"Step {step_id} Action {action_id} 存在多个value_authority事实"
+        )
+    fact = matches[0]
+    source = dict(fact.get("source") or {})
+    kind = str(source.get("kind") or "")
+    value = str(fact.get("fact_value") or "")
+    if kind == "feature_literal":
+        reference = str(source.get("reference") or "")
+        literal = resolve_declared_feature_literal(
+            brief,
+            step_id,
+            reference,
+            value,
+        )
+        return "input_text", {
+            "kind": "feature_literal",
+            "reference": reference,
+            "value": literal,
+        }
+    if kind == "recorded_action":
+        source_action_id = str(source.get("action_id") or action_id)
+        if source_action_id != str(action_id):
+            raise ValueError(
+                "Business value_authority recorded_action不属于当前Action"
+            )
+        action = next((
+            item for item in brief.get("actions") or ()
+            if str(item.get("step_id") or "") == str(step_id)
+            and str(item.get("id") or "") == str(action_id)
+        ), {})
+        command = (action.get("canonical_action") or {}).get("command") or {}
+        operations = (
+            ("send_text_keys", "input_text")
+            if _is_append_keyboard_command(command)
+            else ("input_text", "send_text_keys")
+        )
+        for operation in operations:
+            try:
+                recorded = resolve_recorded_action_value(
+                    brief,
+                    step_id,
+                    action_id,
+                    operation,
+                )
+            except ValueError:
+                continue
+            if str(recorded) == value:
+                return operation, {
+                    "kind": "recorded_action",
+                    "action_id": action_id,
+                }
+        raise ValueError(
+            "Business value_authority recorded_action值与冻结录制值不一致"
+        )
+    if kind == "user_declared_literal":
+        return "input_text", {
+            "kind": "semantic_literal",
+            "value": value,
+        }
+    raise ValueError(f"Business value_authority source无效: {kind}")
+
+
+def _baseline_selected_operation_choice(
+        brief,
+        target_step,
+        action,
+        operation_choices,
+        consumed_operation_choices,
+    ):
+    step_id = str(target_step.get("id") or "")
+    action_id = str(action.get("id") or "")
+    key = _operation_choice_scope_key(step_id, action_id)
+    selected = (operation_choices or {}).get(key)
+    action_type = str(action.get("type") or "")
+    command = (action.get("canonical_action") or {}).get("command") or {}
+    command_kind = str(command.get("kind") or action_type)
+    has_direct_operation = bool({
+        "click": "click",
+        "double_click": "double_click",
+        "right_click": "right_click",
+        "focus": "focus",
+        "scroll": "scroll_to",
+        "drag": "drag_by_offset",
+    }.get(command_kind))
+    if selected is None:
+        if has_direct_operation:
+            return None
+        candidates = _baseline_operation_choice_candidates(
+            brief,
+            target_step,
+            action,
+        )
+        if candidates:
+            raise GenerationOperationChoiceRequired(
+                step_id,
+                action_id,
+                candidates=candidates,
+            )
+        return None
+    if has_direct_operation:
+        raise ValueError(
+            "OperationChoicePatch不能覆盖系统已确定operation: "
+            f"{step_id}/{action_id}"
+        )
+    if consumed_operation_choices is not None:
+        consumed_operation_choices.add(key)
+    operation = str(selected.get("operation") or "")
+    capability = capability_by_name(operation)
+    value_source = None
+    if capability and capability.requires_value_action:
+        value_source = _baseline_named_value_source(
+            brief,
+            step_id,
+            action,
+            operation,
+            "",
+        )
+        if value_source is None:
+            raise ValueError(
+                "OperationChoicePatch选择的operation缺少可用value_source: "
+                f"{step_id}/{action_id}/{operation}"
+            )
+    return operation, value_source
+
+
+def _operation_choice_scope_key(step_id, action_id):
+    return (str(step_id or ""), str(action_id or ""))
+
+
+def _operation_choice_key_text(key):
+    step_id, action_id = key
+    return f"{step_id}/{action_id}"
+
+
+def _baseline_operation_choice_candidates(brief, target_step, action):
+    action_type = str(action.get("type") or "")
+    direct = set(operations_for_recorded_action(action_type))
+    target = action.get("target") or {}
+    result = []
+    for name in sorted(plan_operation_names()):
+        capability = capability_by_name(name)
+        assessment = operation_compatibility(name, action)
+        if capability is None or assessment["status"] == "incompatible":
+            continue
+        include = any((
+            assessment["status"] == "compatible",
+            name in direct,
+            str(target_step.get("semantic_type") or "") == "then"
+            and capability.category == "assertion",
+            action_type == "observe"
+            and capability.category in {"assertion", "scenario_state"},
+            action_type not in {"click", "double_click", "right_click", "focus", "scroll", "drag", "keyboard", "input_text", "observe"}
+            and capability.category == "interaction",
+        ))
+        if not include:
+            continue
+        value_source_status = _operation_value_source_status(
+            brief,
+            action,
+            name,
+            capability.requires_value_action,
+        )
+        candidate = {
+            "step_id": str(action.get("step_id") or ""),
+            "action_id": str(action.get("id") or ""),
+            "action_type": action_type,
+            "target_fingerprint": str(target.get("target_fingerprint") or ""),
+            "control_type": str(target.get("control_type") or ""),
+            "operation": name,
+            "category": capability.category,
+            "status": assessment["status"],
+            "basis": assessment["basis"],
+            "requires_value_action": bool(capability.requires_value_action),
+            "value_source_status": value_source_status,
+        }
+        candidate["choice_key"] = operation_choice_key(candidate)
+        result.append(candidate)
+    return result
+
+
+def _operation_value_source_status(brief, action, operation, requires_value):
+    if not requires_value:
+        return "forbidden"
+    available = _baseline_available_value_sources(
+        brief,
+        action.get("step_id"),
+        operation,
+    )
+    if len(available) == 1:
+        return "unique_available"
+    if len(available) > 1:
+        return "choice_required"
+    return "unavailable"
+
+
+def _baseline_target_name(action):
+    target = (action or {}).get("target") or {}
+    if _is_frozen_scroll_pos_target(action, target):
+        return _scroll_pos_target_name(action, target)
+    locator_name = str(target.get("locator_name") or "").strip()
+    if _is_public_locator_name(locator_name):
+        return locator_name
+    shortcut = re.search(
+        r"ctrl[_+\s-]*([a-z0-9])",
+        locator_name,
+        flags=re.I,
+    ) or re.search(
+        r"ctrl[_+\s-]*([a-z0-9])",
+        str(target.get("name") or ""),
+        flags=re.I,
+    )
+    control = _safe_name(target.get("control_type") or "control")
+    if shortcut:
+        return _safe_name(f"ctrl_{shortcut.group(1)}_{control}")
+    if control in {"document", "edit"}:
+        return control
+    semantic_name = _semantic_public_target_name(target, control)
+    if semantic_name:
+        return semantic_name
+    return None
+
+
+def _is_frozen_scroll_pos_target(action, target):
+    return bool(
+        str((action or {}).get("type") or "").casefold() == "scroll"
+        and str((target or {}).get("locator", {}).get("by") or "").casefold()
+        == "pos"
+    )
+
+
+def _scroll_pos_target_name(action, target):
+    action_id = str((action or {}).get("id") or "")
+    suffix = re.sub(r"[^0-9a-zA-Z_]+", "_", action_id).strip("_").lower()
+    if suffix.startswith("action_"):
+        suffix = suffix[len("action_"):]
+    return _unique_public_name(
+        "scroll_area",
+        suffix or str((target or {}).get("target_fingerprint") or "")[:12],
+    )
+
+
+def _unique_public_name(*parts):
+    value = _safe_name("_".join(str(part or "") for part in parts))
+    if not value or value == "generated":
+        value = "scroll_area"
+    if not re.match(r"[a-z]", value):
+        value = f"scroll_area_{value}"
+    return value[:64].rstrip("_") or "scroll_area"
+
+
+_TARGET_NAME_TOKEN_MAP = {
+    "新建标签页": "new_tab",
+    "新标签页": "new_tab",
+    "标签页": "tab",
+    "标签": "tab",
+    "新建": "new",
+    "打开": "open",
+    "保存": "save",
+    "提交": "submit",
+    "确认": "confirm",
+    "取消": "cancel",
+    "删除": "delete",
+    "移除": "remove",
+    "文件": "file",
+    "编辑": "edit",
+    "菜单": "menu",
+    "按钮": "button",
+    "文本编辑器": "text_editor",
+    "文本": "text",
+    "显示": "display",
+    "加粗": "bold",
+    "斜体": "italic",
+}
+
+
+def _semantic_public_target_name(target, control):
+    for raw in (
+            target.get("name"),
+            target.get("text"),
+            target.get("locator_name"),
+            target.get("auto_id"),
+    ):
+        slug = _translated_ui_slug(raw)
+        if not slug:
+            continue
+        value = _with_control_suffix(slug, control)
+        if _is_public_locator_name(value):
+            return value
+    return None
+
+
+def _translated_ui_slug(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for suffix in _TECHNICAL_LOCATOR_SUFFIXES:
+        if text.endswith(suffix):
+            text = text[:-len(suffix)]
+            break
+    text = re.sub(r"[（(][^）)]*[）)]", "", text).strip()
+    ascii_slug = _safe_name(text)
+    if ascii_slug != "generated" and re.search(r"[A-Za-z]", text):
+        return ascii_slug
+    remaining = text
+    parts = []
+    tokens = sorted(_TARGET_NAME_TOKEN_MAP, key=len, reverse=True)
+    while remaining:
+        remaining = remaining.lstrip(" _-:/\\|，,。.;；：")
+        if not remaining:
+            break
+        match = next((token for token in tokens if remaining.startswith(token)), None)
+        if match is None:
+            return None
+        parts.append(_TARGET_NAME_TOKEN_MAP[match])
+        remaining = remaining[len(match):]
+    if not parts:
+        return None
+    return _safe_name("_".join(parts))
+
+
+def _with_control_suffix(slug, control):
+    suffix = {
+        "button": "button",
+        "menuitem": "menu_item",
+        "menu_item": "menu_item",
+        "menu": "menu",
+        "tabitem": "tab",
+        "tab_item": "tab",
+        "listitem": "item",
+        "list_item": "item",
+    }.get(control)
+    if suffix and not slug.endswith(f"_{suffix}") and slug != suffix:
+        return f"{slug}_{suffix}"
+    return slug
+
+
+def _is_append_keyboard_command(command):
+    return bool(
+        str((command or {}).get("kind") or "").casefold() == "keyboard"
+        and str((command or {}).get("text_operation") or "").casefold()
+        == "append"
+    )
+
+
+def _baseline_runtime_roles(target_steps, actions_by_step):
+    step_positions = {
+        str(step.get("id") or ""): index
+        for index, step in enumerate(target_steps)
+    }
+    intents = {
+        (str(step.get("id") or ""), str(intent.get("action_id") or ""))
+        for step in target_steps
+        for intent in step.get("observation_intents") or ()
+        if intent.get("action_id")
+    }
+    groups = {}
+    for step_id, actions in actions_by_step.items():
+        for action in actions:
+            binding = str(action.get("value_binding") or "").strip()
+            if not binding.startswith("context.") or len(binding) <= 8:
+                continue
+            groups.setdefault(binding, []).append((step_id, action))
+    roles = {}
+    for binding, entries in groups.items():
+        producers = [
+            (step_id, action)
+            for step_id, action in entries
+            if action.get("type") == "observe"
+            and (step_id, str(action.get("id") or "")) in intents
+            and ((action.get("semantics") or {}).get("runtime_value_sources") or {}).get("text") is True
+        ]
+        if len(producers) != 1:
+            raise ValueError(
+                f"Baseline Design runtime binding缺少唯一F9 producer: {binding}"
+            )
+        producer_step, producer = producers[0]
+        consumers = [
+            (step_id, action)
+            for step_id, action in entries
+            if action.get("type") in {"keyboard", "input_text"}
+            and step_positions.get(step_id, -1)
+            > step_positions.get(producer_step, -1)
+        ]
+        if not consumers:
+            raise ValueError(
+                f"Baseline Design runtime binding缺少后续consumer: {binding}"
+            )
+        concept = binding.split(".", 1)[1]
+        roles[(producer_step, str(producer.get("id") or ""))] = {
+            "role": "producer",
+            "concept": concept,
+        }
+        for consumer_step, consumer in consumers:
+            roles[(consumer_step, str(consumer.get("id") or ""))] = {
+                "role": "consumer",
+                "concept": concept,
+            }
+    return roles
+
+
+def _baseline_step_runtime_concepts(runtime_roles, step_id, role):
+    return list(dict.fromkeys(
+        value["concept"]
+        for (owner_step, _action_id), value in runtime_roles.items()
+        if owner_step == step_id and value["role"] == role
+    ))
+
+
+def _baseline_constrained_operation(
+        brief,
+        target_step,
+        action,
+        *,
+        value_source_choices=None,
+        consumed_value_source_choices=None,
+    ):
+    constraints = [
+        item
+        for item in (action.get("semantics") or {}).get(
+            "implementation_constraints"
+        ) or ()
+        if isinstance(item, dict)
+        and capability_by_name(item.get("operation")) is not None
+    ]
+    if len(constraints) != 1:
+        return None
+    constraint = constraints[0]
+    operation = str(constraint.get("operation") or "")
+    parameters = constraint.get("parameters") or {}
+    source_name = str(parameters.get("expected_source") or "")
+    value_source = _baseline_named_value_source(
+        brief,
+        str(target_step.get("id") or ""),
+        action,
+        operation,
+        source_name,
+        value_source_choices=value_source_choices,
+        consumed_value_source_choices=consumed_value_source_choices,
+    )
+    capability = capability_by_name(operation)
+    if capability.requires_value_action and value_source is None:
+        return None
+    return operation, value_source
+
+
+def _baseline_semantic_operation(action):
+    target = action.get("target") or {}
+    control_type = str(target.get("control_type") or "")
+    after_state = (
+        ((action.get("semantics") or {}).get("effect") or {}).get(
+            "after_state"
+        )
+        or {}
+    )
+    operation = None
+    if control_type == "Slider" and after_state.get("range_value") is not None:
+        operation = "set_slider_value"
+    elif control_type == "CheckBox" and after_state.get("toggle_state") is not None:
+        operation = "set_checked"
+    elif control_type == "TreeItem" and after_state.get("expanded") is not None:
+        operation = "set_tree_expanded"
+    if operation is None:
+        return None
+    return operation, {
+        "kind": "recorded_action",
+        "action_id": str(action.get("id") or ""),
+    }
+
+
+def _baseline_observation_operation(target_step, action):
+    action_id = str(action.get("id") or "")
+    intents = [
+        item
+        for item in target_step.get("observation_intents") or ()
+        if str(item.get("action_id") or "") == action_id
+    ]
+    if len(intents) != 1:
+        return None
+    intent = intents[0]
+    focus = str(intent.get("focus") or "auto")
+    relation = str(intent.get("relation") or "auto")
+    if focus == "visible":
+        return "assert_visible", None
+    if focus == "enabled":
+        return "assert_enabled", None
+    if focus not in {"auto", "text", "value", "window_title"}:
+        return None
+    operation = {
+        "auto": "assert_text_equal",
+        "equal": "assert_text_equal",
+        "contains": "assert_text_contains",
+        "not_contains": "assert_text_not_contains",
+    }.get(relation)
+    source = intent.get("expected_source") or {}
+    kind = str(source.get("kind") or "")
+    reference = str(source.get("reference") or "")
+    if operation is None:
+        return None
+    if kind == "examples" and reference:
+        return operation, {"kind": "examples", "reference": reference}
+    if kind == "feature" and reference in FEATURE_LITERAL_REFERENCES:
+        return operation, {"kind": "feature_literal", "reference": reference}
+    return None
+
+
+def _baseline_assertion_candidate(
+        brief,
+        step_id,
+        action,
+        *,
+        value_source_choices=None,
+        consumed_value_source_choices=None,
+    assertion_choices=None,
+    consumed_assertion_choices=None,
+    ):
+    if str(action.get("type") or "") != "observe":
+        return None
+    action_id = str(action.get("id") or "")
+    candidates = []
+    for ambiguity in brief.get("ambiguities") or ():
+        ambiguity_id = str(ambiguity.get("ambiguity_id") or "")
+        if any((
+            str(ambiguity.get("code") or "") != "assertion_implementation",
+            str(ambiguity.get("step_id") or "") != str(step_id),
+            action_id not in {str(item) for item in ambiguity.get("action_ids") or ()},
+        )):
+            continue
+        allowed = [
+            item for item in ambiguity.get("allowed_outcomes") or ()
+            if item.get("authority") == "ai"
+            and item.get("outcome") == "select_assertion_implementation"
+        ]
+        if len(allowed) != 1:
+            continue
+        selected = (assertion_choices or {}).get(ambiguity_id)
+        if selected is not None:
+            candidates.append(dict(selected["candidate"]))
+            if consumed_assertion_choices is not None:
+                consumed_assertion_choices.add(ambiguity_id)
+            continue
+        ambiguity_candidates = [
+            item for item in (ambiguity.get("facts") or {}).get(
+                "assertion_candidates"
+            ) or ()
+            if isinstance(item, dict)
+            and capability_by_name(item.get("operation")) is not None
+        ]
+        if len(ambiguity_candidates) > 1:
+            raise GenerationAssertionChoiceRequired(
+                ambiguity_id,
+                candidates=ambiguity_candidates,
+            )
+        candidates.extend(ambiguity_candidates)
+    if len(candidates) != 1:
+        return None
+    candidate = candidates[0]
+    operation = str(candidate.get("operation") or "")
+    target = str(candidate.get("target") or "")
+    evidence_target = str((action.get("target") or {}).get("locator_name") or "")
+    if target and evidence_target and target != evidence_target:
+        return None
+    parameters = candidate.get("parameters") or {}
+    source_name = str(parameters.get("expected_source") or "")
+    value_source = None
+    capability = capability_by_name(operation)
+    if capability and capability.requires_value_action:
+        value_source = _baseline_named_value_source(
+            brief,
+            step_id,
+            action,
+            operation,
+            source_name,
+            value_source_choices=value_source_choices,
+            consumed_value_source_choices=consumed_value_source_choices,
+        )
+        if value_source is None:
+            return None
+    return operation, value_source
+
+
+def _baseline_named_value_source(
+        brief,
+        step_id,
+        action,
+        operation,
+        source_name,
+        *,
+        value_source_choices=None,
+        consumed_value_source_choices=None,
+    ):
+    if not source_name:
+        selected = _baseline_selected_value_source_choice(
+            step_id,
+            action,
+            operation,
+            value_source_choices,
+            consumed_value_source_choices,
+        )
+        if selected is not None:
+            return selected
+        return _baseline_unique_available_value_source(
+            brief,
+            step_id,
+            action,
+            operation,
+        )
+    if source_name.startswith("examples."):
+        return {
+            "kind": "examples",
+            "reference": source_name.split(".", 1)[1],
+        }
+    if source_name in FEATURE_LITERAL_REFERENCES:
+        return {"kind": "feature_literal", "reference": source_name}
+    try:
+        value = resolve_recorded_action_value(
+            brief,
+            step_id,
+            action.get("id"),
+            operation,
+        )
+    except ValueError:
+        value = None
+    if value is None:
+        return None
+    return {
+        "kind": "recorded_action",
+        "action_id": str(action.get("id") or ""),
+    }
+
+
+def _baseline_selected_value_source_choice(
+        step_id,
+        action,
+        operation,
+        value_source_choices,
+        consumed_value_source_choices,
+    ):
+    key = _value_source_choice_key(
+        step_id,
+        str(action.get("id") or ""),
+        operation,
+    )
+    source = (value_source_choices or {}).get(key)
+    if source is None:
+        return None
+    if consumed_value_source_choices is not None:
+        consumed_value_source_choices.add(key)
+    return dict(source)
+
+
+def _value_source_choice_key(step_id, action_id, operation):
+    return (
+        str(step_id or ""),
+        str(action_id or ""),
+        str(operation or ""),
+    )
+
+
+def _value_source_choice_key_text(key):
+    step_id, action_id, operation = key
+    return f"{step_id}/{action_id}/{operation}"
+
+
+def _baseline_unique_available_value_source(brief, step_id, action, operation):
+    available = _baseline_available_value_sources(brief, step_id, operation)
+    if len(available) > 1:
+        raise GenerationValueSourceChoiceRequired(
+            step_id,
+            action.get("id"),
+            operation,
+            sources=available,
+        )
+    return available[0] if len(available) == 1 else None
+
+
+def _baseline_available_value_sources(brief, step_id, operation):
+    qualification = qualify_value_sources(brief, step_id, operation)
+    available = [
+        dict(item.get("shape") or {})
+        for item in qualification.get("sources") or ()
+        if item.get("status") == "available"
+        and isinstance(item.get("shape"), dict)
+    ]
+    normalized = []
+    for source in available:
+        kind = str(source.get("kind") or "")
+        if kind == "recorded_action" and source.get("action_id"):
+            normalized.append({
+                "kind": "recorded_action",
+                "action_id": str(source.get("action_id")),
+            })
+        elif kind == "feature_literal" and source.get("reference"):
+            normalized.append({
+                "kind": "feature_literal",
+                "reference": str(source.get("reference")),
+            })
+        elif kind == "examples" and source.get("reference"):
+            normalized.append({
+                "kind": "examples",
+                "reference": str(source.get("reference")),
+            })
+        elif kind == "data_table" and source.get("reference"):
+            normalized.append({
+                "kind": "data_table",
+                "reference": str(source.get("reference")),
+            })
+    unique = []
+    for source in normalized:
+        if source not in unique:
+            unique.append(source)
+    return unique
+
+
+def _baseline_example_source(brief, step_id, value):
+    scenario = (brief.get("target") or {}).get("scenario") or {}
+    examples = scenario.get("example_values") or {}
+    matches = [
+        name
+        for name in declared_example_arguments(brief, step_id)
+        if examples.get(name) == value
+    ]
+    if len(matches) != 1:
+        return None
+    return {"kind": "examples", "reference": matches[0]}
+
+
+def _baseline_declared_literal(step_text):
+    quoted = [
+        match.group(2).strip()
+        for match in re.finditer(r"(['\"])(.+?)\1", str(step_text or ""))
+        if match.group(2).strip()
+    ]
+    if len(quoted) == 1:
+        return quoted[0]
+    numeric = re.findall(
+        r"(?<![0-9A-Za-z_])[-+]?\d+(?:\.\d+)?(?![0-9A-Za-z_])",
+        str(step_text or ""),
+    )
+    return numeric[0] if len(numeric) == 1 else None
+
+
+def _baseline_feature_source(value):
+    return {
+        "kind": "feature_literal",
+        "reference": "step_text",
+        "value": value,
+    }
+
+
+def _baseline_delete_count(command):
+    return sum(
+        str(item.get("name") or "").casefold()
+        in {"back", "backspace", "delete"}
+        for item in command.get("key_events") or ()
+        if isinstance(item, dict)
+    )
+
+
+def _baseline_table_use(brief, target_step, constraints):
+    if not target_step.get("table"):
+        return None
+    outcome = str(constraints.get("table_business_outcome") or "")
+    resolution = infer_table_usage(
+        target_step,
+        code_candidates=(brief.get("semantics") or {}).get(
+            "reuse_candidates"
+        ) or (),
+    )
+    if outcome:
+        matching = [
+            item
+            for item in resolution.get("candidates") or ()
+            if _baseline_table_outcome(item.get("table_usage") or {}) == outcome
+        ]
+        if len(matching) != 1:
+            raise ValueError(
+                f"Baseline Design缺少Decision对应的唯一Data Table用法: {outcome}"
+            )
+        usage = matching[0]["table_usage"]
+    else:
+        usage = resolution.get("selected")
+    if usage is None:
+        raise ValueError(
+            "Baseline Design缺少已确认的Data Table业务关系: "
+            f"{target_step.get('id')}"
+        )
+    relationship = _baseline_table_outcome(usage)
+    execution_owner = {
+        "page_object": "page",
+        "scenario_context": "scenario",
+        "step_definition": "step",
+    }.get(str(usage.get("consumer") or ""))
+    if not relationship or not execution_owner:
+        raise ValueError(
+            f"Baseline Design Data Table候选无效: {target_step.get('id')}"
+        )
+    result = {
+        "relationship": relationship,
+        "data_shape": str(usage.get("shape") or ""),
+        "execution_owner": execution_owner,
+        "order_matters": usage.get("ordered"),
+        "column_meanings": dict(usage.get("columns") or {}),
+        "reason": str(usage.get("reason") or "Use the confirmed table usage."),
+    }
+    if relationship == "scenario_state":
+        result["state_name"] = str(
+            usage.get("context_key") or target_step.get("id") or "table_state"
+        )
+    return result
+
+
+def _baseline_table_outcome(usage):
+    consumption = str(usage.get("consumption") or "")
+    if consumption == "each_row":
+        if usage.get("reset_between_rows") is True:
+            return "independent_rows"
+        if usage.get("reset_between_rows") is False:
+            return "continuous_rows"
+    if consumption in {"whole_table", "scenario_state"}:
+        return consumption
+    return ""
+
+
+def _baseline_table_value_source(table_use):
+    if not table_use:
+        return None
+    matches = [
+        column
+        for column, role in (table_use.get("column_meanings") or {}).items()
+        if role in {"input", "option", "value"}
+    ]
+    if len(matches) != 1:
+        return None
+    return {"kind": "data_table", "reference": str(matches[0])}
+
+
+def _baseline_window_ownership(
+        brief,
+        referenced_roots,
+        actions_by_step=None,
+        target_names_by_action=None,
+    business_name_overrides=None,
+    ):
+    ownership = brief.get("window_ownership") or {}
+    used_names = set()
+    owners = []
+    windows_by_root = {
+        str(window.get("root_name") or ""): window
+        for window in ownership.get("windows") or ()
+        if isinstance(window, dict) and window.get("root_name")
+    }
+    views_by_root = _baseline_window_views(
+        brief,
+        actions_by_step or {},
+        target_names_by_action or {},
+    )
+    business_name_overrides = business_name_overrides or {}
+    for root_name in referenced_roots:
+        window = windows_by_root.get(root_name) or {}
+        existing_owner = _baseline_existing_window_owner(
+            ownership,
+            root_name,
+        )
+        if existing_owner is not None:
+            owner = {
+                "root_name": root_name,
+                "strategy": "reuse_existing",
+                "candidate_id": existing_owner["candidate_id"],
+            }
+            used_names.add(_page_package_name(
+                existing_owner.get("page_object")
+            ))
+        else:
+            owner = {
+                "root_name": root_name,
+                "strategy": "create_new",
+            }
+            if root_name in business_name_overrides:
+                owner["business_name"] = _unique_baseline_name(
+                    _public_owner_name(root_name, business_name_overrides[root_name]),
+                    used_names,
+                )
+            elif _has_machine_identity_suffix(root_name):
+                owner["business_name"] = _unique_baseline_name(
+                    _baseline_root_name(root_name),
+                    used_names,
+                )
+            else:
+                stable_name = _stable_root_business_name(window)
+                if stable_name:
+                    owner["business_name"] = _unique_baseline_name(
+                        stable_name,
+                        used_names,
+                    )
+                else:
+                    used_names.add(_public_owner_name(root_name))
+        views = []
+        for view in views_by_root.get(root_name, ()):
+            business_name = _unique_baseline_name(
+                view["business_name"],
+                used_names,
+            )
+            views.append({
+                "candidate_id": view["candidate_id"],
+                "business_name": business_name,
+                "action_ids": list(view["action_ids"]),
+                "active_locator": view["active_locator"],
+                "reason": "Use the frozen child-window ownership evidence for this WindowView.",
+            })
+        if views:
+            owner["views"] = views
+        owners.append(owner)
+    return owners
+
+
+def _baseline_window_views(brief, actions_by_step, target_names_by_action):
+    actions = {
+        (
+            str(action.get("step_id") or ""),
+            str(action.get("id") or action.get("action_id") or ""),
+        ): action
+        for step_actions in actions_by_step.values()
+        for action in step_actions or ()
+        if str(action.get("step_id") or "")
+        and str(action.get("id") or action.get("action_id") or "")
+    }
+    result = {}
+    for candidate in (brief.get("window_ownership") or {}).get(
+            "ownership_candidates"
+    ) or ():
+        if candidate.get("kind") != "child_window_view":
+            continue
+        root_name = str(candidate.get("root_name") or "")
+        step_id = str(candidate.get("step_id") or "")
+        action_ids = [
+            str(item) for item in candidate.get("action_ids") or () if item
+        ]
+        matched = [actions.get((step_id, action_id)) for action_id in action_ids]
+        locator_names = [
+            str(
+                target_names_by_action.get((step_id, action_id))
+                or (((action or {}).get("target") or {}).get("locator_name"))
+                or ""
+            )
+            for action_id, action in zip(action_ids, matched)
+            if action is not None
+        ]
+        opener = actions.get((
+            step_id,
+            str(candidate.get("opener_action_id") or ""),
+        )) or {}
+        if not root_name or not action_ids or len(matched) != len(action_ids):
+            continue
+        result.setdefault(root_name, []).append({
+            "candidate_id": str(candidate.get("candidate_id") or ""),
+            "business_name": _baseline_view_name(opener),
+            "action_ids": action_ids,
+            "active_locator": locator_names[0] if locator_names else "",
+        })
+    return result
+
+
+def _baseline_existing_window_owner(ownership, root_name):
+    window = next((
+        item
+        for item in ownership.get("windows") or ()
+        if str(item.get("root_name") or "") == str(root_name or "")
+    ), {})
+    owner_match = window.get("owner_match") or {}
+    if owner_match.get("suggested_strategy") != "reuse_existing":
+        return None
+    candidates = [
+        item
+        for item in owner_match.get("candidates") or ()
+        if isinstance(item, dict)
+        and item.get("kind") == "canonical_window"
+        and item.get("candidate_id")
+        and item.get("page_object")
+        and item.get("root_locator_file")
+        and item.get("root_locator")
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return selected_window_owner_candidate(candidates)
+
+
+def _baseline_root_name(root_name):
+    value = re.sub(
+        r"_window_[0-9a-f]{6,16}$",
+        "",
+        str(root_name or ""),
+        flags=re.I,
+    )
+    value = _safe_name(value)
+    return value if value != "generated" else "application"
+
+
+def _stable_root_business_name(window):
+    criteria = (window or {}).get("root_criteria") or {}
+    auto_id = str(criteria.get("auto_id") or "").strip()
+    if not auto_id:
+        return None
+    value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", auto_id)
+    value = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", value)
+    value = _safe_name(value)
+    value = re.sub(r"_(?:window|page)$", "", value)
+    return value if re.fullmatch(r"[a-z][a-z0-9_]{1,63}", value) else None
+
+
+def _baseline_view_name(opener):
+    target = opener.get("target") or {}
+    base = (
+        _translated_ui_slug(target.get("locator_name"))
+        or _translated_ui_slug(target.get("name"))
+        or _safe_name(target.get("locator_name") or target.get("name") or "")
+    )
+    suffix = (
+        "menu"
+        if str(target.get("control_type") or "") in {"Menu", "MenuItem"}
+        else "view"
+    )
+    if base == "generated":
+        base = "application"
+    if base.endswith(f"_{suffix}"):
+        return base
+    return f"{base}_{suffix}"
+
+
+def _unique_baseline_name(candidate, used_names):
+    base = str(candidate or "application").strip("_") or "application"
+    value = base
+    index = 2
+    while value in used_names:
+        value = f"{base}_{index}"
+        index += 1
+    used_names.add(value)
+    return value
+
+
+def _baseline_ambiguity_choices(brief, system_choices=None):
+    system_choices = system_choices or {}
+    choices = []
+    for ambiguity in brief.get("ambiguities") or ():
+        ambiguity_id = str(ambiguity.get("ambiguity_id") or "")
+        if ambiguity_id in system_choices:
+            choices.append(system_choices[ambiguity_id])
+            continue
+        outcomes = [
+            item
+            for item in ambiguity.get("allowed_outcomes") or ()
+            if item.get("authority") == "ai"
+        ]
+        frozen_evidence = _baseline_frozen_evidence_choice(
+            ambiguity_id,
+            outcomes,
+        )
+        if frozen_evidence is not None:
+            choices.append(frozen_evidence)
+            continue
+        if len(outcomes) != 1:
+            if outcomes:
+                raise GenerationAmbiguityChoiceRequired(
+                    ambiguity_id,
+                    outcomes=outcomes,
+                )
+            continue
+        outcome = outcomes[0]
+        choice = {
+            "ambiguity_id": ambiguity_id,
+            "outcome": str(outcome.get("outcome") or ""),
+            "reason": "Use the only AI-authorized frozen outcome.",
+        }
+        if outcome.get("candidate_id"):
+            choice["candidate_id"] = str(outcome["candidate_id"])
+        choices.append(choice)
+    return choices
+
+
+def _baseline_frozen_evidence_choice(ambiguity_id, outcomes):
+    frozen = [
+        item for item in outcomes
+        if item.get("outcome") == "implement_with_frozen_evidence"
+    ]
+    placeholders = [
+        item for item in outcomes
+        if item.get("outcome") == "generate_issue_placeholder"
+    ]
+    if len(frozen) != 1 or len(outcomes) != 1 + len(placeholders):
+        return None
+    return {
+        "ambiguity_id": ambiguity_id,
+        "outcome": "implement_with_frozen_evidence",
+        "reason": "Use the unique frozen evidence implementation outcome.",
+    }
+
+
+def _baseline_page_method_reuse(
+        brief,
+        step_id,
+        operations,
+        actions,
+        *,
+        method_choices=None,
+        consumed_method_choices=None,
+    ):
+    if not operations:
+        return None
+    root_names = {
+        str(operation.get("window_root") or "")
+        for operation in operations
+    }
+    if len(root_names) != 1:
+        return None
+    root_name = next(iter(root_names))
+    owner = _baseline_existing_window_owner(
+        brief.get("window_ownership") or {},
+        root_name,
+    )
+    if owner is None:
+        return None
+    owner_path = str(owner.get("page_object") or "")
+    if not owner_path:
+        return None
+    actions_by_id = {
+        str(action.get("id") or ""): action
+        for action in actions or ()
+        if action.get("id")
+    }
+    expected = []
+    for operation in operations:
+        action_id = str(operation.get("target_action_id") or "")
+        action = actions_by_id.get(action_id)
+        if action is None:
+            return None
+        if operation.get("value_source") or operation.get("runtime_value"):
+            return None
+        target = str(
+            operation.get("target_name")
+            or ((action.get("target") or {}).get("locator_name"))
+            or ""
+        )
+        if not target:
+            return None
+        expected.append({
+            "operation": str(operation.get("operation") or ""),
+            "target": target,
+        })
+    matches = []
+    for candidate in owner.get("method_candidates") or ():
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if any((
+            candidate.get("kind") != "page_object_method",
+            not candidate_id,
+            str(candidate.get("path") or "") != owner_path,
+            not str(candidate.get("symbol") or ""),
+            not str(candidate.get("file_sha256") or ""),
+        )):
+            continue
+        resolved = _implementation_candidate(brief, candidate_id)
+        if resolved is None or resolved.get("kind") != "page_object_method":
+            continue
+        sequence = list(candidate.get("call_sequence") or ())
+        if len(sequence) != len(expected):
+            continue
+        actual = []
+        for call in sequence:
+            if call.get("value") is not None or call.get("value_parameter"):
+                break
+            actual.append({
+                "operation": str(call.get("operation") or ""),
+                "target": str(call.get("target") or ""),
+            })
+        if actual == expected:
+            matches.append(candidate)
+    selected_candidate_id = (method_choices or {}).get(str(step_id or ""))
+    if selected_candidate_id is not None:
+        selected = [
+            item for item in matches
+            if str(item.get("candidate_id") or "") == selected_candidate_id
+        ]
+        if len(selected) != 1:
+            raise ValueError(
+                "MethodChoicePatch未允许的candidate_id: "
+                f"{step_id}/{selected_candidate_id}"
+            )
+        if consumed_method_choices is not None:
+            consumed_method_choices.add(str(step_id or ""))
+        return {
+            "strategy": "reuse",
+            "candidate_id": selected_candidate_id,
+            "reason": "Use the AI-selected frozen Page method candidate.",
+        }
+    if len(matches) > 1:
+        raise GenerationMethodChoiceRequired(step_id, candidates=matches)
+    if len(matches) != 1:
+        return None
+    return {
+        "strategy": "reuse",
+        "candidate_id": str(matches[0].get("candidate_id") or ""),
+        "reason": "Use the unique frozen Page method reuse candidate.",
+    }
+
+
+def _baseline_step_reuse_choices(brief, target_steps, actions_by_step):
+    step_choices = {}
+    ambiguity_choices = {}
+    target_steps_by_id = {
+        str(step.get("id") or ""): step
+        for step in target_steps or ()
+        if isinstance(step, dict) and step.get("id")
+    }
+    for ambiguity in brief.get("ambiguities") or ():
+        if not isinstance(ambiguity, dict):
+            continue
+        choice = _baseline_step_reuse_choice(
+            brief,
+            ambiguity,
+            target_steps_by_id,
+            actions_by_step,
+        )
+        if choice is None:
+            continue
+        step_id = choice["step_id"]
+        if step_id in step_choices:
+            continue
+        step_choices[step_id] = choice["step_behavior"]
+        ambiguity_choices[choice["ambiguity_choice"]["ambiguity_id"]] = (
+            choice["ambiguity_choice"]
+        )
+    return step_choices, ambiguity_choices
+
+
+def _baseline_step_reuse_choice(
+        brief,
+        ambiguity,
+        target_steps_by_id,
+        actions_by_step,
+    ):
+    allowed = [
+        item
+        for item in ambiguity.get("allowed_outcomes") or ()
+        if isinstance(item, dict)
+    ]
+    if not allowed or any(item.get("authority") != "ai" for item in allowed):
+        return None
+    reuse = [
+        item for item in allowed
+        if item.get("outcome") == "reuse_existing_behavior"
+        and item.get("candidate_id")
+    ]
+    placeholders = [
+        item for item in allowed
+        if item.get("outcome") == "generate_issue_placeholder"
+    ]
+    if len(reuse) != 1 or len(allowed) != 1 + len(placeholders):
+        return None
+    step_id = str(ambiguity.get("step_id") or "")
+    target_step = target_steps_by_id.get(step_id)
+    actions = list(actions_by_step.get(step_id) or ())
+    action_ids = [str(action.get("id") or "") for action in actions]
+    if not target_step or not action_ids or set(action_ids) != set(
+            ambiguity.get("action_ids") or ()
+    ):
+        return None
+    candidate_id = str(reuse[0].get("candidate_id") or "")
+    candidate = _implementation_candidate(brief, candidate_id)
+    if candidate is None or candidate.get("kind") != "step_definition":
+        return None
+    if len(_matching_step_pattern_contracts(candidate, target_step)) != 1:
+        return None
+    mappings = _baseline_step_reuse_mappings(candidate, actions)
+    if mappings is None:
+        return None
+    return {
+        "step_id": step_id,
+        "step_behavior": {
+            "strategy": "reuse",
+            "candidate_id": candidate_id,
+            "reason": "Use the unique frozen Step behavior reuse candidate.",
+            "action_mappings": mappings,
+        },
+        "ambiguity_choice": {
+            "ambiguity_id": str(ambiguity.get("ambiguity_id") or ""),
+            "outcome": "reuse_existing_behavior",
+            "candidate_id": candidate_id,
+            "reason": "Use the unique frozen Step behavior reuse candidate.",
+        },
+    }
+
+
+def _baseline_step_reuse_mappings(candidate, actions):
+    sequence = list(candidate.get("call_sequence") or ())
+    if len(sequence) != len(actions):
+        return None
+    mappings = []
+    for index, (call, action) in enumerate(zip(sequence, actions)):
+        operation = str(call.get("operation") or "")
+        target = str(call.get("target") or "")
+        if any((
+            call.get("value") is not None,
+            call.get("value_parameter"),
+            operation_compatibility(operation, action)["status"]
+            == "incompatible",
+            target != str((action.get("target") or {}).get("locator_name") or ""),
+        )):
+            return None
+        mappings.append({
+            "action_id": str(action.get("id") or ""),
+            "call_index": index,
+            "operation": operation,
+            "target": target,
+        })
+    return mappings
+
+
+def _baseline_summary(brief):
+    target = brief.get("target") or {}
+    scenario = target.get("scenario") or {}
+    name = str(scenario.get("name") or scenario.get("id") or "").strip()
+    return f"Generate the recorded scenario {name}." if name else (
+        "Generate the recorded scenario."
+    )
+
+
+def _baseline_action_order(action):
+    for field in ("ordinal", "n"):
+        value = action.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return 0
 
 
 def compact_generation_design_contract():
     return {
         "design_version": GENERATION_DESIGN_VERSION,
         "purpose": (
-            "AI submits semantic and implementation choices; the system "
-            "compiles the complete GenerationPlan and proof."
+            "Internal Plan input model assembled from system baseline and "
+            "typed minimal patches; product AI submission of complete "
+            "GenerationDesign is retired."
         ),
+        "product_entry": "retired",
+        "ai_submission": "typed_patches_only",
         "top_level": {
             "required": [
                 "design_version",
@@ -68,15 +2543,17 @@ def compact_generation_design_contract():
             "optional": [
                 "scenario_intent",
                 "memory_trace",
+                "implementation_candidate_files",
             ],
             "field_types": {
                 "steps": "array of Step objects in exact target order",
-                "window_ownership": (
-                    "array of window ownership objects; child roots may "
-                    "declare parent_root to compile as an existing WindowView"
-                ),
+                "window_ownership": "array of real automation Root owners",
                 "ambiguity_choices": "array of ambiguity choice objects",
                 "memory_trace": "object",
+                "implementation_candidate_files": (
+                    "array of complete AI-authored file candidates with path "
+                    "and content"
+                ),
             },
             "rule": "Fields outside required/optional are rejected.",
         },
@@ -269,11 +2746,13 @@ def compact_generation_design_contract():
             "optional": [
                 "candidate_id",
                 "business_name",
-                "parent_root",
-                "ownership_candidate_id",
-                "dismissed_ownership_candidate_ids",
+                "views",
                 "reason",
             ],
+            "view": {
+                "required": ["business_name", "action_ids"],
+                "optional": ["candidate_id", "active_locator", "reason"],
+            },
             "strategies": ["reuse_existing", "create_new"],
             "rule": (
                 "AI chooses the business owner shape. Declare exactly one "
@@ -282,12 +2761,15 @@ def compact_generation_design_contract():
                 "candidate_id and forbids business_name. create_new forbids "
                 "candidate_id and requires an ASCII snake_case business_name "
                 "when the recorded Root contains a machine identity suffix. "
-                "To create a WindowView, declare parent_root and the exact "
-                "frozen ownership_candidate_id. To keep a candidate child "
-                "root as an independent WindowPage, list every rejected "
-                "candidate in dismissed_ownership_candidate_ids and provide "
-                "a non-empty business reason. The system verifies candidate "
-                "roots, scoped Actions, and order."
+                "create_new may also maintain an already generated owner at "
+                "the same target path; it is not existing-asset reuse unless "
+                "a frozen candidate_id is selected. "
+                "A views entry may group same-Root Actions into an existing "
+                "WindowView shape: when child-window evidence is available it "
+                "uses the frozen candidate_id, stable business_name, frozen "
+                "action_ids owned by that View, and optionally the "
+                "active_locator. The View shares its WindowPage Root and never "
+                "declares a second top-level Root."
             ),
         },
         "ambiguity_choice": {
@@ -303,6 +2785,9 @@ def compact_generation_design_contract():
             ),
         },
         "memory_trace": {
+            "conditional_required": (
+                "Required when Brief memory_digest.items is non-empty."
+            ),
             "required": ["applied", "dismissed"],
             "entry": {
                 "required": ["memory_id"],
@@ -311,8 +2796,10 @@ def compact_generation_design_contract():
             "rule": (
                 "Both fields are arrays of at most 6 unique entries. IDs "
                 "must exist in Brief memory_digest, cannot overlap, and "
-                "reason is at most 96 characters. Omit memory_trace when no "
-                "memory assessment is supplied."
+                "reason is at most 96 characters. Empty applied and "
+                "dismissed arrays explicitly record that memory was assessed "
+                "but none was used. Omit memory_trace only when Brief has no "
+                "memory items."
             ),
         },
         "system_compiles": [
@@ -327,8 +2814,15 @@ def compact_generation_design_contract():
     }
 
 
-def compile_generation_design(design, brief):
+def compile_generation_design(
+        design,
+        brief,
+        *,
+        require_public_locator_names=False,
+    ):
     design = _validate_design_shape(design, brief)
+    if require_public_locator_names:
+        _validate_public_locator_names(design, brief)
     target_steps = list((brief.get("target") or {}).get("steps") or ())
     steps_by_id = {
         str(step.get("id") or ""): step
@@ -363,25 +2857,21 @@ def compile_generation_design(design, brief):
         step_id = str(target_step["id"])
         selected = design_steps[step_id]
         step_file = _step_file_from_brief(brief, step_id=step_id)
-        behavior = _compile_step_behavior(
-            selected,
-            brief,
-            step_id,
-            step_file,
-            actions_by_step.get(step_id, {}),
-            target_step,
-        )
         table_usage = _compile_table_use(
             step_id,
             selected.get("table_use"),
             target_step.get("table"),
         )
         unresolved = unresolved_by_step.get(step_id) or []
-        if unresolved:
+        if unresolved and not selected.get("operations"):
             plan_steps[step_id] = {
                 "behavior_owner": "step_orchestration",
-                "behavior_file": behavior.get("behavior_file") or step_file,
-                "behavior_resolution": behavior["resolution"],
+                "behavior_file": step_file,
+                "behavior_resolution": {
+                    "strategy": "create",
+                    "candidate_id": None,
+                    "reason": "Generate an issue template for unresolved actions.",
+                },
                 "page_object": None,
                 "locator_file": None,
                 "data_file": None,
@@ -393,6 +2883,14 @@ def compile_generation_design(design, brief):
                 "unresolved_issues": unresolved,
             }
             continue
+        behavior = _compile_step_behavior(
+            selected,
+            brief,
+            step_id,
+            step_file,
+            actions_by_step.get(step_id, {}),
+            target_step,
+        )
         if behavior["strategy"] == "reuse":
             behavior["step"]["table_usage"] = table_usage
             plan_steps[step_id] = behavior["step"]
@@ -432,7 +2930,11 @@ def compile_generation_design(design, brief):
             "behavior_file": behavior.get("behavior_file") or step_file,
             "behavior_resolution": behavior["resolution"],
             "page_object": owner.get("page_object") if owner else None,
-            "locator_file": owner.get("root_locator_file") if owner else None,
+            "locator_file": (
+                owner.get("locator_file")
+                or owner.get("root_locator_file")
+                if owner else None
+            ),
             "data_file": None,
             "operations": operations,
             "action_relationships": action_relationships,
@@ -443,6 +2945,7 @@ def compile_generation_design(design, brief):
             ),
             "ignored_action_ids": [],
             "table_usage": table_usage,
+            **({"unresolved_issues": unresolved} if unresolved else {}),
         }
 
     ambiguity_resolutions = _compile_ambiguities(design, brief)
@@ -450,6 +2953,10 @@ def compile_generation_design(design, brief):
         ambiguity_resolutions,
         plan_steps,
         brief,
+    )
+    candidate_files = _normalize_implementation_candidate_files(
+        design.get("implementation_candidate_files"),
+        label="GenerationDesign implementation_candidate_files",
     )
     plan = {
         "summary": str(design.get("summary") or "").strip(),
@@ -463,9 +2970,94 @@ def compile_generation_design(design, brief):
         "steps": plan_steps,
         "ambiguity_resolutions": ambiguity_resolutions,
         "memory_trace": deepcopy(design.get("memory_trace") or {}),
+        **(
+            {"implementation_candidate_files": candidate_files}
+            if candidate_files
+            else {}
+        ),
     }
     _validate_reused_method_sequences(plan_steps, brief)
     return plan
+
+
+def _validate_public_locator_names(design, brief):
+    actions = {
+        (str(action.get("step_id") or ""), str(action.get("id") or "")): action
+        for action in (brief.get("actions") or ())
+        if isinstance(action, dict)
+        and action.get("step_id")
+        and action.get("id")
+    }
+    names_by_target = {}
+    targets_by_name = {}
+    for step in design.get("steps") or ():
+        step_id = str(step.get("step_id") or "")
+        for selection in step.get("operations") or ():
+            action_id = str(selection.get("target_action_id") or "")
+            action = actions.get((step_id, action_id))
+            if action is None:
+                continue
+            root_name = str(selection.get("window_root") or "")
+            if _locator_reuse_match(brief, step_id, action_id, root_name):
+                continue
+            target = action.get("target") or {}
+            evidence_name = str(target.get("locator_name") or "")
+            public_name = str(selection.get("target_name") or "").strip()
+            if not public_name and _is_public_locator_name(evidence_name):
+                public_name = evidence_name
+            if not _is_public_locator_name(public_name):
+                raise GenerationDesignValidationError(
+                    "新 locator 必须声明稳定 ASCII 业务 target_name: "
+                    f"step={step_id} action={action_id}"
+                )
+            target_identity = (
+                root_name,
+                str(target.get("target_fingerprint") or evidence_name),
+            )
+            public_target_identity = _public_target_identity(
+                root_name,
+                target,
+            )
+            previous_name = names_by_target.setdefault(
+                target_identity,
+                public_name,
+            )
+            if previous_name != public_name:
+                raise GenerationDesignValidationError(
+                    "同一冻结 target 必须使用同一公开 locator 名称: "
+                    f"{previous_name}/{public_name} "
+                    f"step={step_id} action={action_id}"
+                )
+            name_identity = (root_name, public_name)
+            previous_target = targets_by_name.setdefault(
+                name_identity,
+                public_target_identity,
+            )
+            if previous_target != public_target_identity:
+                raise GenerationDesignValidationError(
+                    "同一窗口的公开 locator 名称不能指向不同冻结 target: "
+                    f"{public_name} step={step_id} action={action_id}"
+                )
+
+
+def _is_public_locator_name(value):
+    if not _PUBLIC_LOCATOR_NAME.fullmatch(value):
+        return False
+    return not value.endswith(_TECHNICAL_LOCATOR_SUFFIXES)
+
+
+def _public_target_identity(root_name, target):
+    target = target if isinstance(target, dict) else {}
+    control = _safe_name(target.get("control_type") or "control")
+    auto_id = _safe_name(target.get("auto_id") or "")
+    if auto_id != "generated":
+        return (str(root_name or ""), control, "auto_id", auto_id)
+    return (
+        str(root_name or ""),
+        control,
+        "fingerprint",
+        str(target.get("target_fingerprint") or target.get("locator_name") or ""),
+    )
 
 
 def _validate_confirmed_input_recovery_choices(
@@ -567,6 +3159,7 @@ def _validate_design_shape(design, brief):
             "steps",
             "ambiguity_choices",
             "memory_trace",
+            "implementation_candidate_files",
         },
         "GenerationDesign",
     )
@@ -587,11 +3180,32 @@ def _validate_design_shape(design, brief):
         "ambiguity_choices",
         required=True,
     )
-    unresolved_step_ids = set(_compile_unresolved_issues(
+    unresolved_by_step = _compile_unresolved_issues(
         design,
         brief,
-    ))
+    )
+    unresolved_action_ids_by_step = {
+        step_id: {
+            str(action_id)
+            for issue in issues
+            for action_id in issue.get("action_ids") or ()
+            if action_id
+        }
+        for step_id, issues in unresolved_by_step.items()
+    }
+    action_ids_by_step = {}
+    for action in brief.get("actions") or ():
+        if action.get("role") == "noise":
+            continue
+        step_id = str(action.get("step_id") or "")
+        action_id = str(action.get("id") or "")
+        if step_id and action_id:
+            action_ids_by_step.setdefault(step_id, set()).add(action_id)
     _validate_design_memory_trace(design.get("memory_trace"), brief)
+    _normalize_implementation_candidate_files(
+        design.get("implementation_candidate_files"),
+        label="GenerationDesign implementation_candidate_files",
+    )
     _reject_duplicate_design_keys(
         owners,
         "root_name",
@@ -650,6 +3264,12 @@ def _validate_design_shape(design, brief):
         behavior_strategy = str(
             (step.get("step_behavior") or {}).get("strategy") or "create"
         )
+        step_id = str(step.get("step_id") or "")
+        unresolved_action_ids = unresolved_action_ids_by_step.get(
+            step_id,
+            set(),
+        )
+        action_ids = action_ids_by_step.get(step_id, set())
         _validate_step_behavior_choice(
             step.get("step_behavior"),
             label="step_behavior",
@@ -657,18 +3277,30 @@ def _validate_design_shape(design, brief):
         )
         if (
             behavior_strategy != "reuse"
-            and str(step.get("step_id") or "") not in unresolved_step_ids
+            and not (
+                step_id in unresolved_by_step
+                and (
+                    not action_ids
+                    or action_ids <= unresolved_action_ids
+                )
+            )
             and (
                 not isinstance(step.get("operations"), list)
                 or not step["operations"]
             )
         ):
             raise ValueError(f"Design Step {step.get('step_id')}缺少operations")
-        if (
-            str(step.get("step_id") or "") in unresolved_step_ids
-            and step.get("operations")
-        ):
-            raise ValueError("issue placeholder Step不能声明operations")
+        operation_action_ids = {
+            str(operation.get("target_action_id") or "")
+            for operation in step.get("operations") or ()
+            if isinstance(operation, dict) and operation.get("target_action_id")
+        }
+        overlap = sorted(operation_action_ids & unresolved_action_ids)
+        if overlap:
+            raise ValueError(
+                "issue placeholder Action不能声明operations: "
+                f"{overlap}"
+            )
         if behavior_strategy == "reuse" and step.get("operations"):
             raise ValueError("step_behavior reuse不能声明operations")
         if behavior_strategy == "reuse" and step.get("action_relationships"):
@@ -911,6 +3543,47 @@ def _reject_unknown_fields(value, allowed, label):
         raise ValueError(f"{label}包含未知字段: {unknown}")
 
 
+def _normalize_implementation_candidate_files(value, *, label):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{label}必须是object array")
+    result = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError(f"{label} item必须是object")
+        _reject_unknown_fields(item, {"path", "content", "sha256"}, label)
+        path = _candidate_file_path(item.get("path"), label=label)
+        if path in seen:
+            raise ValueError(f"{label} path重复: {path}")
+        content = item.get("content")
+        if not isinstance(content, str):
+            raise ValueError(f"{label} content必须是string: {path}")
+        record = {"path": path, "content": content}
+        if item.get("sha256") is not None:
+            sha256 = str(item.get("sha256") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+                raise ValueError(f"{label} sha256无效: {path}")
+            record["sha256"] = sha256
+        result.append(record)
+        seen.add(path)
+    return result
+
+
+def _candidate_file_path(value, *, label):
+    text = str(value or "").replace("\\", "/")
+    parts = text.split("/")
+    if (
+        not text
+        or text.startswith("/")
+        or re.match(r"^[A-Za-z]:", text)
+        or any(part in {"", ".."} for part in parts)
+    ):
+        raise ValueError(f"{label} path无效: {value}")
+    return "/".join(parts)
+
+
 def _validate_resolution_choice(value, *, label, default):
     if value is None:
         return default
@@ -999,12 +3672,10 @@ def _validate_window_ownership_shape(owners, steps):
             owner,
             {
                 "root_name",
-                "parent_root",
-                "ownership_candidate_id",
-                "dismissed_ownership_candidate_ids",
                 "strategy",
                 "candidate_id",
                 "business_name",
+                "views",
                 "reason",
             },
             "window_ownership",
@@ -1012,38 +3683,14 @@ def _validate_window_ownership_shape(owners, steps):
         root_name = str(owner.get("root_name") or "").strip()
         strategy = str(owner.get("strategy") or "")
         candidate_id = str(owner.get("candidate_id") or "").strip()
-        ownership_candidate_id = str(
-            owner.get("ownership_candidate_id") or ""
-        ).strip()
-        dismissed_candidate_ids = [
-            str(item).strip()
-            for item in owner.get("dismissed_ownership_candidate_ids") or ()
-            if str(item).strip()
-        ]
         business_name = str(owner.get("business_name") or "").strip()
-        parent_root = str(owner.get("parent_root") or "").strip()
+        views = owner.get("views") or []
         if not root_name:
             raise ValueError("window_ownership缺少root_name")
-        if parent_root == root_name:
-            raise ValueError("window view parent_root不能引用自身")
         if strategy not in {"reuse_existing", "create_new"}:
             raise ValueError(f"window ownership strategy无效: {strategy}")
         if strategy == "reuse_existing" and not candidate_id:
             raise ValueError("reuse_existing window ownership缺少candidate_id")
-        if parent_root and strategy == "reuse_existing":
-            raise ValueError("window view ownership不能声明reuse_existing")
-        if parent_root and candidate_id:
-            raise ValueError("window view ownership不能声明candidate_id")
-        if parent_root and not ownership_candidate_id:
-            raise ValueError("window view ownership缺少ownership_candidate_id")
-        if not parent_root and ownership_candidate_id:
-            raise ValueError("WindowPage ownership不能声明ownership_candidate_id")
-        if parent_root and dismissed_candidate_ids:
-            raise ValueError(
-                "window view ownership不能同时拒绝ownership candidate"
-            )
-        if len(dismissed_candidate_ids) != len(set(dismissed_candidate_ids)):
-            raise ValueError("window ownership包含重复dismissed candidate")
         if strategy == "reuse_existing" and business_name:
             raise ValueError(
                 "reuse_existing window ownership不能声明business_name"
@@ -1059,13 +3706,34 @@ def _validate_window_ownership_shape(owners, steps):
                 "带内部身份后缀的Root必须声明稳定business_name: "
                 f"{root_name}"
             )
-        if parent_root and not business_name:
-            raise ValueError("window view ownership必须声明business_name")
-        _validate_dismissed_ownership_candidates(
-            owner,
-            dismissed_candidate_ids,
-            root_name,
-        )
+        if not isinstance(views, list) or not all(
+                isinstance(item, dict) for item in views
+        ):
+            raise ValueError("window ownership views必须是object array")
+        view_candidate_ids = []
+        view_names = []
+        for view in views:
+            _reject_unknown_fields(
+                view,
+                {"candidate_id", "business_name", "action_ids", "active_locator", "reason"},
+                "window ownership view",
+            )
+            view_name = str(view.get("business_name") or "").strip()
+            action_ids = [
+                str(item).strip()
+                for item in view.get("action_ids") or ()
+                if str(item).strip()
+            ]
+            if not view_name or not action_ids:
+                raise ValueError(
+                    "window ownership view缺少business_name或action_ids"
+                )
+            _public_owner_name("view", view_name)
+            if len(action_ids) != len(set(action_ids)):
+                raise ValueError("window ownership view包含重复action_id")
+            view_names.append(view_name)
+        if len(view_names) != len(set(view_names)):
+            raise ValueError("window ownership包含重复view business_name")
         public_name = _public_owner_name(root_name, business_name)
         previous_root = public_names.setdefault(public_name, root_name)
         if previous_root != root_name:
@@ -1074,17 +3742,6 @@ def _validate_window_ownership_shape(owners, steps):
                 f"{previous_root}/{root_name} -> {public_name}"
             )
         selected_roots.add(root_name)
-    parent_roots = {
-        str(owner.get("parent_root") or "").strip()
-        for owner in owners
-        if str(owner.get("parent_root") or "").strip()
-    }
-    missing_parents = sorted(parent_roots - selected_roots)
-    if missing_parents:
-        raise ValueError(
-            "window view parent_root必须引用已选择Root: "
-            f"{missing_parents}"
-        )
     if selected_roots != referenced_roots:
         raise ValueError(
             "GenerationDesign window ownership范围不一致: "
@@ -1138,7 +3795,14 @@ def _validate_value_source_shape(source):
 
 
 def _validate_design_memory_trace(value, brief):
+    available_items = (
+        (brief.get("memory_digest") or {}).get("items") or ()
+    )
     if value is None:
+        if available_items:
+            raise ValueError(
+                "GenerationDesign memory_trace在Brief包含memory items时必填"
+            )
         return
     if not isinstance(value, dict):
         raise ValueError("GenerationDesign memory_trace必须是object")
@@ -1147,7 +3811,7 @@ def _validate_design_memory_trace(value, brief):
         raise ValueError("memory_trace必须声明applied和dismissed")
     available = {
         str(item.get("memory_id"))
-        for item in (brief.get("memory_digest") or {}).get("items") or ()
+        for item in available_items
         if item.get("memory_id")
     }
     ids = {}
@@ -1210,13 +3874,27 @@ def _compile_window_owners(design, brief):
         for operation in step.get("operations") or ()
         if operation.get("window_root")
     }
-    owners = {}
-    view_roots = {
-        root_name
-        for root_name in referenced_roots
-        if str((selections.get(root_name) or {}).get("parent_root") or "").strip()
+    selected_targets_by_scope = {
+        (
+            str(step.get("step_id") or ""),
+            str(operation.get("target_action_id") or ""),
+        ): str(operation.get("target_name") or "")
+        for step in design.get("steps") or ()
+        for operation in step.get("operations") or ()
+        if operation.get("target_name") and operation.get("target_action_id")
     }
-    for root_name in sorted(referenced_roots - view_roots):
+    actions_by_scope = {
+        (
+            str(action.get("step_id") or ""),
+            str(action.get("id") or action.get("action_id") or ""),
+        ): action
+        for action in brief.get("actions") or ()
+        if isinstance(action, dict)
+        and action.get("step_id")
+        and (action.get("id") or action.get("action_id"))
+    }
+    owners = {}
+    for root_name in sorted(referenced_roots):
         window = windows.get(root_name)
         if window is None:
             raise ValueError(f"Design引用未知window root: {root_name}")
@@ -1224,10 +3902,6 @@ def _compile_window_owners(design, brief):
             "root_name": root_name,
             "strategy": "create_new",
         }
-        ownership_decision = _compiled_window_page_ownership_decision(
-            selection,
-            brief,
-        )
         owner_id = _owner_id(root_name)
         if selection.get("strategy") == "reuse_existing":
             candidate_id = str(selection.get("candidate_id") or "")
@@ -1254,7 +3928,6 @@ def _compile_window_owners(design, brief):
                     "candidate_id": candidate_id,
                     "reason": str(selection.get("reason") or "Reuse selected owner."),
                 },
-                "ownership_decision": ownership_decision,
                 "views": {},
             }
         elif selection.get("strategy") == "create_new":
@@ -1267,108 +3940,230 @@ def _compile_window_owners(design, brief):
                 if selection.get("business_name")
                 else _safe_name(root_name.replace("_window_", "_"))
             )
-            owners[owner_id] = {
-                "evidence_root": root_name,
-                "public_name": public_name,
-                "root_locator": (
-                    f"{public_name}_window"
-                    if selection.get("business_name")
-                    else root_name
-                ),
-                "page_object": f"Bdd/page_obj/{package}/page.py",
-                "root_locator_file": f"Bdd/locators/{package}/window.yaml",
-                "resolution": {
-                    "strategy": "create_new",
-                    "candidate_id": None,
-                    "reason": str(selection.get("reason") or "Create a new owner for the recorded Root."),
-                },
-                "ownership_decision": ownership_decision,
-                "views": {},
-            }
+            if _rootless_pos_owner_allowed(
+                    design,
+                    root_name,
+                    window,
+                    selection,
+                    actions_by_scope,
+            ):
+                owners[owner_id] = {
+                    "owner_kind": "rootless_pos",
+                    "evidence_root": root_name,
+                    "public_name": public_name,
+                    "page_object": f"Bdd/page_obj/{package}/page.py",
+                    "locator_file": f"Bdd/locators/{package}/pos.yaml",
+                    "resolution": {
+                        "strategy": "create_new",
+                        "candidate_id": None,
+                        "reason": (
+                            "Use a rootless BasePage because every selected "
+                            "action uses frozen POS coordinates."
+                        ),
+                    },
+                    "views": {},
+                }
+            else:
+                owners[owner_id] = {
+                    "evidence_root": root_name,
+                    "public_name": public_name,
+                    "root_locator": (
+                        f"{public_name}_window"
+                        if selection.get("business_name")
+                        else root_name
+                    ),
+                    "page_object": f"Bdd/page_obj/{package}/page.py",
+                    "root_locator_file": f"Bdd/locators/{package}/window.yaml",
+                    "resolution": {
+                        "strategy": "create_new",
+                        "candidate_id": None,
+                        "reason": str(selection.get("reason") or "Create a new owner for the recorded Root."),
+                    },
+                    "views": {},
+                }
         else:
             raise ValueError(f"window ownership strategy无效: {selection.get('strategy')}")
-    for root_name in sorted(view_roots):
-        if root_name not in windows:
-            raise ValueError(f"Design引用未知window root: {root_name}")
-        selection = selections[root_name]
-        parent_root = str(selection.get("parent_root") or "").strip()
-        ownership_candidate = _validated_view_ownership_candidate(
-            selection,
-            brief,
-        )
-        owner_id = _owner_id(parent_root)
-        owner = owners.get(owner_id)
-        if owner is None:
-            raise ValueError(f"window view引用未知parent_root: {parent_root}")
-        view_id = _public_owner_name(root_name, selection.get("business_name"))
-        if view_id in owner.get("views", {}):
-            raise ValueError(f"window owner重复view: {owner_id}.{view_id}")
+    actions_by_id = {}
+    for action in brief.get("actions") or ():
+        step_id = str(action.get("step_id") or "")
+        action_id = str(action.get("id") or action.get("action_id") or "")
+        if not action_id:
+            continue
+        actions_by_id.setdefault(action_id, []).append(action)
+    for root_name in sorted(referenced_roots):
+        selection = selections.get(root_name) or {}
+        owner_id = _owner_id(root_name)
+        owner = owners[owner_id]
         package = _page_package_name(owner.get("page_object"))
-        owner.setdefault("views", {})[view_id] = {
-            "evidence_root": root_name,
-            "ownership_candidate_id": ownership_candidate["candidate_id"],
-            "locator_file": f"Bdd/locators/{package}/{view_id}.yaml",
-            "view_object": f"Bdd/page_obj/{package}/{view_id}.py",
-            "active_locator": f"{view_id}_window",
-            "root_locator": f"{view_id}_window",
-        }
+        assigned_actions = set()
+        for view_selection in selection.get("views") or ():
+            candidate = _validated_child_window_view_candidate(
+                view_selection,
+                root_name,
+                brief,
+            )
+            view_id = _public_owner_name(
+                "view",
+                view_selection.get("business_name"),
+            )
+            if view_id in owner["views"]:
+                raise ValueError(f"window owner重复view: {owner_id}.{view_id}")
+            action_ids = [
+                str(item).strip()
+                for item in view_selection.get("action_ids") or ()
+                if str(item).strip()
+            ]
+            overlap = sorted(set(action_ids) & assigned_actions)
+            if overlap:
+                raise ValueError(f"window ownership view重复绑定Action: {overlap}")
+            if candidate is not None and set(action_ids) != {
+                str(item) for item in candidate.get("action_ids") or ()
+            }:
+                raise ValueError(
+                    "window ownership view Action范围与候选不一致"
+                )
+            matched_actions = []
+            candidate_step_id = (
+                str(candidate.get("step_id") or "")
+                if candidate is not None
+                else ""
+            )
+            for action_id in action_ids:
+                if candidate_step_id:
+                    action = actions_by_scope.get((candidate_step_id, action_id))
+                    if action is None:
+                        raise ValueError(
+                            "window ownership view候选引用未知scoped Action: "
+                            f"{candidate_step_id}/{action_id}"
+                        )
+                else:
+                    matches = actions_by_id.get(action_id) or []
+                    if len(matches) != 1:
+                        raise ValueError(
+                            f"window ownership view引用未知或重复Action: {action_id}"
+                        )
+                    action = matches[0]
+                if str((action.get("target") or {}).get("root_name") or "") != root_name:
+                    raise ValueError(
+                        "window ownership view Action不属于同一Root: "
+                        f"{action_id}"
+                    )
+                matched_actions.append(action)
+            locator_names = [
+                str(
+                    selected_targets_by_scope.get((
+                        str(action.get("step_id") or ""),
+                        str(action.get("id") or action.get("action_id") or ""),
+                    ))
+                    or (action.get("target") or {}).get("locator_name")
+                    or ""
+                )
+                for action in matched_actions
+                if str(
+                    selected_targets_by_scope.get((
+                        str(action.get("step_id") or ""),
+                        str(action.get("id") or action.get("action_id") or ""),
+                    ))
+                    or (action.get("target") or {}).get("locator_name")
+                    or ""
+                )
+            ]
+            active_locator = str(
+                view_selection.get("active_locator") or locator_names[0] or ""
+            )
+            if active_locator not in set(locator_names):
+                raise ValueError(
+                    "window ownership view active_locator必须来自绑定Action"
+                )
+            step_ids = sorted({
+                str(action.get("step_id") or "")
+                for action in matched_actions
+                if str(action.get("step_id") or "")
+            })
+            owner["views"][view_id] = {
+                "evidence_root": root_name,
+                "ownership_candidate_id": (
+                    candidate.get("candidate_id")
+                    if candidate is not None
+                    else None
+                ),
+                "step_id": step_ids[0] if len(step_ids) == 1 else None,
+                "action_ids": action_ids,
+                "locator_file": f"Bdd/locators/{package}/{view_id}.yaml",
+                "view_object": f"Bdd/page_obj/{package}/{view_id}.py",
+                "active_locator": active_locator,
+                "root_locator": None,
+            }
+            assigned_actions.update(action_ids)
+    _validate_locked_child_window_views(owners, brief, referenced_roots)
     return owners
 
 
-def _validate_dismissed_ownership_candidates(
-        selection,
-        candidate_ids,
+def _rootless_pos_owner_allowed(
+        design,
         root_name,
+        window,
+        selection,
+        actions_by_scope,
     ):
-    if not candidate_ids:
-        return
-    if not str(selection.get("reason") or "").strip():
-        raise ValueError(
-            "拒绝ownership candidate并选择独立WindowPage时必须说明reason"
-        )
+    if selection.get("views"):
+        return False
+    selected_targets = []
+    for step in design.get("steps") or ():
+        step_id = str(step.get("step_id") or "")
+        for operation in step.get("operations") or ():
+            if str(operation.get("window_root") or "") != str(root_name):
+                continue
+            action_id = str(operation.get("target_action_id") or "")
+            action = actions_by_scope.get((step_id, action_id)) or {}
+            target = action.get("target") or {}
+            if not target:
+                return False
+            selected_targets.append((
+                target,
+                operation.get("locator_candidate_id")
+                or target.get("locator_candidate_id"),
+            ))
+    return top_level_root_uses_pos_only(window, selected_targets)
 
 
-def _compiled_window_page_ownership_decision(selection, brief):
-    candidate_ids = [
-        str(item).strip()
-        for item in selection.get("dismissed_ownership_candidate_ids") or ()
-        if str(item).strip()
-    ]
-    if not candidate_ids:
-        return None
-    candidates = {
-        str(item.get("candidate_id") or ""): item
-        for item in (brief.get("window_ownership") or {}).get(
+def _validate_locked_child_window_views(owners, brief, referenced_roots):
+    referenced_roots = {str(item) for item in referenced_roots if item}
+    required = [
+        candidate
+        for candidate in (brief.get("window_ownership") or {}).get(
             "ownership_candidates"
         ) or ()
-        if item.get("candidate_id")
+        if candidate.get("kind") == "child_window_view"
+        and str(candidate.get("root_name") or "") in referenced_roots
+    ]
+    selected = {
+        str(view.get("ownership_candidate_id") or ""): view
+        for owner in (owners or {}).values()
+        for view in (owner.get("views") or {}).values()
+        if view.get("ownership_candidate_id")
     }
-    root_name = str(selection.get("root_name") or "")
-    for candidate_id in candidate_ids:
-        candidate = candidates.get(candidate_id)
-        if candidate is None:
+    for candidate in required:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        view = selected.get(candidate_id)
+        if view is None:
             raise ValueError(
-                f"dismissed ownership candidate不存在: {candidate_id}"
-            )
-        if any((
-            candidate.get("kind") != "child_view",
-            str(candidate.get("child_root") or "") != root_name,
-        )):
-            raise ValueError(
-                "dismissed ownership candidate与独立WindowPage root不一致: "
+                "Design遗漏系统已证明的WindowView候选: "
                 f"{candidate_id}"
             )
-    return {
-        "selected_kind": "window_page",
-        "dismissed_candidate_ids": candidate_ids,
-        "reason": str(selection.get("reason") or "").strip(),
-    }
+        if set(str(item) for item in view.get("action_ids") or ()) != set(
+            str(item) for item in candidate.get("action_ids") or ()
+        ):
+            raise ValueError(
+                "Design WindowView候选Action范围被覆盖: "
+                f"{candidate_id}"
+            )
 
 
-def _validated_view_ownership_candidate(selection, brief):
-    candidate_id = str(selection.get("ownership_candidate_id") or "").strip()
-    parent_root = str(selection.get("parent_root") or "").strip()
-    child_root = str(selection.get("root_name") or "").strip()
+def _validated_child_window_view_candidate(selection, root_name, brief):
+    candidate_id = str(selection.get("candidate_id") or "").strip()
+    if not candidate_id:
+        return None
     candidates = [
         item
         for item in (brief.get("window_ownership") or {}).get(
@@ -1377,63 +4172,21 @@ def _validated_view_ownership_candidate(selection, brief):
         if str(item.get("candidate_id") or "") == candidate_id
     ]
     if len(candidates) != 1:
-        raise ValueError(
-            f"window view ownership_candidate_id无效: {candidate_id}"
-        )
+        raise ValueError(f"window view candidate_id无效: {candidate_id}")
     candidate = candidates[0]
     if any((
-        candidate.get("kind") != "child_view",
-        str(candidate.get("parent_root") or "") != parent_root,
-        str(candidate.get("child_root") or "") != child_root,
+        candidate.get("kind") != "child_window_view",
+        str(candidate.get("root_name") or "") != root_name,
     )):
-        raise ValueError(
-            "window view ownership_candidate与parent/child root不一致"
-        )
-    _validate_view_candidate_actions(candidate, brief)
+        raise ValueError("window view candidate与automation root不一致")
     return candidate
 
 
-def _validate_view_candidate_actions(candidate, brief):
-    step_id = str(candidate.get("step_id") or "")
-    actions = {}
-    action_order = {}
-    for index, action in enumerate(brief.get("actions") or (), start=1):
-        action_id = str(action.get("id") or action.get("action_id") or "")
-        action_step_id = str(action.get("step_id") or "")
-        if not action_id or not action_step_id:
-            continue
-        key = (action_step_id, action_id)
-        if key in actions:
-            raise ValueError(
-                "window view ownership_candidate引用的scoped Action冲突: "
-                f"{action_step_id}/{action_id}"
-            )
-        actions[key] = action
-        action_order[key] = index
-    opener_id = str(candidate.get("opener_action_id") or "")
-    opener_key = (step_id, opener_id)
-    opener = actions.get(opener_key)
-    parent_root = str(candidate.get("parent_root") or "")
-    child_root = str(candidate.get("child_root") or "")
-    if opener is None:
-        raise ValueError("window view ownership_candidate缺少opener Action")
-    if str((opener.get("target") or {}).get("root_name") or "") != parent_root:
-        raise ValueError("window view ownership_candidate opener root不一致")
-    opener_order = action_order[opener_key]
-    child_action_ids = [
-        str(item) for item in candidate.get("child_action_ids") or () if item
-    ]
-    if not child_action_ids:
-        raise ValueError("window view ownership_candidate缺少child Action")
-    for action_id in child_action_ids:
-        action_key = (step_id, action_id)
-        action = actions.get(action_key)
-        if action is None:
-            raise ValueError("window view ownership_candidate引用未知child Action")
-        if str((action.get("target") or {}).get("root_name") or "") != child_root:
-            raise ValueError("window view ownership_candidate child root不一致")
-        if action_order[action_key] <= opener_order:
-            raise ValueError("window view ownership_candidate child顺序无效")
+def _value_authority_allows_text_set(source):
+    return str((source or {}).get("kind") or "") in {
+        "feature_literal",
+        "semantic_literal",
+    }
 
 
 def _compile_operation(
@@ -1456,13 +4209,25 @@ def _compile_operation(
         raise ValueError(
             f"Design Step {step_id}引用未知target Action: {target_action_id}"
         )
+    if _is_append_keyboard_command(
+            ((target_action.get("canonical_action") or {}).get("command") or {})
+    ) and op != "send_text_keys" and not _value_authority_allows_text_set(
+            selection.get("value_source") or {},
+    ):
+        raise ValueError(
+            f"Design Step {step_id}录制 append 键盘命令必须使用 "
+            "send_text_keys"
+        )
     root_name = str(selection.get("window_root") or "")
     owner_id = _owner_id(root_name)
-    view_owner = None
-    if owner_id not in owners:
-        owner_id, view_owner = _view_owner_for_root(root_name, owners)
     if owner_id not in owners:
         raise ValueError(f"Design operation引用未编译owner: {root_name}")
+    view_owner = _view_owner_for_action(
+        step_id,
+        target_action_id,
+        owner_id,
+        owners,
+    )
     capability_parameters = _compile_capability_parameters(
         step_id,
         op,
@@ -1498,18 +4263,53 @@ def _compile_operation(
     ):
         raise ValueError(f"Design operation {op}的冻结值不能为空")
     target = target_action.get("target") or {}
+    locator_reuse = _locator_reuse_match(
+        brief,
+        step_id,
+        target_action_id,
+        root_name,
+    )
+    selected_target_name = str(selection.get("target_name") or "")
+    if locator_reuse is not None:
+        expected_key = str(locator_reuse["locator_key"])
+        if selected_target_name and selected_target_name != expected_key:
+            raise ValueError(
+                "Design不能覆盖已验证的既有Locator key: "
+                f"expected={expected_key} actual={selected_target_name}"
+            )
+        owner_resolution = (owners.get(owner_id) or {}).get("resolution") or {}
+        if any((
+                owner_resolution.get("strategy") != "reuse_existing",
+                owner_resolution.get("candidate_id")
+                != locator_reuse.get("owner_candidate_id"),
+        )):
+            raise ValueError(
+                "已验证的既有Locator必须复用同一WindowPage owner"
+            )
+    locator_candidate_id = (
+        selection.get("locator_candidate_id")
+        or target.get("locator_candidate_id")
+    )
+    root_pos_fallback = None
+    root_pos_target = False
+    if _window_root_without_locator_criteria(brief, root_name):
+        root_pos_target = target_uses_pos_locator(target)
+        root_pos_fallback = _pos_locator_candidate(target)
+        if root_pos_fallback is not None and not selection.get(
+                "locator_candidate_id"
+        ):
+            locator_candidate_id = root_pos_fallback.get("candidate_id")
     locator_candidate = _compile_locator_candidate(
         target,
-        (
-            selection.get("locator_candidate_id")
-            or target.get("locator_candidate_id")
-        ),
+        locator_candidate_id,
         root_name,
     )
     operation = {
         "op": op,
         "target": str(
-            selection.get("target_name")
+            locator_reuse.get("locator_key")
+            if locator_reuse is not None
+            else selection.get("target_name")
             or target.get("locator_name")
             or ""
         ),
@@ -1536,6 +4336,40 @@ def _compile_operation(
         ),
         "uncertainty": selection.get("uncertainty"),
     }
+    if (
+            root_pos_target
+            or (
+            root_pos_fallback is not None
+            and locator_candidate is not None
+            and locator_candidate.get("candidate_id")
+            == root_pos_fallback.get("candidate_id")
+            )
+    ):
+        operation["confidence"] = 0.35
+        operation["uncertainty"] = {
+            "code": "top_level_root_without_criteria_pos_fallback",
+            "root_name": root_name,
+            "locator_name": target.get("locator_name"),
+            "reason": (
+                "The recorded top-level root has no stable locator criteria; "
+                "the operation uses POS fallback coordinates."
+            ),
+        }
+    elif op == "scroll_to" and _is_frozen_scroll_pos_target(
+            target_action,
+            target,
+    ):
+        operation["confidence"] = 0.35
+        operation["uncertainty"] = {
+            "code": "scroll_pos_fallback",
+            "root_name": root_name,
+            "locator_name": target.get("locator_name"),
+            "coords": list((target.get("locator") or {}).get("coords") or []),
+            "reason": (
+                "The recorded scroll target has no verified structural "
+                "locator; replay the frozen wheel event at POS coordinates."
+            ),
+        }
     if view_owner:
         operation["view_owner"] = view_owner
     runtime_value = selection.get("runtime_value")
@@ -1597,15 +4431,23 @@ def _compile_operation(
     return operation
 
 
-def _view_owner_for_root(root_name, owners):
+def _view_owner_for_action(step_id, action_id, owner_id, owners):
     matches = []
-    for owner_id, owner in owners.items():
-        for view_id, view in (owner.get("views") or {}).items():
-            if str(view.get("evidence_root") or "") == str(root_name):
-                matches.append((owner_id, view_id))
+    owner = owners.get(owner_id) or {}
+    for view_id, view in (owner.get("views") or {}).items():
+        view_step_id = str(view.get("step_id") or "")
+        if (
+            (not view_step_id or view_step_id == str(step_id))
+            and str(action_id) in {
+                str(item) for item in view.get("action_ids") or ()
+            }
+        ):
+            matches.append(view_id)
     if len(matches) > 1:
-        raise ValueError(f"window root绑定多个view_owner: {root_name}")
-    return matches[0] if matches else ("", None)
+        raise ValueError(
+            f"Action绑定多个view_owner: {step_id}/{action_id}"
+        )
+    return matches[0] if matches else None
 
 
 def _implementation_owner_path(owner, view_owner):
@@ -1728,7 +4570,8 @@ def _action_ordinal(action):
 
 
 def _validate_transport_action(source, consumer):
-    if not _is_auxiliary_action(source):
+    qualification = qualify_action_relationship_source(source)
+    if qualification["transport_for"]["status"] == "rejected":
         raise ValueError("transport_for source必须是无语义辅助Action")
     if not _same_frozen_target(source, consumer):
         raise ValueError("transport_for必须引用同一冻结target")
@@ -1741,14 +4584,72 @@ def _validate_absorbed_action(
     operation,
     brief,
 ):
-    if not _is_auxiliary_action(source):
+    qualification = qualify_action_relationship_source(
+        source,
+        brief=brief,
+    )
+    reason_code = qualification["absorbed_by"]["reason_code"]
+    if reason_code == "source_not_auxiliary":
         raise ValueError("absorbed_by source必须是无语义辅助Action")
     if not _same_frozen_target(source, consumer):
         raise ValueError("absorbed_by必须引用同一冻结target")
     if str(operation.get("op") or "").startswith("assert_"):
         raise ValueError("absorbed_by不能覆盖assertion关系")
-    if _action_has_decision_constraint(source_action_id, brief):
+    if reason_code == "decision_constrained":
         raise ValueError("absorbed_by不能覆盖Decision约束Action")
+
+
+def qualify_action_relationship_source(action, *, brief=None):
+    action_id = str((action or {}).get("id") or "")
+    auxiliary = _is_auxiliary_action(action or {})
+    constrained = bool(
+        action_id
+        and brief is not None
+        and _action_has_decision_constraint(action_id, brief)
+    )
+    return {
+        "activation_for": {
+            "status": "allowed",
+            "reason_code": "independent_operation_required",
+            "reason": (
+                "The source remains an independent operation before its "
+                "consumer."
+            ),
+        },
+        "transport_for": {
+            "status": "conditional" if auxiliary else "rejected",
+            "reason_code": (
+                "same_target_consumer_required"
+                if auxiliary
+                else "source_not_auxiliary"
+            ),
+            "reason": (
+                "Requires a later consumer on the same frozen target."
+                if auxiliary
+                else "The source is not a frozen auxiliary Action."
+            ),
+        },
+        "absorbed_by": {
+            "status": (
+                "conditional"
+                if auxiliary and not constrained
+                else "rejected"
+            ),
+            "reason_code": (
+                "decision_constrained"
+                if constrained
+                else "same_target_non_assertion_consumer_required"
+                if auxiliary
+                else "source_not_auxiliary"
+            ),
+            "reason": (
+                "Requires a later same-target non-assertion consumer."
+                if auxiliary and not constrained
+                else "The source has an effect or Decision constraint and "
+                "must remain independently covered."
+            ),
+        },
+    }
 
 
 def _action_has_decision_constraint(action_id, brief):
@@ -1797,6 +4698,77 @@ def _same_frozen_target(source, consumer):
     )
 
 
+def _locator_reuse_match(brief, step_id, action_id, root_name):
+    actions = [
+        item
+        for item in (brief.get("actions") or ())
+        if isinstance(item, dict)
+        and str(item.get("step_id") or "") == str(step_id or "")
+        and str(item.get("id") or "") == str(action_id or "")
+    ]
+    if len(actions) != 1:
+        raise ValueError(
+            "Locator复用匹配缺少唯一当前Action: "
+            f"{step_id}/{action_id}"
+        )
+    target = actions[0].get("target") or {}
+    matches = [
+        item
+        for item in ((brief.get("semantics") or {}).get(
+            "locator_reuse_matches"
+        ) or ())
+        if isinstance(item, dict)
+        and str(item.get("step_id") or "") == str(step_id or "")
+        and str(item.get("action_id") or "") == str(action_id or "")
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError(
+            "同一Action存在多个已验证Locator复用匹配: "
+            f"{step_id}/{action_id}"
+        )
+    match = matches[0]
+    proof = match.get("snapshot_proof") or {}
+    if any((
+            match.get("status") != "unique_same_target",
+            str(match.get("root_name") or "") != str(root_name or ""),
+            str(match.get("root_name") or "")
+            != str(target.get("root_name") or ""),
+            str(match.get("evidence_name") or "")
+            != str(target.get("locator_name") or ""),
+            str(match.get("target_fingerprint") or "")
+            != str(target.get("target_fingerprint") or ""),
+            not str(match.get("owner_candidate_id") or ""),
+            not str(match.get("locator_file") or ""),
+            not str(match.get("locator_key") or ""),
+            not str(match.get("locator_sha256") or ""),
+            not str(match.get("locator_fingerprint") or ""),
+            not str(match.get("target_fingerprint") or ""),
+            not _locator_reuse_proof_is_valid(proof),
+    )):
+        raise ValueError(
+            f"Locator复用匹配无效: {step_id}/{action_id}"
+        )
+    return match
+
+
+def _locator_reuse_proof_is_valid(proof):
+    proof = proof if isinstance(proof, dict) else {}
+    if proof.get("source") == "complete_tree_snapshot":
+        return proof.get("status") in {
+            "single_snapshot_unique",
+            "cross_snapshot_unique",
+        }
+    if proof.get("source") == "recorded_locator_identity":
+        return bool(
+            proof.get("status") == "recorded_unique_locator_match"
+            and proof.get("recorded_locator_validation") == "unique_target_match"
+            and proof.get("recorded_locator_strategy") == "stable_auto_id"
+        )
+    return False
+
+
 def _compile_locator_candidate(target, candidate_id, root_name):
     candidate_id = str(candidate_id or "").strip()
     locator = target.get("locator") or {}
@@ -1821,6 +4793,20 @@ def _compile_locator_candidate(target, candidate_id, root_name):
     candidate = matches[0]
     validation = candidate.get("validation") or {}
     locator = candidate.get("locator") or {}
+    locator_kind = str(locator.get("by") or "child")
+    if locator_kind == "pos":
+        if any((
+            candidate_id != expected_locator_candidate_id(
+                locator,
+                candidate.get("reason"),
+            ),
+            validation.get("status") not in {"fallback", "unique"},
+            validation.get("target_matches") is not True,
+        )):
+            raise ValueError(
+                f"POS locator candidate未通过冻结目标验证: {candidate_id}"
+            )
+        return candidate
     if any((
         candidate_id != expected_locator_candidate_id(
             locator,
@@ -1829,12 +4815,31 @@ def _compile_locator_candidate(target, candidate_id, root_name):
         validation.get("status") != "unique",
         validation.get("target_matches") is not True,
         str(locator.get("root") or "") != str(root_name or ""),
-        locator.get("by", "child") not in {"child", "xpath"},
+        locator_kind not in {"child", "xpath"},
     )):
         raise ValueError(
             f"locator candidate未通过唯一目标或Root验证: {candidate_id}"
         )
     return candidate
+
+
+def _pos_locator_candidate(target):
+    return best_verified_pos_locator_candidate(target)
+
+
+def _window_root_without_locator_criteria(brief, root_name):
+    window = next((
+        item
+        for item in ((brief or {}).get("window_ownership") or {}).get(
+            "windows"
+        ) or ()
+        if str(item.get("root_name") or "") == str(root_name or "")
+    ), None)
+    if window is None:
+        return False
+    return top_level_root_requires_locator_fallback(window)
+
+
 
 
 def _compile_value_source(
@@ -2296,6 +5301,19 @@ def _compile_ambiguities(design, brief):
         outcome = str(selected.get("outcome") or "")
         if outcome not in ai_outcomes:
             raise ValueError(f"Design ambiguity outcome无效: {ambiguity_id}/{outcome}")
+        allowed_candidate = ai_outcomes[outcome].get("candidate_id")
+        allowed_candidates = set(
+            ai_outcomes[outcome].get("candidate_ids") or ()
+        )
+        selected_candidate = selected.get("candidate_id")
+        if allowed_candidate and selected_candidate != allowed_candidate:
+            raise ValueError(
+                f"Design ambiguity candidate无效: {ambiguity_id}"
+            )
+        if allowed_candidates and selected_candidate not in allowed_candidates:
+            raise ValueError(
+                f"Design ambiguity candidate无效: {ambiguity_id}"
+            )
         result.append({
             "ambiguity_id": ambiguity_id,
             "outcome": outcome,
@@ -2347,24 +5365,87 @@ def _compile_unresolved_issues(design, brief):
             raise ValueError(
                 f"placeholder ambiguity缺少step_id: {ambiguity_id}"
             )
+        source_action_ids = [
+            str(action_id)
+            for action_id in ambiguity.get("action_ids") or ()
+            if action_id
+        ]
+        known_action_ids = actions_by_step.get(step_id) or []
+        issue_action_ids = [
+            action_id
+            for action_id in known_action_ids
+            if action_id in set(source_action_ids)
+        ]
+        if source_action_ids and len(issue_action_ids) != len(
+            set(source_action_ids)
+        ):
+            raise ValueError(
+                f"placeholder ambiguity Action范围无效: {ambiguity_id}"
+            )
+        existing_action_ids = {
+            str(action_id)
+            for issue in result.get(step_id, ())
+            for action_id in issue.get("action_ids") or ()
+            if action_id
+        }
+        duplicate_action_ids = sorted(
+            set(issue_action_ids) & existing_action_ids
+        )
+        if duplicate_action_ids:
+            raise ValueError(
+                "多个issue placeholder不能覆盖同一Action: "
+                f"{duplicate_action_ids}"
+            )
         issue_id = "generation-issue-" + hashlib.sha256(
             f"{brief.get('request_id')}:{step_id}:{ambiguity_id}".encode(
                 "utf-8"
             )
         ).hexdigest()[:16]
+        issue_type = str(
+            ambiguity.get("code") or "unresolved_generation"
+        )
+        classification = _issue_placeholder_classification(issue_type)
         result.setdefault(step_id, []).append({
             "issue_id": issue_id,
-            "issue_type": str(
-                ambiguity.get("code") or "unresolved_generation"
-            ),
+            "issue_type": issue_type,
+            "issue_domain": classification["issue_domain"],
+            "severity": classification["severity"],
+            "reuse_policy": "not_eligible_for_strong_reuse",
             "step_id": step_id,
             "ambiguity_id": ambiguity_id,
-            "action_ids": list(actions_by_step.get(step_id) or ()),
-            "source_action_ids": list(ambiguity.get("action_ids") or ()),
+            "action_ids": issue_action_ids,
+            "source_action_ids": source_action_ids,
+            "action_order": (
+                known_action_ids.index(issue_action_ids[0]) + 1
+                if issue_action_ids else None
+            ),
             "evidence_ids": list(ambiguity.get("evidence_ids") or ()),
             "reason": str(selection.get("reason") or "").strip(),
         })
     return result
+
+
+def _issue_placeholder_classification(issue_type):
+    value = str(issue_type or "").casefold()
+    if "framework" in value or "contract" in value:
+        return {"issue_domain": "framework_defect", "severity": "blocking"}
+    if any(token in value for token in (
+        "business",
+        "specification",
+        "expectation",
+        "context_conflict",
+    )):
+        return {"issue_domain": "business_unresolved", "severity": "blocking"}
+    if any(token in value for token in (
+        "evidence",
+        "keyboard",
+        "locator",
+        "target",
+        "text_value",
+        "visual_state",
+    )):
+        return {"issue_domain": "technical_evidence_gap", "severity": "blocking"}
+    return {"issue_domain": "ai_implementation_gap", "severity": "action_required"}
 
 
 def _compile_step_behavior(
@@ -2502,6 +5583,10 @@ def _exact_step_behavior_candidates(brief, target_step, step_file):
         str(path).replace("\\", "/")
         for path in scope.get("files") or ()
     }
+    file_statuses = {
+        str(path).replace("\\", "/"): str(status or "")
+        for path, status in (scope.get("file_statuses") or {}).items()
+    }
     current_file = str(step_file or "").replace("\\", "/")
     result = []
     for candidate in (
@@ -2518,6 +5603,8 @@ def _exact_step_behavior_candidates(brief, target_step, step_file):
                 visible_files and candidate_path not in visible_files
         ):
             continue
+        if file_statuses.get(candidate_path) == "missing_create_allowed":
+            continue
         if len(_matching_step_pattern_contracts(
             candidate,
             target_step,
@@ -2528,7 +5615,7 @@ def _exact_step_behavior_candidates(brief, target_step, step_file):
         }:
             continue
         if "exact_step_pattern" not in (
-                candidate.get("reasons") or ()
+            candidate.get("reasons") or ()
         ):
             continue
         result.append(candidate)
@@ -2779,39 +5866,99 @@ def _implementation_candidate(brief, candidate_id):
 def _compile_step_locators(operations, actions, owners):
     result = []
     seen = {}
+    items_by_name = {}
+    ranks_by_name = {}
     for operation in operations:
         owner = owners[operation["window_owner"]]
         action = actions[operation["target_action_id"]]
         action_root = str((action.get("target") or {}).get("root_name") or "")
         view_owner = operation.get("view_owner")
         view = (owner.get("views") or {}).get(view_owner) or {}
-        root_name = str(
-            view.get("active_locator")
-            if view_owner and action_root != owner.get("evidence_root")
-            else owner["root_locator"]
-        )
-        if root_name not in seen:
-            item = {"name": root_name, "kind": "top_level"}
-            if action_root and action_root != root_name:
-                item["evidence_name"] = action_root
-            result.append(item)
-            seen[root_name] = None
+        rootless_pos = owner.get("owner_kind") == "rootless_pos"
+        if not rootless_pos:
+            root_name = str(
+                view.get("active_locator")
+                if view_owner and action_root != owner.get("evidence_root")
+                else owner["root_locator"]
+            )
+            if root_name not in seen:
+                item = {"name": root_name, "kind": "top_level"}
+                if action_root and action_root != root_name:
+                    item["evidence_name"] = action_root
+                result.append(item)
+                seen[root_name] = None
         evidence_name = str((action.get("target") or {}).get("locator_name") or "")
         target_name = str(operation.get("target") or evidence_name)
         candidate_id = str(operation.get("locator_candidate_id") or "")
-        if target_name in seen and seen[target_name] != candidate_id:
+        if (
+                target_name in seen
+                and seen[target_name]
+                and candidate_id
+                and seen[target_name] != candidate_id
+        ):
             raise ValueError(
                 f"同一locator名称选择了冲突候选: {target_name}"
             )
         if target_name not in seen:
-            item = {"name": target_name, "kind": "child"}
+            item = {
+                "name": target_name,
+                "kind": "pos" if rootless_pos else "child",
+            }
             if target_name != evidence_name:
                 item["evidence_name"] = evidence_name
             if candidate_id:
                 item["locator_candidate_id"] = candidate_id
             result.append(item)
             seen[target_name] = candidate_id
+            items_by_name[target_name] = item
+            ranks_by_name[target_name] = _locator_evidence_rank(action)
+            continue
+        item = items_by_name[target_name]
+        _add_locator_evidence_alias(item, evidence_name)
+        if not seen[target_name] and candidate_id:
+            seen[target_name] = candidate_id
+            item["locator_candidate_id"] = candidate_id
+        rank = _locator_evidence_rank(action)
+        if rank < ranks_by_name.get(target_name, rank):
+            if target_name != evidence_name:
+                item["evidence_name"] = evidence_name
+            ranks_by_name[target_name] = rank
     return result
+
+
+def _add_locator_evidence_alias(item, evidence_name):
+    evidence_name = str(evidence_name or "")
+    name = str((item or {}).get("name") or "")
+    if not evidence_name or evidence_name == name:
+        return
+    aliases = []
+    if isinstance(item.get("evidence_names"), list):
+        aliases.extend(str(value) for value in item["evidence_names"] if value)
+    elif item.get("evidence_name"):
+        aliases.append(str(item["evidence_name"]))
+    if evidence_name not in aliases:
+        aliases.append(evidence_name)
+    if len(aliases) > 1:
+        item["evidence_names"] = aliases
+    elif aliases:
+        item["evidence_name"] = aliases[0]
+
+
+def _locator_evidence_rank(action):
+    target = (action or {}).get("target") or {}
+    validation = str(target.get("locator_validation") or "")
+    strategy = str(target.get("locator_strategy") or "").casefold()
+    locator = target.get("locator") or {}
+    by = str(locator.get("by") or "").casefold()
+    if validation in {"unique_target_match", "unique"}:
+        return 0
+    if by in {"child", "xpath"} and "ocr" not in strategy:
+        return 1
+    if "ocr" in strategy or by == "ocr":
+        return 3
+    if "pos" in strategy or by == "pos":
+        return 4
+    return 2
 
 
 def _step_file_from_brief(brief, *, step_id=None):

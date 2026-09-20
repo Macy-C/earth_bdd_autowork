@@ -148,6 +148,99 @@ REPAIR_GUIDANCE = {
 }
 
 
+_USER_DIAGNOSTIC_TITLES = {
+    "capture_error": "本次录制没有完整保存",
+    "no_recorded_actions": "这一步没有录到可用操作或结果",
+    "orphan_mouse_boundary": "一次点击没有完整录到",
+    "external_process_action": "发现可能不属于当前流程的操作",
+    "shell_transport_action": "发现可能不属于当前流程的系统操作",
+    "provisional_window": "需要确认新窗口是否属于当前流程",
+    "window_closed_during_take": "需要确认窗口关闭是否属于当前流程",
+    "pause_state_changed": "需要确认暂停期间的界面变化",
+    "drag_parameters_unavailable": "这次拖动没有完整录到",
+}
+
+
+_USER_DIAGNOSTIC_DETAILS = {
+    "capture_error": (
+        "系统发现：本次录制没有完整保存下来。",
+        "你需要：重新录制此 Step。",
+    ),
+    "tree_not_comparable": (
+        "系统发现：无法可靠确认操作前后是不是同一个界面。",
+        "你需要：重新录制此 Step，并在保存前保持目标界面可见。",
+    ),
+    "no_recorded_actions": (
+        "系统发现：这一步没有留下可用操作或检查结果。",
+        "你需要：重新录制此 Step；需要检查结果时，在目标上按 F9。",
+    ),
+    "orphan_mouse_boundary": (
+        "系统发现：一次点击只录到了后半段。",
+        "你需要：如果它与业务无关就忽略；如果有关，重新录制完整点击。",
+    ),
+    "external_process_action": (
+        "系统发现：有一次操作发生在当前业务应用之外，可能是流程的一部分，也可能是误触。",
+        "你需要：查看画面后确认；确定无关就忽略，不确定时保留它。",
+    ),
+    "shell_transport_action": (
+        "系统发现：录制中包含切换到系统界面的操作。",
+        "你需要：如果只是切换窗口或返回工具就忽略；如果属于业务流程就保留。",
+    ),
+    "weak_step_semantics": (
+        "系统发现：业务步骤和当前录制的关系还不够明确。",
+        "Copilot 会做：核对录制和业务描述；无需你处理技术细节。",
+    ),
+    "weak_target_quality": (
+        "系统发现：本次操作的目标还不够明确。",
+        "Copilot 会做：核对当前录制并选择安全的实现方式。",
+    ),
+    "fallback_ocr": (
+        "系统发现：暂时无法用稳定控件区分本次操作目标。",
+        "Copilot 会做：优先寻找可靠的实现方式；只有业务选择无法判断时才会询问。",
+    ),
+    "fallback_pos": (
+        "系统发现：当前只能按界面位置区分本次操作目标。",
+        "Copilot 会做：核对是否有更可靠的实现方式。",
+    ),
+    "positional_locator_unstable": (
+        "系统发现：当前只能按界面位置区分目标，界面变化时可能出错。",
+        "Copilot 会做：核对现有录制和代码；无法安全处理时会说明需要补什么。",
+    ),
+    "provisional_window": (
+        "系统发现：录制中出现了一个新的外部窗口，无法仅凭画面判断它是否属于当前流程。",
+        "需要业务确认：它是完成当前 Step 的必要流程，还是无关操作？Copilot 会根据确认继续处理。",
+    ),
+    "window_closed_during_take": (
+        "系统发现：关键窗口在这一步结束前关闭了。",
+        "需要业务确认：这是正常关闭、流程跳转，还是意外关闭？只有意外关闭才需要重新录制。",
+    ),
+    "pause_state_changed": (
+        "系统发现：暂停录制期间界面发生了变化，无法知道这是否属于当前 Step。",
+        "需要业务确认：这段变化是准备工作、当前业务操作，还是无关变化？",
+    ),
+    "unsupported_drag": (
+        "系统发现：这次拖动还没有足够完整的内容可用于生成。",
+        "你需要：重新录制完整拖动。",
+    ),
+    "drag_parameters_unavailable": (
+        "系统发现：这次拖动没有完整留下起点或终点。",
+        "你需要：重新录制完整拖动。",
+    ),
+    "unsupported_middle_click": (
+        "系统发现：这次中键操作还没有可安全生成的处理方式。",
+        "你需要：重新录制或改用可明确表达业务动作的操作。",
+    ),
+    "unsupported_scroll": (
+        "系统发现：有一次滚动操作，无法仅凭录制确定它是否属于当前 Step。",
+        "需要业务确认：它是完成当前 Step 的必要操作，还是只是查看或切换位置？",
+    ),
+    "dynamic_root_variants": (
+        "系统发现：同一个界面在录制中出现了不同的识别结果。",
+        "你需要：查看录制内容，确认哪些操作属于当前业务流程。",
+    ),
+}
+
+
 def build_step_diagnostics(readiness, session, step_id):
     step = next(
         (item for item in session.selected_steps if item.id == step_id),
@@ -252,21 +345,17 @@ def format_user_step_diagnostic(diagnostic):
     lines = [user_diagnostic_title(diagnostic)]
     if diagnostic.get("step"):
         lines.append(f"Step：{diagnostic['step']}")
-    repair = diagnostic.get("repair")
-    if repair == "reconcile":
-        lines.append("处理：Copilot会自动核对现有录制，你无需处理技术细节。")
-    elif repair == "timeline":
-        lines.append("处理：打开录制内容，确认并忽略误录操作。")
-    elif repair in {"rerecord", "recapture"}:
-        lines.append("处理：只补录当前Step，其他录制不会受影响。")
-    else:
-        lines.append("处理：按主按钮检查当前录制内容。")
+    lines.extend(_user_diagnostic_details(diagnostic))
     return "\n".join(lines)
 
 
 def user_diagnostic_title(diagnostic):
     repair = diagnostic.get("repair") if isinstance(diagnostic, dict) else None
-    return {
+    code = str(diagnostic.get("code") or "") if isinstance(
+        diagnostic,
+        dict,
+    ) else ""
+    return _USER_DIAGNOSTIC_TITLES.get(code) or {
         "reconcile": "有录制事实需要 Copilot 核对",
         "timeline": "录制内容中有操作需要确认",
         "rerecord": "当前 Step 的录制内容不完整",
@@ -274,13 +363,49 @@ def user_diagnostic_title(diagnostic):
     }.get(repair, "录制内容需要检查")
 
 
+def _user_diagnostic_details(diagnostic):
+    recovery = diagnostic.get("recovery") or {}
+    if recovery.get("status") == "ai_recoverable":
+        return (
+            "系统发现：本次录制有缺口，但可用操作和画面仍然保留。",
+            "Copilot 会做：先核对现有录制；无需先重新录制。",
+            "只有业务含义仍无法确定时，才需要业务负责人确认。",
+        )
+    if recovery.get("hard_blocker"):
+        return (
+            "系统发现：这一步没有留下足以还原完整操作或结果的内容。",
+            "你需要：重新录制此 Step，其他已完成步骤不受影响。",
+        )
+    code = str(diagnostic.get("code") or "")
+    details = _USER_DIAGNOSTIC_DETAILS.get(code)
+    if details is not None:
+        return details
+    repair = diagnostic.get("repair")
+    if repair == "reconcile":
+        return (
+            "系统发现：当前录制有一个细节需要进一步核对。",
+            "Copilot 会做：核对现有录制；无需你处理技术细节。",
+        )
+    if repair == "timeline":
+        return (
+            "系统发现：录制中有一个可能不属于当前流程的操作。",
+            "你需要：查看录制内容后确认是否保留。",
+        )
+    if repair in {"rerecord", "recapture"}:
+        return (
+            "系统发现：本次录制没有留下足够完整的内容。",
+            "你需要：重新录制此 Step。",
+        )
+    return ("你需要：按主按钮查看当前录制内容。",)
+
+
 def user_evidence_location(diagnostic):
     event_ids = diagnostic_event_ids([diagnostic])
     if event_ids:
-        return "当前录制版本中的对应操作"
+        return "当前录制中的对应操作"
     if diagnostic.get("evidence"):
-        return "当前录制版本的录制证据"
-    return "当前录制版本"
+        return "当前录制的录制证据"
+    return "当前录制"
 
 
 def diagnostic_event_ids(diagnostics):

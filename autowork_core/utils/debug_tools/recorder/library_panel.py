@@ -5,6 +5,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from autowork_core.utils.debug_tools.recorder.identity import stable_digest
 from autowork_core.utils.debug_tools.recorder.library_query_service import (
     RecorderLibraryQueryService,
 )
@@ -18,8 +19,12 @@ class RecordingLibraryWindow:
             output_root=None,
             on_rerecord=None,
             *,
+            on_import_feature=None,
+            on_export_feature=None,
+            on_export_scenario=None,
             on_open_session=None,
             on_retire_session=None,
+            on_cleanup_legacy_generation=None,
             on_close=None,
             close_destroys=True,
         ):
@@ -28,12 +33,15 @@ class RecordingLibraryWindow:
             output_root or (Paths.ARTIFACTS_DIR / "recording_sessions")
         ).resolve()
         self.entries = {}
-        self.capabilities = {}
         self.retirement_inspections = {}
         self.query_service = RecorderLibraryQueryService(self.output_root)
         self.on_rerecord = on_rerecord
+        self.on_import_feature = on_import_feature
+        self.on_export_feature = on_export_feature
+        self.on_export_scenario = on_export_scenario
         self.on_open_session = on_open_session
         self.on_retire_session = on_retire_session
+        self.on_cleanup_legacy_generation = on_cleanup_legacy_generation
         self.on_close = on_close
         self.close_destroys = bool(close_destroys)
 
@@ -45,13 +53,14 @@ class RecordingLibraryWindow:
         self.status_var = tk.StringVar(value="")
         self.retirement_var = tk.StringVar(value="")
         self.tree = None
-        self.capability_tree = None
-        self.notebook = None
         self.runs_tab = None
-        self.capabilities_tab = None
         self.open_button = None
         self.open_directory_button = None
-        self.open_capability_button = None
+        self.import_button = None
+        self.export_button = None
+        self.export_menu = None
+        self.retire_button = None
+        self.cleanup_button = None
         self._build_ui()
         self.refresh()
 
@@ -65,7 +74,7 @@ class RecordingLibraryWindow:
         header.pack(fill="x", padx=12, pady=(12, 6))
         ttk.Label(
             header,
-            text="历史与能力",
+            text="录制任务",
             font=("Microsoft YaHei UI", 14, "bold"),
         ).pack(side="left", padx=(0, 14))
         ttk.Label(header, text="录制根目录").pack(side="left")
@@ -86,52 +95,28 @@ class RecordingLibraryWindow:
             text="可搜索 Feature、Scenario、Step、路径或 Session ID",
         ).pack(side="left")
 
-        ttk.Label(
-            self.window,
-            textvariable=self.retirement_var,
-            anchor="w",
-            wraplength=1100,
-        ).pack(fill="x", padx=12, pady=(0, 6))
-
-        notebook = ttk.Notebook(self.window)
-        self.notebook = notebook
-        notebook.pack(fill="both", expand=True, padx=12)
-        runs_tab = ttk.Frame(notebook)
-        capabilities_tab = ttk.Frame(notebook)
+        runs_tab = ttk.Frame(self.window)
         self.runs_tab = runs_tab
-        self.capabilities_tab = capabilities_tab
-        notebook.add(runs_tab, text="历史 Run")
-        notebook.add(capabilities_tab, text="业务能力")
-        notebook.bind(
-            "<<NotebookTabChanged>>",
-            lambda event: self._update_controls(),
-        )
+        runs_tab.pack(fill="both", expand=True, padx=12)
 
         frame = ttk.Frame(runs_tab)
-        frame.pack(fill="both", expand=True, padx=12)
+        frame.pack(fill="both", expand=True)
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        columns = (
-            "feature",
-            "scenario",
-            "progress",
-            "readiness",
-            "updated",
-            "path",
-        )
+        columns = ("progress", "readiness", "updated", "path")
         self.tree = ttk.Treeview(
             frame,
             columns=columns,
-            show="headings",
+            show="tree headings",
             selectmode="browse",
         )
+        self.tree.heading("#0", text="Feature / Scenario / Run")
+        self.tree.column("#0", width=420, minwidth=220, stretch=True)
         headings = (
-            ("feature", "Feature", 280),
-            ("scenario", "Scenario / Examples", 220),
             ("progress", "Step", 80),
             ("readiness", "下一步", 130),
             ("updated", "更新时间", 145),
-            ("path", "Run", 230),
+            ("path", "Run", 280),
         )
         for column, label, width in headings:
             self.tree.heading(column, text=label)
@@ -139,7 +124,7 @@ class RecordingLibraryWindow:
                 column,
                 width=width,
                 minwidth=55,
-                stretch=column in ("feature", "scenario", "path"),
+                stretch=column == "path",
             )
         y_scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=self.tree.xview)
@@ -150,83 +135,59 @@ class RecordingLibraryWindow:
         self.tree.grid(row=0, column=0, sticky="nsew")
         y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll.grid(row=1, column=0, sticky="ew")
-        self.tree.bind("<Double-1>", lambda event: self.open_selected())
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
         self.tree.bind("<<TreeviewSelect>>", lambda event: self._update_controls())
 
-        capabilities_tab.rowconfigure(0, weight=1)
-        capabilities_tab.columnconfigure(0, weight=1)
-        capability_columns = (
-            "status",
-            "feature",
-            "scenario",
-            "step",
-            "published",
-            "path",
-        )
-        self.capability_tree = ttk.Treeview(
-            capabilities_tab,
-            columns=capability_columns,
-            show="headings",
-            selectmode="browse",
-        )
-        for column, label, width in (
-            ("status", "状态", 80),
-            ("feature", "Feature", 260),
-            ("scenario", "Scenario", 180),
-            ("step", "已确认业务能力", 340),
-            ("published", "确认时间", 145),
-            ("path", "能力文件", 240),
-        ):
-            self.capability_tree.heading(column, text=label)
-            self.capability_tree.column(
-                column,
-                width=width,
-                minwidth=60,
-                stretch=column in ("feature", "step", "path"),
-            )
-        capability_scroll = ttk.Scrollbar(
-            capabilities_tab,
-            orient="vertical",
-            command=self.capability_tree.yview,
-        )
-        self.capability_tree.configure(yscrollcommand=capability_scroll.set)
-        self.capability_tree.grid(row=0, column=0, sticky="nsew")
-        capability_scroll.grid(row=0, column=1, sticky="ns")
-        self.capability_tree.bind(
-            "<Double-1>",
-            lambda event: self.open_capability(),
-        )
-        self.capability_tree.bind(
-            "<<TreeviewSelect>>",
-            lambda event: self._update_controls(),
-        )
+        ttk.Label(
+            self.window,
+            textvariable=self.retirement_var,
+            anchor="w",
+            wraplength=1100,
+        ).pack(fill="x", padx=12, pady=(6, 0))
 
         actions = ttk.Frame(self.window)
         actions.pack(fill="x", padx=12, pady=8)
+        self.import_button = ttk.Button(
+            actions,
+            text="导入录制资料",
+            command=self.import_recording_material,
+        )
+        self.import_button.pack(side="left")
+        self.export_button = ttk.Menubutton(actions, text="导出录制资料")
+        self.export_button.pack(side="left", padx=(6, 0))
+        self.export_menu = tk.Menu(self.export_button, tearoff=False)
+        self.export_menu.add_command(
+            label="导出当前场景",
+            command=self.export_selected_scenario,
+        )
+        self.export_menu.add_command(
+            label="导出当前 Feature",
+            command=self.export_selected_feature,
+        )
+        self.export_button.configure(menu=self.export_menu)
         self.open_button = ttk.Button(
             actions,
-            text="打开审阅",
-            command=self.open_selected,
+            text="打开处理",
+            command=self.run_primary_action,
         )
-        self.open_button.pack(side="left")
-        self.open_directory_button = ttk.Button(
-            actions,
-            text="打开目录",
-            command=self.open_directory,
-        )
-        self.open_directory_button.pack(side="left", padx=6)
-        self.open_capability_button = ttk.Button(
-            actions,
-            text="打开能力文件",
-            command=self.open_capability,
-        )
-        self.open_capability_button.pack(side="left", padx=6)
+        self.open_button.pack(side="left", padx=(6, 0))
         self.retire_button = ttk.Button(
             actions,
-            text="退役 Run",
+            text="删除录制资料",
             command=self.retire_selected,
         )
         self.retire_button.pack(side="left", padx=6)
+        self.cleanup_button = ttk.Menubutton(
+            actions,
+            text="诊断",
+        )
+        self.cleanup_menu = tk.Menu(self.cleanup_button, tearoff=False)
+        self.cleanup_menu.add_command(
+            label="清理旧生成状态",
+            command=self.cleanup_selected_legacy_generation,
+        )
+        self.cleanup_button.configure(menu=self.cleanup_menu)
+        self.cleanup_button.pack(side="left")
         ttk.Button(
             actions,
             text="关闭" if self.close_destroys else "返回录制",
@@ -250,6 +211,76 @@ class RecordingLibraryWindow:
             self.root_var.set(path)
             self.refresh()
 
+    def import_recording_material(self):
+        if self.on_import_feature is None:
+            self.status_var.set("当前资料库未连接导入服务。")
+            return False
+        try:
+            self.output_root = self._entered_root()
+        except Exception as error:
+            self.status_var.set(
+                f"录制任务目录无效: {type(error).__name__}: {error}"
+            )
+            return False
+        try:
+            started = self.on_import_feature(
+                output_root=self.output_root,
+                parent=self.window,
+            )
+        except Exception as error:
+            self.status_var.set(
+                f"启动录制资料导入失败: {type(error).__name__}: {error}"
+            )
+            return False
+        if started:
+            self.status_var.set("正在校验并导入录制资料...")
+        return bool(started)
+
+    def export_selected_feature(self):
+        return self._export_selected("feature")
+
+    def export_selected_scenario(self):
+        return self._export_selected("scenario")
+
+    def _export_selected(self, scope):
+        entry = self.selected_entry()
+        if entry is None:
+            self.status_var.set("请选择一条录制任务。")
+            return False
+        callback = (
+            self.on_export_feature
+            if scope == "feature"
+            else self.on_export_scenario
+        )
+        if callback is None:
+            self.status_var.set("当前工作台未连接导出服务。")
+            return False
+        output = filedialog.asksaveasfilename(
+            parent=self.window,
+            title=(
+                "导出 Feature 录制资料"
+                if scope == "feature"
+                else "导出当前场景录制资料"
+            ),
+            defaultextension=".zip",
+            filetypes=(("Feature 录制资料", "*.zip"),),
+            initialfile=(
+                f"{stable_digest(entry.feature_name, entry.scenario_name, scope, length=8)}.delivery.zip"
+            ),
+        )
+        if not output:
+            return False
+        try:
+            self.output_root = self._entered_root()
+            callback(entry, Path(output), self.output_root)
+        except Exception as error:
+            self.status_var.set(
+                f"启动录制资料导出失败: {type(error).__name__}: {error}"
+            )
+            return False
+        self.status_var.set("正在导出录制资料...")
+        return True
+
     def refresh(self):
         try:
             self.output_root = self._entered_root()
@@ -271,72 +302,85 @@ class RecordingLibraryWindow:
         self.retirement_inspections = {}
         self._render()
         self.status_var.set(
-            f"已加载 {len(self.entries)} 个历史 Run、"
-            f"{len(model.capabilities)} 个能力记录。"
-            "双击 Run 可直接审阅，不会启动录制。"
+            f"已加载 {len(self.entries)} 条录制任务。"
+            "按 Feature / Scenario 管理；双击 Run 打开审阅。"
         )
+
+    def _on_tree_double_click(self, event=None):
+        if self.selected_entry() is None:
+            selected = self.tree.selection() if self.tree is not None else ()
+            if selected:
+                row = selected[0]
+                self.tree.item(row, open=not bool(self.tree.item(row, "open")))
+            return
+        self.open_selected()
 
     def _render(self):
         selected = self.selected_session_id()
         self.tree.delete(*self.tree.get_children())
         query = self.search_var.get().strip().casefold()
+        feature_rows = {}
+        scenario_rows = {}
+        first_run_id = None
         for session_id, entry in self.entries.items():
             if query and query not in entry.search_text:
                 continue
+            feature_key = "feature-" + stable_digest(
+                entry.feature_name,
+                getattr(entry, "feature_source_relpath", ""),
+                length=16,
+            )
+            if feature_key not in feature_rows:
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=feature_key,
+                    text=entry.feature_name or "未命名 Feature",
+                    open=True,
+                    values=("", "", "", ""),
+                )
+                feature_rows[feature_key] = entry.feature_name
+            scenario_key = feature_key + "-scenario-" + stable_digest(
+                entry.scenario_name,
+                getattr(entry, "scenario_id", ""),
+                length=16,
+            )
+            if scenario_key not in scenario_rows:
+                self.tree.insert(
+                    feature_key,
+                    "end",
+                    iid=scenario_key,
+                    text=entry.scenario_name or "未命名场景",
+                    open=True,
+                    values=("", "", "", ""),
+                )
+                scenario_rows[scenario_key] = entry.scenario_name
             self.tree.insert(
-                "",
+                scenario_key,
                 "end",
                 iid=session_id,
+                text=_run_label(entry),
                 values=(
-                    entry.feature_name,
-                    entry.scenario_name,
                     entry.progress,
                     entry.next_action,
                     entry.updated_at,
                     entry.path,
                 ),
             )
+            if first_run_id is None:
+                first_run_id = session_id
         if selected and self.tree.exists(selected):
             self.tree.selection_set(selected)
-        elif self.tree.get_children():
-            self.tree.selection_set(self.tree.get_children()[0])
+            self.tree.focus(selected)
+        elif first_run_id and self.tree.exists(first_run_id):
+            self.tree.selection_set(first_run_id)
+            self.tree.focus(first_run_id)
         self._update_controls()
-        self._render_capabilities(query)
-
-    def _render_capabilities(self, query):
-        self.capability_tree.delete(*self.capability_tree.get_children())
-        for capability_id, entry in self.capabilities.items():
-            if query and query not in entry.search_text:
-                continue
-            self.capability_tree.insert(
-                "",
-                "end",
-                iid=capability_id,
-                values=(
-                    entry.status_label,
-                    entry.feature_name,
-                    entry.scenario_name,
-                    entry.step_text,
-                    entry.published_at,
-                    entry.path,
-                ),
-            )
 
     def selected_session_id(self):
-        if self._active_tab() != "runs":
-            return None
         selected = self.tree.selection() if self.tree is not None else ()
-        return selected[0] if selected else None
-
-    def selected_capability(self):
-        if self._active_tab() != "capabilities":
-            return None
-        selected = (
-            self.capability_tree.selection()
-            if self.capability_tree is not None
-            else ()
-        )
-        return self.capabilities.get(selected[0]) if selected else None
+        session_id = selected[0] if selected else None
+        return session_id if session_id in self.entries else None
 
     def selected_entry(self):
         session_id = self.selected_session_id()
@@ -350,10 +394,51 @@ class RecordingLibraryWindow:
             else None
         )
 
+    def run_primary_action(self):
+        entry = self.selected_entry()
+        if entry is None:
+            self.status_var.set("请选择一条录制任务。")
+            return
+        if (
+            entry.next_action in {"可继续录制", "继续录制"}
+            and self.on_rerecord is not None
+        ):
+            self.resume_selected()
+            return
+        self.open_selected()
+
+    def resume_selected(self):
+        session_dir = self.selected_session_dir()
+        if session_dir is None:
+            self.status_var.set("请选择一条录制任务。")
+            return
+        if self.on_rerecord is None:
+            self.status_var.set("当前工作台未连接继续录制服务。")
+            return
+        try:
+            from autowork_core.utils.debug_tools.recorder.session import (
+                FeatureRecordingSession,
+            )
+
+            session = FeatureRecordingSession.open_existing(session_dir)
+            step = session.next_recordable_step()
+            if step is None:
+                self.status_var.set("当前录制任务没有待录制的 Step。")
+                session.close()
+                return
+            if self.on_rerecord(session, step.id) is False:
+                return
+        except Exception as error:
+            self.status_var.set(
+                f"继续录制失败: {type(error).__name__}: {error}"
+            )
+            return
+        self.status_var.set("已切换到录制页，请继续当前 Step。")
+
     def open_selected(self):
         session_dir = self.selected_session_dir()
         if session_dir is None:
-            self.status_var.set("请选择一个历史 Run。")
+            self.status_var.set("请选择一条录制资料。")
             return
         try:
             if self.on_open_session is None:
@@ -362,7 +447,7 @@ class RecordingLibraryWindow:
                 return
         except Exception as error:
             self.status_var.set(
-                f"打开历史 Run 失败: {type(error).__name__}: {error}"
+                f"打开录制资料失败: {type(error).__name__}: {error}"
             )
             return
         self.status_var.set(
@@ -373,7 +458,7 @@ class RecordingLibraryWindow:
     def open_directory(self):
         session_dir = self.selected_session_dir()
         if session_dir is None:
-            self.status_var.set("请选择一个历史 Run。")
+            self.status_var.set("请选择一条录制资料。")
             return
         try:
             os.startfile(session_dir)
@@ -382,101 +467,106 @@ class RecordingLibraryWindow:
                 f"打开目录失败: {type(error).__name__}: {error}"
             )
 
-    def open_capability(self):
-        entry = self.selected_capability()
-        if entry is None:
-            self.status_var.set("请在“已确认能力”中选择一项。")
-            return
-        path = Path(entry.detail_path) if entry.detail_path else None
-        if path is None:
-            self.status_var.set("能力文件无效或已不存在。")
-            return
-        try:
-            os.startfile(path)
-        except Exception as error:
-            self.status_var.set(
-                f"打开能力文件失败: {type(error).__name__}: {error}"
-            )
-
     def retire_selected(self):
         session_dir = self.selected_session_dir()
         if session_dir is None:
-            self.status_var.set("请选择一个历史 Run。")
+            self.status_var.set("请选择一条录制任务。")
             return
         if self.on_retire_session is None:
-            self.status_var.set("录制库未连接 Run 退役服务。")
+            self.status_var.set("当前工作台未连接删除服务。")
             return
         if not messagebox.askyesno(
-            "退役 Run",
-            "保留已提炼的 AI 经验，并永久删除此 Run 的录屏、图片、UI tree 和事务工件？",
+            "删除录制资料",
+            "将删除这条录制任务的录屏、截图和生成中间文件。"
+            "已生成到项目中的脚本不会删除。是否继续？",
             parent=self.window,
         ):
             return
         try:
-            result = self.on_retire_session(session_dir, True)
+            result = self.on_retire_session(session_dir, False)
             if result is None:
                 return
         except Exception as error:
-            from autowork_core.utils.debug_tools.recorder.run_retirement import (
-                RunKnowledgeRequiredError,
+            self.status_var.set(
+                f"删除录制资料失败: {type(error).__name__}: {error}"
             )
-
-            if not isinstance(error, RunKnowledgeRequiredError):
-                self.status_var.set(
-                    f"退役 Run 失败: {type(error).__name__}: {error}"
-                )
-                return
-            if not messagebox.askyesno(
-                "没有可提炼经验",
-                "此 Run 没有确认经验或成功生成结果。是否不保留经验并直接丢弃？此操作不可恢复。",
-                parent=self.window,
-            ):
-                self.status_var.set("已取消；Run 保持不变。")
-                return
-            try:
-                result = self.on_retire_session(session_dir, False)
-                if result is None:
-                    return
-            except Exception as discard_error:
-                self.status_var.set(
-                    "丢弃 Run 失败: "
-                    f"{type(discard_error).__name__}: {discard_error}"
-                )
-                return
+            return
         self.refresh()
         self.status_var.set(
-            "Run 已退役，AI 经验保存在 Bdd/ai/knowledge。"
-            if result.get("mode") == "distilled"
-            else "Run 已丢弃，未保留 AI 经验。"
+            "已删除录制资料。生成到项目中的文件不受影响。"
         )
+
+    def cleanup_selected_legacy_generation(self):
+        session_dir = self.selected_session_dir()
+        if session_dir is None:
+            self.status_var.set("请选择一条录制任务。")
+            return False
+        if self.on_cleanup_legacy_generation is None:
+            self.status_var.set("当前工作台未连接遗留状态清理服务。")
+            return False
+        if not messagebox.askyesno(
+            "清理遗留生成状态",
+            "仅清理已卡住的历史生成状态，不删除录制资料，"
+            "也不会删除已生成到项目中的脚本。是否继续？",
+            parent=self.window,
+        ):
+            return False
+        try:
+            result = self.on_cleanup_legacy_generation(session_dir)
+        except Exception as error:
+            self.status_var.set(
+                f"清理遗留生成状态失败: {type(error).__name__}: {error}"
+            )
+            return False
+        self.refresh()
+        cleaned = len((result or {}).get("cleaned_workflows") or ())
+        self.status_var.set(
+            f"已清理 {cleaned} 个遗留生成状态；请重新检查是否可删除。"
+        )
+        return True
 
     def _entered_root(self):
         value = self.root_var.get().strip()
         return Path(value or self.output_root).resolve()
 
     def _update_controls(self):
-        active_tab = self._active_tab()
         session_id = self.selected_session_id()
         entry = self.selected_entry()
         inspection = self.retirement_inspections.get(session_id)
         if entry is not None and inspection is None:
             inspection = self.query_service.retirement_status(entry)
             self.retirement_inspections[session_id] = inspection
-        state = (
+        state = "normal" if entry is not None else "disabled"
+        self.import_button.configure(
+            state="normal" if self.on_import_feature is not None else "disabled"
+        )
+        self.open_button.configure(text=_primary_action_label(entry))
+        self.open_button.configure(state=state)
+        export_state = (
             "normal"
-            if active_tab == "runs" and entry is not None
+            if entry is not None
+            and (
+                self.on_export_feature is not None
+                or self.on_export_scenario is not None
+            )
             else "disabled"
         )
-        self.open_button.configure(state=state)
-        self.open_directory_button.configure(state=state)
-        capability = self.selected_capability()
-        self.open_capability_button.configure(
+        self.export_button.configure(state=export_state)
+        self.export_menu.entryconfigure(
+            "导出当前场景",
             state=(
                 "normal"
-                if capability is not None
-                and capability.detail_path is not None
+                if entry is not None and self.on_export_scenario is not None
                 else "disabled"
-            )
+            ),
+        )
+        self.export_menu.entryconfigure(
+            "导出当前 Feature",
+            state=(
+                "normal"
+                if entry is not None and self.on_export_feature is not None
+                else "disabled"
+            ),
         )
         retirement_state = (
             "normal"
@@ -486,23 +576,20 @@ class RecordingLibraryWindow:
             else "disabled"
         )
         self.retire_button.configure(state=retirement_state)
-        self.retirement_var.set(
-            (
-                "退役：仅适用于历史 Run"
-                if active_tab != "runs"
-                else inspection.detail
-                if inspection
-                else "退役：请选择历史 Run"
-            )
+        cleanup_state = (
+            "normal"
+            if entry is not None
+            and inspection is not None
+            and _can_cleanup_legacy_generation(inspection)
+            and self.on_cleanup_legacy_generation is not None
+            else "disabled"
         )
-
-    def _active_tab(self):
-        if self.notebook is None:
-            return "runs"
-        selected = self.notebook.select()
-        if selected == str(self.capabilities_tab):
-            return "capabilities"
-        return "runs"
+        self.cleanup_button.configure(state=cleanup_state)
+        self.retirement_var.set(
+            _delete_status_text(inspection)
+            if inspection
+            else "请选择一条录制任务。"
+        )
 
     def close(self):
         if self.close_destroys:
@@ -515,6 +602,40 @@ class RecordingLibraryWindow:
             self.window.destroy()
         except tk.TclError:
             pass
+
+
+def _primary_action_label(entry):
+    if entry is None:
+        return "打开处理"
+    if entry.next_action in {"可继续录制", "继续录制"}:
+        return "继续录制"
+    if entry.next_action in {"打开检查", "待 AI 理解", "交给 Copilot"}:
+        return "打开生成"
+    if entry.next_action in {"需要审阅", "证据损坏"}:
+        return "打开处理"
+    return "打开处理"
+
+
+def _run_label(entry):
+    return entry.updated_at.replace("T", " ")[:16] or entry.session_id
+
+
+def _delete_status_text(inspection):
+    if inspection is None:
+        return "请选择一条录制任务。"
+    if not inspection.eligible:
+        detail = str(inspection.detail or "")
+        if detail.startswith("退役："):
+            detail = detail.removeprefix("退役：")
+        if "已阻塞" in detail:
+            detail = detail.split("已阻塞；", 1)[-1]
+        return "暂时不能删除：" + detail
+    return "可删除。已生成到项目中的脚本不会删除。"
+
+
+def _can_cleanup_legacy_generation(inspection):
+    detail = str(getattr(inspection, "detail", "") or "")
+    return "正在生成或上次生成未正常结束" in detail
 
 
 __all__ = ["RecordingLibraryWindow"]

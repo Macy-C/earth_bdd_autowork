@@ -250,7 +250,6 @@ def _changed_window_locator_packages(
             Path(owner["root_locator_file"]),
         )
         views = []
-        owned_views = []
         for view_id, view in (owner.get("views") or {}).items():
             if not isinstance(view, dict) or not view.get("locator_file"):
                 continue
@@ -258,10 +257,7 @@ def _changed_window_locator_packages(
                 project_root,
                 Path(view["locator_file"]),
             )
-            if view.get("root_locator"):
-                owned_views.append((str(view_id), view_path))
-            else:
-                views.append(view_path)
+            views.append(view_path)
         files = {root, *views}
         if files & changed:
             packages.append({
@@ -269,15 +265,6 @@ def _changed_window_locator_packages(
                 "root": root,
                 "views": views,
                 "files": files,
-            })
-        for view_id, view_path in owned_views:
-            if view_path not in changed:
-                continue
-            packages.append({
-                "name": f"{owner_id}.{view_id}",
-                "root": view_path,
-                "views": [],
-                "files": {view_path},
             })
     return packages
 
@@ -540,6 +527,8 @@ def validate_plan_conformance(
             continue
         if owner.get("root_locator_file"):
             plan_locator_files.append(Path(owner["root_locator_file"]))
+        if owner.get("locator_file"):
+            plan_locator_files.append(Path(owner["locator_file"]))
         plan_locator_files.extend(
             Path(view["locator_file"])
             for view in (owner.get("views") or {}).values()
@@ -1026,9 +1015,10 @@ def validate_owner_resolution_snapshot(
             owner.get("evidence_root") or owner.get("root_locator") or ""
         )))
         owner_match = (window or {}).get("owner_match") or {}
-        if strategy == "create_new" and owner_match.get(
-            "suggested_strategy"
-        ) in {"reuse_existing", "ambiguous"}:
+        if (
+                strategy == "create_new"
+                and owner_match.get("suggested_strategy") == "reuse_existing"
+        ):
             warnings.append(
                 f"window_owner {owner_id} 以 create_new 覆盖 "
                 f"{owner_match.get('suggested_strategy')} 建议: "
@@ -1085,6 +1075,107 @@ def validate_owner_resolution_snapshot(
     return errors, warnings
 
 
+def validate_selected_generation_source_snapshot(
+        project_root,
+        plan_artifact,
+        brief,
+):
+    if (
+        not isinstance(brief, dict)
+        or (plan_artifact or {}).get("plan_version") != PLAN_VERSION
+    ):
+        return [], []
+    plan = (plan_artifact or {}).get("plan") or {}
+    owner_errors, owner_warnings = validate_owner_resolution_snapshot(
+        project_root,
+        plan.get("window_owners") or {},
+        brief,
+    )
+    implementation_errors, implementation_warnings = (
+        validate_implementation_resolution_snapshot(
+            project_root,
+            plan_artifact,
+            brief,
+        )
+    )
+    locator_errors = _selected_locator_reuse_snapshot_errors(
+        project_root,
+        plan,
+        brief,
+    )
+    errors = [
+        _design_submission_snapshot_error(error)
+        for error in (
+            *owner_errors,
+            *implementation_errors,
+            *locator_errors,
+        )
+    ]
+    return errors, [*owner_warnings, *implementation_warnings]
+
+
+def _selected_locator_reuse_snapshot_errors(project_root, plan, brief):
+    matches = {}
+    for match in (
+            ((brief.get("semantics") or {}).get(
+                "locator_reuse_matches"
+            ) or ())
+    ):
+        if not isinstance(match, dict):
+            continue
+        identity = (
+            str(match.get("step_id") or ""),
+            str(match.get("action_id") or ""),
+        )
+        if all(identity):
+            matches.setdefault(identity, []).append(match)
+    errors = []
+    checked = set()
+    for step_id, step in (plan.get("steps") or {}).items():
+        for operation in (step or {}).get("operations") or ():
+            action_id = str(operation.get("target_action_id") or "")
+            identity = (str(step_id), action_id)
+            if not action_id or identity in checked:
+                continue
+            checked.add(identity)
+            selected = matches.get(identity) or []
+            if not selected:
+                continue
+            if len(selected) != 1:
+                errors.append(
+                    "Step " + str(step_id)
+                    + " 的已选 Locator 复用匹配不唯一"
+                )
+                continue
+            match = selected[0]
+            locator_file = str(match.get("locator_file") or "")
+            locator_key = str(match.get("locator_key") or "")
+            expected = str(match.get("locator_sha256") or "")
+            path = _owned_path(project_root, locator_file)
+            actual = None
+            if path is not None and path.is_file():
+                try:
+                    actual = _file_sha256(path)
+                except OSError:
+                    actual = None
+            if any((
+                    match.get("status") != "unique_same_target",
+                    str(operation.get("target") or "") != locator_key,
+                    not expected,
+                    actual != expected,
+            )):
+                errors.append(
+                    "Step " + str(step_id)
+                    + " 的已选 Locator 复用候选在提交 Design 前快照已变化: "
+                    + (locator_file or locator_key or action_id)
+                )
+    return errors
+
+
+def _design_submission_snapshot_error(error):
+    return str(error).replace("在事务开始前", "在提交 Design 前")
+
+
 def _candidate_input_sha256(project_root, path, snapshot):
     if path is None:
         return None
@@ -1133,7 +1224,7 @@ def validate_implementation_resolution_snapshot(
     }
     for step_id, step in (plan.get("steps") or {}).items():
         behavior_resolution = (step or {}).get("behavior_resolution") or {}
-        if behavior_resolution.get("strategy") == "reuse":
+        if behavior_resolution.get("strategy") in {"reuse", "modify"}:
             candidate_id = str(
                 behavior_resolution.get("candidate_id") or ""
             )
@@ -1148,6 +1239,16 @@ def validate_implementation_resolution_snapshot(
                 path,
                 generation_input_snapshot,
             )
+            if (
+                    actual is None
+                    and behavior_resolution.get("strategy") == "modify"
+                    and _step_inline_behavior_can_recreate(path, step)
+            ):
+                warnings.append(
+                    f"Step {step_id} behavior candidate {candidate_id} "
+                    "源文件缺失，按用户删除后的重建处理"
+                )
+                continue
             if not expected or actual != expected:
                 errors.append(
                     f"Step {step_id} behavior candidate {candidate_id} "
@@ -1196,6 +1297,20 @@ def validate_implementation_resolution_snapshot(
                         "请刷新复用候选"
                     )
     return errors, warnings
+
+
+def _step_inline_behavior_can_recreate(path, step):
+    if path is None:
+        return False
+    parts = tuple(path.parts)
+    if "Bdd" not in parts or "steps" not in parts or path.suffix != ".py":
+        return False
+    operations = list((step or {}).get("operations") or ())
+    return bool(operations) and all(
+        isinstance(operation, dict)
+        and operation.get("implementation_location") == "step_inline_base_api"
+        for operation in operations
+    )
 
 
 def _step_candidate_matches_source(path, candidate, target_step):
@@ -2428,16 +2543,9 @@ def _declared_method_route(
             f"view_owner {window_owner}.{view_owner} active_locator "
             "与 Plan 不一致"
         )
-    declared_root = normalize(_class_string_attribute(
-        view_tree,
-        method_owner,
-        "root_locator",
-    ))
-    planned_root = normalize(str(view.get("root_locator") or ""))
-    if declared_root != planned_root:
+    if _class_string_attribute(view_tree, method_owner, "root_locator"):
         errors.append(
-            f"view_owner {window_owner}.{view_owner} root_locator "
-            "与 Plan 不一致"
+            f"view_owner {window_owner}.{view_owner} 不能声明root_locator"
         )
     page_classes = _classes_with_declared_view(
         page_tree,
@@ -2968,12 +3076,19 @@ def _validate_issue_placeholders(
             and isinstance(statement.value.func, ast.Name)
             and statement.value.func.id in helper_names
         ]
-        if len(body) != len(issues) or len(calls) != len(issues):
+        expected_issues = sorted(
+            issues,
+            key=lambda item: (
+                int(item.get("action_order") or 0),
+                str(item.get("issue_id") or ""),
+            ),
+        )
+        if len(calls) != len(expected_issues):
             errors.append(
-                f"Step {step_id} typed issue placeholder只能包含计划helper调用"
+                f"Step {step_id} typed issue placeholder缺少计划helper调用"
             )
             continue
-        for issue, call in zip(issues, calls):
+        for issue, call in zip(expected_issues, calls):
             keywords = {
                 keyword.arg: _literal_value(keyword.value)
                 for keyword in call.keywords
@@ -3009,6 +3124,41 @@ def _window_owner_scopes(project_root, owners):
     for owner_id, owner in owners.items():
         if not isinstance(owner, dict):
             errors.append(f"window_owner {owner_id} 必须是 object")
+            continue
+        if owner.get("owner_kind") == "rootless_pos":
+            page_path = _owned_path(project_root, owner.get("page_object"))
+            locator_path = _owned_path(project_root, owner.get("locator_file"))
+            if page_path is None or not page_path.is_file():
+                errors.append(
+                    f"window_owner {owner_id} rootless_pos Page Object 不存在: "
+                    f"{owner.get('page_object')}"
+                )
+            if locator_path is None or not locator_path.is_file():
+                errors.append(
+                    f"window_owner {owner_id} rootless_pos locator 文件不存在: "
+                    f"{owner.get('locator_file')}"
+                )
+                continue
+            try:
+                locator_data = yaml.safe_load(
+                    locator_path.read_text(encoding="utf-8")
+                ) or {}
+                compiled = compile_locators(locator_data)
+            except Exception as error:
+                errors.append(
+                    f"window_owner {owner_id} rootless_pos locator 无效: "
+                    f"{type(error).__name__}: {error}"
+                )
+                continue
+            if any(locator.prefix != "pos" for locator in compiled.values()):
+                errors.append(
+                    f"window_owner {owner_id} rootless_pos 只能包含POS locator"
+                )
+            scopes[str(owner_id)] = {
+                "page_python": [page_path] if page_path is not None else [],
+                "root_locator_keys": set(compiled),
+                "views": {},
+            }
             continue
         page_path = _owned_path(project_root, owner.get("page_object"))
         root_path = _owned_path(
@@ -3064,36 +3214,17 @@ def _window_owner_scopes(project_root, owners):
                 raw_view = yaml.safe_load(
                     view_path.read_text(encoding="utf-8")
                 ) or {}
-                planned_view_root = normalize(str(
-                    (view or {}).get("root_locator") or ""
-                ))
-                if planned_view_root:
-                    owned_package = compile_window_locator_package(
-                        raw_view,
-                        package_name=str(
-                            (view or {}).get("locator_file") or ""
-                        ),
-                    )
-                    if owned_package.root_name != planned_view_root:
-                        raise ValueError(
-                            "WindowView root_locator 不匹配: "
-                            f"declared={planned_view_root}, "
-                            f"actual={owned_package.root_name}"
-                        )
-                    compiled_view = owned_package.locators
-                else:
-                    compiled_view = compile_locators(
-                        raw_view,
-                        external_locators=root_compiled,
-                    )
+                compiled_view = compile_locators(
+                    raw_view,
+                    external_locators=root_compiled,
+                )
             except Exception as error:
                 errors.append(
                     f"view_owner {owner_id}.{view_id} locator 无效: "
                     f"{type(error).__name__}: {error}"
                 )
                 continue
-            if not (view or {}).get("root_locator"):
-                view_data.append(raw_view)
+            view_data.append(raw_view)
             view_scopes[str(view_id)] = {
                 "python": [view_object] if view_object is not None else [],
                 "locator_keys": set(compiled_view),
@@ -3223,9 +3354,16 @@ def _step_inline_scope(
         page_path = _owned_path(project_root, owner.get("page_object"))
         page_tree = trees_by_path.get(str(page_path)) if page_path else None
         page_module = _module_name(project_root, page_path)
-        page_classes = _classes_with_root_locator(
-            page_tree,
-            owner.get("root_locator"),
+        page_classes = (
+            _classes_with_locator_file(
+                page_tree,
+                owner.get("locator_file"),
+            )
+            if owner.get("owner_kind") == "rootless_pos"
+            else _classes_with_root_locator(
+                page_tree,
+                owner.get("root_locator"),
+            )
         )
         if not page_module or len(page_classes) != 1:
             errors.append(
@@ -3304,6 +3442,42 @@ def _classes_with_root_locator(tree, root_locator):
     ]
 
 
+def _classes_with_locator_file(tree, locator_file):
+    expected = _locator_resource_path(locator_file)
+    if tree is None or not expected:
+        return []
+    imports = _direct_imports(tree)
+    if imports.get("BasePage") not in {
+            ("autowork_core.page", "BasePage"),
+            ("autowork_core.page.singleton", "BasePage"),
+    }:
+        return []
+    return [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and any(
+            isinstance(base, ast.Name) and base.id == "BasePage"
+            for base in node.bases
+        )
+        and _locator_resource_path(
+            _class_string_attribute(tree, node.name, "locator_file")
+        ) == expected
+        and not _class_string_attribute(tree, node.name, "root_locator")
+        and not _class_string_attribute(
+            tree,
+            node.name,
+            "root_locator_file",
+        )
+    ]
+
+
+def _locator_resource_path(value):
+    path = str(value or "").replace("\\", "/").strip("/")
+    prefix = "Bdd/locators/"
+    return path[len(prefix):] if path.startswith(prefix) else path
+
+
 def _validate_inline_view_route(
         step_id,
         owner,
@@ -3318,7 +3492,6 @@ def _validate_inline_view_route(
     view_tree = trees_by_path.get(str(view_path)) if view_path else None
     view_module = _module_name(project_root, view_path)
     planned_active = str(view.get("active_locator") or "").lstrip("$")
-    planned_root = normalize(str(view.get("root_locator") or ""))
     active_classes = [
         node.name
         for node in (getattr(view_tree, "body", None) or [])
@@ -3332,15 +3505,15 @@ def _validate_inline_view_route(
     view_classes = [
         class_name
         for class_name in active_classes
-        if normalize(_class_string_attribute(
+        if not _class_string_attribute(
             view_tree,
             class_name,
             "root_locator",
-        )) == planned_root
+        )
     ]
     if view_module and len(active_classes) == 1 and not view_classes:
         return [
-            f"view_owner {view_owner} root_locator 与 Plan 不一致"
+            f"view_owner {view_owner} 不能声明root_locator"
         ]
     if not view_module or len(view_classes) != 1:
         return [

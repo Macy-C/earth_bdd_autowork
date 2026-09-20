@@ -40,6 +40,8 @@ def freeze_window_identity(window):
             "class_name",
             "process_name",
             "process_executable_fingerprint",
+            "owner_handle",
+            "owner_chain",
         )
         if window.get(key) is not None
     }
@@ -53,12 +55,32 @@ def freeze_window_identity(window):
 def window_identity_for_handle(handle):
     handle = int(handle)
     _, process_id = win32process.GetWindowThreadProcessId(handle)
+    owner_chain = _window_owner_chain(handle)
     return freeze_window_identity({
         "handle": handle,
         "process_id": int(process_id),
         "title": str(win32gui.GetWindowText(handle) or ""),
         "class_name": str(win32gui.GetClassName(handle) or ""),
+        "owner_handle": owner_chain[0] if owner_chain else None,
+        "owner_chain": owner_chain,
     })
+
+
+def _window_owner_chain(handle, limit=16):
+    result = []
+    seen = {int(handle or 0)}
+    current = int(handle or 0)
+    for _index in range(max(0, int(limit))):
+        try:
+            owner = int(win32gui.GetWindow(current, 4) or 0)
+        except Exception:
+            break
+        if not owner or owner in seen:
+            break
+        result.append(owner)
+        seen.add(owner)
+        current = owner
+    return result
 
 
 def list_top_level_windows(backend=None):

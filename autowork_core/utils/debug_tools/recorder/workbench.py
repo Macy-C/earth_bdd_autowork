@@ -7,7 +7,7 @@ from tkinter import ttk
 WORKBENCH_VIEWS = ("capture", "library", "review", "timeline")
 _BASE_LABELS = {
     "capture": "Feature与录制",
-    "library": "历史",
+    "library": "录制任务",
     "review": "修复与生成",
     "timeline": "录制内容",
 }
@@ -62,7 +62,7 @@ class RecorderWorkbench:
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         for key, label in (
             ("capture", "Feature与录制"),
-            ("library", "历史"),
+            ("library", "录制任务"),
             ("review", "修复与生成"),
             ("timeline", "录制内容"),
         ):
@@ -128,21 +128,9 @@ class RecorderWorkbench:
         )
         if step is None and model.steps:
             step = model.steps[0]
-        take_id = take_id or (step.selected_take_id if step else None)
         parts = [model.feature_name, model.scenario_name]
         if step is not None:
             parts.append(f"Step {step.ordinal}: {step.text}")
-        if take_id:
-            take = next(
-                (
-                    item
-                    for item in (step.takes if step is not None else ())
-                    if item.take_id == take_id
-                ),
-                None,
-            )
-            if take is not None:
-                parts.append(f"第 {take.take_number} 次录制")
         self.context_var.set("  /  ".join(parts))
         self.scope_var.set(
             model.scope.label

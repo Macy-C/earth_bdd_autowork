@@ -139,6 +139,10 @@ def build_generation_request(
                 session_dir,
                 evidence_artifacts,
             ),
+            "evidence_compilation": _step_evidence_compilation(
+                readiness,
+                entry["step"].get("id"),
+            ),
         }
         input_recovery = _freeze_confirmed_input_recovery(
             entry["step"],
@@ -259,11 +263,27 @@ def build_generation_request(
         specification_fingerprint=specification_fingerprint,
         annotation_fingerprint=annotation_fingerprint,
         execution_profile_fingerprint=execution_fingerprint,
+        evidence_compilation_fingerprint=readiness.get(
+            "evidence_compilation_fingerprint"
+        ),
+        evidence_generation_allowed=readiness.get(
+            "evidence_generation_allowed"
+        ),
     )
     target_readiness = _target_readiness(target_reviews)
-    target_capture_generation_candidate = target_readiness[
-        "target_capture_generation_candidate"
-    ]
+    session_capture_generation_candidate = readiness.get(
+        "capture_generation_candidate",
+        False,
+    )
+    evidence_generation_allowed = readiness.get(
+        "evidence_generation_allowed",
+        False,
+    )
+    target_capture_generation_candidate = bool(
+        target_readiness["target_capture_generation_candidate"]
+        and session_capture_generation_candidate
+        and evidence_generation_allowed
+    )
     request = {
         "schema_version": SCHEMA_VERSION,
         "request_version": "3.0",
@@ -281,6 +301,12 @@ def build_generation_request(
             "step_scope_fingerprint": step_scope_binding[
                 "binding_fingerprint"
             ],
+            "evidence_compilation_fingerprint": readiness.get(
+                "evidence_compilation_fingerprint"
+            ),
+            "evidence_generation_allowed": bool(
+                evidence_generation_allowed
+            ),
         },
         "annotation_snapshot": annotation_snapshot,
         "execution": execution,
@@ -296,9 +322,20 @@ def build_generation_request(
         "readiness": {
             "bundle_valid": readiness["bundle_valid"],
             "target_capture_generation_candidate": target_capture_generation_candidate,
-            "session_capture_generation_candidate": readiness.get(
-                "capture_generation_candidate", False
+            "session_capture_generation_candidate": session_capture_generation_candidate,
+            "evidence_compiled": bool(readiness.get("evidence_compiled")),
+            "evidence_compilation_status": readiness.get(
+                "evidence_compilation_status"
             ),
+            "evidence_generation_allowed": bool(
+                evidence_generation_allowed
+            ),
+            "evidence_compilation_fingerprint": readiness.get(
+                "evidence_compilation_fingerprint"
+            ),
+            "evidence_compilations": readiness.get(
+                "evidence_compilations"
+            ) or [],
             "target_reconciliation_required": bool(target_reviews),
             "target_hard_blocker_count": target_readiness[
                 "target_hard_blocker_count"
@@ -422,6 +459,13 @@ def _target_readiness(reviews):
         "target_reconciliation_required": bool(reviews),
         "target_hard_blocker_count": len(hard_blockers),
     }
+
+
+def _step_evidence_compilation(readiness, step_id):
+    for item in readiness.get("evidence_compilations") or ():
+        if str(item.get("step_id") or "") == str(step_id or ""):
+            return dict(item)
+    return {}
 
 
 def _freeze_confirmed_input_recovery(step, timeline_state, evidence_graph):
