@@ -1,3 +1,28 @@
+import os
+import subprocess
+from pathlib import Path
+from time import sleep
+from loguru import logger
+from autowork_core.page import get_page
+from autowork_core.runtime.tag_manager import normalize_tag
+from config.settings import settings
+
+
+def _uses_gantry(scenario):
+    return "gantry" in {
+        normalize_tag(tag)
+        for tag in getattr(scenario, "effective_tags", ())
+    }
+
+def start_simulator():
+    # sleep(5)
+    # _start_hidden_file(SIMULATOR_ENGINE)
+    # sleep(5)
+    # _start_file(SIMULATORS)
+    pass
+
+
+
 def start_application():
     """Start the host application when APP_PATH is set to runtime."""
     raise NotImplementedError(
@@ -28,9 +53,53 @@ def prepare_scenario(context, scenario):
   具体顺序由 scenario_runtime.py:44-74 控制。
     
     """
-    pass
+    auto_mode = settings.app_launch_mode != "attach"
+    if _uses_gantry(scenario):
+        from Bdd.page_obj.simulator.page import SimulatorPage
+
+        if auto_mode:
+            sleep(2)
+            start_simulator()
+        simulator = get_page(context, SimulatorPage)
+        context.autowork_scenario.simulator = simulator
+        try:
+            # simulator.initialize(auto_mode=auto_mode, timeout=60)
+            simulator.wait_until_open(timeout=20)
+        except Exception:
+            cleanup_scenario(context, scenario)
+            raise
 
 
 def cleanup_scenario(context, scenario):
     """Release resources acquired by prepare_scenario."""
-    pass
+    state = context.autowork_scenario
+    state.simulator = None
+
+    # simulator = getattr(state, "simulator", None)
+    # try:
+    #     if simulator is not None:
+    #         simulator.close()
+    # except Exception as error:
+    #     logger.warning(f"释放 SimulatorPage 失败: {error}")
+
+
+def _run_command(command, cwd=None):
+    logger.info("> {}", subprocess.list2cmdline(command))
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+        startupinfo=_hidden_startupinfo(),
+    )
+    output = (completed.stdout or completed.stderr).strip()
+    if output:
+        logger.info(output)
+    return completed
+
+def _hidden_startupinfo():
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return startupinfo

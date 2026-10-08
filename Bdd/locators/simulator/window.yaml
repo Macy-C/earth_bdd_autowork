@@ -1,0 +1,6 @@
+Simulator_window:
+  top_level: true
+  backend: uia
+  control_type: Window
+  auto_id:
+  title:
