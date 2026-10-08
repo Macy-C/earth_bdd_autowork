@@ -51,7 +51,6 @@ from autowork_core.utils.debug_tools.recorder.generation_job_service import (
     query_generation_job_implementation_candidate,
     query_generation_job_implementation_packet,
     query_generation_job_task_bundle,
-    submit_generation_job_business_answers,
     submit_generation_job_business_facts,
 )
 from autowork_core.utils.debug_tools.recorder.generation_design import (
@@ -61,7 +60,6 @@ from autowork_core.utils.debug_tools.recorder.generation_orchestrator import (
     advance_generation_job,
     generate_generation_job,
     settle_generation_job,
-    submit_business_review,
 )
 from autowork_core.utils.debug_tools.recorder.request_repository import (
     request_identity_is_valid,
@@ -936,9 +934,6 @@ def main(argv=None):
     inspect_job.add_argument("--full", action="store_true")
     settle_job = commands.add_parser("settle-job")
     settle_job.add_argument("job_path")
-    submit_business = commands.add_parser("submit-business-answers")
-    submit_business.add_argument("job_path")
-    submit_business.add_argument("--answer", action="append", default=[])
     submit_review_answers = commands.add_parser("submit-business-review-answers")
     submit_review_answers.add_argument("job_path")
     submit_review_answers.add_argument("--answers-json")
@@ -948,11 +943,6 @@ def main(argv=None):
     submit_facts.add_argument("job_path")
     submit_facts.add_argument("--freeform-answer", action="append", default=[])
     submit_facts.add_argument("--business-fact", action="append", default=[])
-    submit_review = commands.add_parser("submit-business-review")
-    submit_review.add_argument("job_path")
-    submit_review.add_argument("--review-patch-json")
-    submit_review.add_argument("--review-decision", action="append", default=[])
-    submit_review.add_argument("--review-reason", action="append", default=[])
     generate_job = commands.add_parser("generate-job")
     generate_job.add_argument("job_path")
     generate_job.add_argument("--project-root")
@@ -1092,11 +1082,6 @@ def main(argv=None):
         result = inspect_generation_job(args.job_path)
     elif args.command == "settle-job":
         result = settle_generation_job(args.job_path)
-    elif args.command == "submit-business-answers":
-        result = submit_generation_job_business_answers(
-            args.job_path,
-            _business_answer_selections_from_args(args.answer),
-        )
     elif args.command == "submit-business-review-answers":
         from autowork_core.utils.debug_tools.recorder.generation_job_service import (
             submit_generation_job_business_review_answers,
@@ -1121,21 +1106,6 @@ def main(argv=None):
             ),
             business_fact_patch=_business_fact_patch_from_args(
                 args.business_fact,
-            ),
-        )
-    elif args.command == "submit-business-review":
-        patch_value = (
-            json.loads(args.review_patch_json)
-            if args.review_patch_json
-            else None
-        )
-        result = submit_business_review(
-            args.job_path,
-            patch_value,
-            decisions=_review_argument_map(args.review_decision),
-            reasons=_review_reason_argument_map(
-                args.review_reason,
-                _review_argument_map(args.review_decision),
             ),
         )
     elif args.command in {"generate-job", "advance-job"}:
@@ -3209,38 +3179,6 @@ def _next_commands(result):
             ],
         })
         return value
-    if status == "business_review_required":
-        value.update({
-            "blocked_on": "retired_business_review_stage",
-            "framework_defect": (
-                "business_review_required is retired from the normal product "
-                "path; advance-job must project business_answers_required "
-                "with business_questions and ask_questions."
-            ),
-            "allowed_action": "stop_and_report_framework_defect",
-            "do_not": [
-                "do_not_run_submit_business_review",
-                "do_not_reconstruct_business_review_patch",
-                "do_not_continue_generation_before_answer_batch",
-            ],
-        })
-        return value
-    if status == "business_option_answers_required":
-        value.update({
-            "blocked_on": "retired_business_option_answers_stage",
-            "framework_defect": (
-                "business_option_answers_required is retired from the normal "
-                "product path; advance-job must project business_answers_required "
-                "with ask_questions and submit-business-review-answers."
-            ),
-            "allowed_action": "stop_and_report_framework_defect",
-            "do_not": [
-                "do_not_run_submit_business_answers",
-                "do_not_reconstruct_legacy_answer_command",
-                "do_not_continue_generation_before_answer_batch",
-            ],
-        })
-        return value
     if status == "business_answers_required":
         ask_payload = _business_answer_ask_questions_payload(
             result.get("business_questions") or [],
@@ -3356,7 +3294,7 @@ def _next_commands(result):
                 "do_not_apply_candidate_files",
                 "do_not_query_implementation_candidate_for_delivery",
                 "do_not_query_implementation_packet_for_delivery",
-                "do_not_read_candidate_delivery_manifest_when_candidate_index_exists",
+                "do_not_read_candidate_diagnostic_manifest_when_candidate_index_exists",
                 "do_not_read_candidate_index_or_native_edit_sources",
                 "do_not_use_agent_editor_edit_for_delivery",
                 "do_not_run_after_native_edit_for_delivery",

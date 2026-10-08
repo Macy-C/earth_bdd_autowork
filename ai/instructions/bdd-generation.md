@@ -59,8 +59,8 @@
   Job and are resolved by typed patch or Plan selection. A Job with missing
   Decision Answers must stop before full generation. `vscode_askQuestions` is
   allowed only for the current Job's projected `business_questions`; answer
-  drafts, retired `submit-job-answers`, normal-path `submit-business-review`,
-  and normal-path `submit-business-answers`
+  drafts, retired `submit-job-answers`, forbidden-normal `submit-business-review`,
+  and forbidden-normal `submit-business-answers`
   are not product transports for Recorder Generation.
   A PIC candidate with no valid authorize option is system-denied and is not a
   user question.
@@ -83,6 +83,13 @@
   Returned workflow commands must be one literal full Python module command; do
   not use shell variables, chained commands, redirection, helper parsing commands,
   or CLI help on the normal path.
+  Command classes are fixed: `advance-job` is the normal product path,
+  `submit-business-review-answers` is the normal answer path, `job-code-diff`
+  is the terminal diff review path, `inspect-job` and `job-*` queries are
+  bounded diagnostics, `settle-job`/`generate-job` are compat helpers unless
+  returned by the protocol, and `submit-business-answers`,
+  `submit-business-review`, answer drafts, and candidate diagnostic artifacts as
+  delivery instructions are forbidden-normal.
   Normal Jobs may return `business_answers_required`; present all Decision Pack
   authority questions once through `vscode_askQuestions`, preserving per-question
   `file:///` screenshot-link `message` evidence, and run the returned answer command before
@@ -230,7 +237,13 @@
   implementation diff. Terminal normal-path output exposes `terminal_result` as
   the single user-facing result object and keeps only a bounded
   `implementation_diff_summary.files` preview; complete file stats and diff are
-  read through `job-code-diff`. It omits duplicate delivery/visibility summaries,
+  read through `job-code-diff`. `git_diff_visibility` and source-control diff
+  visibility are status facts only. Final text must list every returned
+  `implementation_diff_summary.files[]` entry with path, change_type,
+  additions, and deletions instead of collapsing the preview to only the total
+  change summary. Do not run `job-code-diff` only to list returned file stats
+  when `implementation_diff_summary.files[]` is present and not truncated; use
+  `job-code-diff` only for complete diff content or truncated previews. It omits duplicate delivery/visibility summaries,
   workspace projection, job lifecycle, stages, raw changed_files, full report,
   Plan, Manifest, and candidate payloads. Do not paste full source into Chat. An undone or partially applied explicit native-edit
   candidate must fail closed.

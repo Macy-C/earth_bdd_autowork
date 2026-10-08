@@ -11,6 +11,7 @@ class RootEntry:
     kind: str = "legacy"
     backend: str = "uia"
     criteria: dict = field(default_factory=dict)
+    screen_selector: dict | None = None
     root: object = None
     handle: int = None
     process_id: int = None

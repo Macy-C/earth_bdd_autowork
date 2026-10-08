@@ -75,6 +75,10 @@ KEY_MAP = {
     "toplevel": "top_level",
     "desktop": "top_level",
 
+    "screen": "screen",
+    "display": "screen",
+    "monitor": "screen",
+
     # =========================
     # 定位方式
     # =========================
@@ -529,6 +533,10 @@ class CompiledLocator:
     # 显式声明该 locator 作为 root 时从桌面顶层查找
     top_level: bool = False
 
+    # 顶层窗口 root 的屏幕选择器。None 表示运行时默认 primary，
+    # {"mode": "all"} 表示显式全桌面查找。
+    screen_selector: Optional[dict[str, Any]] = None
+
     # Window locator packages keep runtime references local instead of
     # publishing page resources into the Feature-wide registry.
     root_locator: Any = None
@@ -549,12 +557,31 @@ class CompiledWindowLocatorPackage:
 def compile_locator(raw, name=None):
     parse_raw = raw
     region_name = None
+    screen_selector = None
     if isinstance(raw, dict):
         parse_raw = dict(raw)
         region_name = parse_raw.pop("region", None)
+        screen_selector = _normalize_screen_selector(
+            _pop_first(parse_raw, "screen", "display", "monitor"),
+            locator_name=name,
+        )
 
     prefix, criteria, root_name, top_level = parse_locator(parse_raw)
     root_name = normalize(root_name) if root_name else root_name
+    if screen_selector is not None:
+        is_top_candidate = (
+            not root_name
+            and isinstance(criteria, dict)
+            and (
+                top_level
+                or str(criteria.get("control_type", "")).strip().lower()
+                == "window"
+            )
+        )
+        if prefix != "child" or not is_top_candidate:
+            raise ValueError(
+                f"locator[{name or '<anonymous>'}] screen 只能声明在顶层窗口 root 上"
+            )
     if prefix in ("ocr", "pic") and root_name:
         raise ValueError("OCR/PIC locator 不支持 root，请使用 region")
     if region_name is not None:
@@ -571,10 +598,133 @@ def compile_locator(raw, name=None):
         root_name=root_name,
         region_name=region_name,
         top_level=top_level,
+        screen_selector=screen_selector,
         raw=raw,
         needs_root=bool(root_name),
         needs_monitor=prefix in ("ocr", "pic"),
         returns_position=prefix in ("ocr", "pic", "pos"),
+    )
+
+
+def _normalize_screen_selector(value, *, locator_name=None):
+    if value is None:
+        return None
+
+    if isinstance(value, int):
+        if value <= 0:
+            raise ValueError(
+                f"locator[{locator_name or '<anonymous>'}] screen.id 必须大于 0"
+            )
+        return {"id": value}
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(
+                f"locator[{locator_name or '<anonymous>'}] screen 不能为空"
+            )
+        normalized = normalize(text)
+        if normalized == "all":
+            return {"mode": "all"}
+        if normalized in {"primary", "main", "主屏"}:
+            return {"role": "primary"}
+        try:
+            screen_id = int(text)
+        except ValueError:
+            return {"device": text}
+        if screen_id <= 0:
+            raise ValueError(
+                f"locator[{locator_name or '<anonymous>'}] screen.id 必须大于 0"
+            )
+        return {"id": screen_id}
+
+    if isinstance(value, dict):
+        key_map = {
+            "display_id": "id",
+            "monitor_id": "id",
+            "screen_id": "id",
+            "device_name": "device",
+            "monitor_device": "device",
+            "display_device": "device",
+            "display_name": "name",
+            "monitor_name": "name",
+        }
+        mapped = {}
+        for key, item in value.items():
+            mapped[key_map.get(normalize(str(key)), normalize(str(key)))] = item
+        result = {}
+        if "mode" in mapped:
+            mode = normalize(str(mapped["mode"]))
+            if mode != "all":
+                raise ValueError(
+                    f"locator[{locator_name or '<anonymous>'}] screen.mode 仅支持 all"
+                )
+            result["mode"] = "all"
+        if "role" in mapped:
+            role = normalize(str(mapped["role"]))
+            if role not in {"primary", "leftmost", "rightmost"}:
+                raise ValueError(
+                    f"locator[{locator_name or '<anonymous>'}] screen.role 不支持: {mapped['role']}"
+                )
+            result["role"] = role
+        if "id" in mapped:
+            try:
+                screen_id = int(mapped["id"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"locator[{locator_name or '<anonymous>'}] screen.id 必须是整数"
+                ) from exc
+            if screen_id <= 0:
+                raise ValueError(
+                    f"locator[{locator_name or '<anonymous>'}] screen.id 必须大于 0"
+                )
+            result["id"] = screen_id
+        for key in ("device", "name"):
+            if key in mapped:
+                text = str(mapped[key]).strip()
+                if not text:
+                    raise ValueError(
+                        f"locator[{locator_name or '<anonymous>'}] screen.{key} 不能为空"
+                    )
+                result[key] = text
+        if "match" in mapped:
+            match = normalize(str(mapped["match"]))
+            if match not in {"largestoverlap", "centerinside"}:
+                raise ValueError(
+                    f"locator[{locator_name or '<anonymous>'}] screen.match 不支持: {mapped['match']}"
+                )
+            result["match"] = (
+                "center_inside" if match == "centerinside" else "largest_overlap"
+            )
+        if "min_overlap_ratio" in mapped:
+            try:
+                ratio = float(mapped["min_overlap_ratio"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"locator[{locator_name or '<anonymous>'}] screen.min_overlap_ratio 必须是数字"
+                ) from exc
+            if ratio < 0 or ratio > 1:
+                raise ValueError(
+                    f"locator[{locator_name or '<anonymous>'}] screen.min_overlap_ratio 必须在 0 到 1 之间"
+                )
+            result["min_overlap_ratio"] = ratio
+        if not result:
+            raise ValueError(
+                f"locator[{locator_name or '<anonymous>'}] screen 缺少 role/id/device/name/mode"
+            )
+        selectors = [key for key in ("mode", "role", "id", "device", "name") if key in result]
+        if "mode" in result and len(selectors) > 1:
+            raise ValueError(
+                f"locator[{locator_name or '<anonymous>'}] screen.mode=all 不能和其他选择器同时声明"
+            )
+        if len([key for key in ("role", "id", "device", "name") if key in result]) > 1:
+            raise ValueError(
+                f"locator[{locator_name or '<anonymous>'}] screen 只能声明一种选择器"
+            )
+        return result
+
+    raise ValueError(
+        f"locator[{locator_name or '<anonymous>'}] screen 类型不支持: {type(value).__name__}"
     )
 
 def _is_top_level_locator(locator):

@@ -134,10 +134,8 @@ from autowork_core.utils.debug_tools.recorder.generation_task_bundle import (
 )
 from autowork_core.utils.debug_tools.recorder.business_review import (
     build_business_review_questions,
-    build_business_review_patch_from_decisions,
     build_business_review_requirement,
     build_business_review_workset,
-    validate_business_review_patch,
 )
 from autowork_core.utils.debug_tools.recorder.generation_diff import (
     build_generation_diff_summary,
@@ -209,7 +207,7 @@ from autowork_core.runtime.reporting.run_result_bridge import (
 
 GENERATION_JOB_SERVICE_VERSION = "1.16"
 RECORDER_HOST_CONTROL_VERSION = "1.14"
-CANDIDATE_DELIVERY_MANIFEST_VERSION = "1.0"
+CANDIDATE_DIAGNOSTIC_MANIFEST_VERSION = "1.0"
 CANDIDATE_INDEX_VERSION = "1.0"
 CANDIDATE_INDEX_MAX_LINES_PER_READ = 50
 _TYPED_PATCH_DESIGN_REQUIRED_REASONS = frozenset({
@@ -1616,114 +1614,6 @@ def _business_review_context(session_dir, job, state, decision_pack):
     }
 
 
-def business_review_patch_from_direct_arguments(job_path, decisions, reasons):
-    session_dir, job, state = _resolve_current_job(job_path)
-    request = _read_json(_request_path_for_job(session_dir, job))
-    pack, _answers = _decision_artifacts(session_dir, request, state)
-    workset = _business_review_context(session_dir, job, state, pack)
-    if not workset:
-        raise ValueError("当前Generation Job没有待审查BusinessReviewWorkset")
-    return build_business_review_patch_from_decisions(
-        workset,
-        decisions,
-        reasons,
-    )
-
-
-def submit_generation_job_business_answers(job_path, selections):
-    session_dir, job, state = _resolve_current_job(job_path)
-    request_path = _request_path_for_job(session_dir, job)
-    request = _read_json(request_path)
-    execution = state.get("job_execution") or {}
-    if any((
-        state.get("status") not in {"ready", "running"},
-        execution.get("phase") not in {"ready", "design"},
-        execution.get("transaction"),
-        state.get("active_transaction"),
-    )):
-        raise ValueError("当前Generation Job不接受业务回答")
-    decision = dict(state.get("decision") or {})
-    if decision.get("status") != "awaiting_answers":
-        raise ValueError(
-            "当前Generation Job没有待回答业务问题: "
-            f"decision_status={decision.get('status')}"
-        )
-    pack = load_decision_pack(
-        session_dir,
-        decision.get("pack") or {},
-        request,
-        brief_fingerprint=(state.get("brief") or {}).get(
-            "brief_fingerprint"
-        ),
-    )
-    if pack is None:
-        raise ValueError("当前Decision Pack身份无效")
-    selections = {
-        str(question_id): str(option_id)
-        for question_id, option_id in dict(selections or {}).items()
-        if question_id and option_id
-    }
-    expected_ids = {
-        str(question.get("question_id"))
-        for question in pack.get("questions") or ()
-        if question.get("blocking")
-    }
-    missing = sorted(expected_ids - set(selections))
-    if missing:
-        raise ValueError(f"阻塞业务问题尚未全部回答: {missing}")
-    output, record = persist_answers(session_dir, request, pack, {
-        "answer_version": ANSWER_VERSION,
-        "pack_id": pack.get("pack_id"),
-        "pack_fingerprint": pack.get("pack_fingerprint"),
-        "revision_seal": pack.get("revision_seal"),
-        "answers": [
-            {
-                "question_id": question_id,
-                "option_id": selections[question_id],
-            }
-            for question_id in sorted(selections)
-        ],
-    })
-    decision["answers"] = answer_pointer(session_dir, record, output)
-    decision["status"] = (
-        "forensic"
-        if pack.get("forensic_blocking_count")
-        else "answered"
-    )
-    state = dict(state)
-    state["decision"] = decision
-    state["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    if state.get("status") == "running":
-        state["next_action"] = "submit_generation_design"
-    elif state.get("status") == "ready":
-        state["next_action"] = "start_generation_job"
-    write_workflow_state(session_dir, state)
-    _record_job_interaction(
-        session_dir,
-        job,
-        state,
-        event="business_answers_submitted",
-        status="business_answers_submitted",
-        next_action="advance_job",
-        details={"answer_count": len(selections)},
-    )
-    inspected = inspect_generation_job(job_path)
-    return {
-        "generation_job_service_version": GENERATION_JOB_SERVICE_VERSION,
-        "status": "business_answers_submitted",
-        "next_action": "advance_job",
-        "request_id": request.get("request_id"),
-        "job_id": job.get("job_id"),
-        "job_path": inspected.get("job_path"),
-        "answers_path": str(output),
-        "answer_fingerprint": record.get("answer_fingerprint"),
-        "job_transition": inspected.get("job_transition") or {},
-        "business_answers_submitted": True,
-        "errors": [],
-        "warnings": [],
-    }
-
-
 def submit_generation_job_business_facts(
         job_path,
         *,
@@ -1819,68 +1709,6 @@ def submit_generation_job_business_facts(
         "business_fact_count": len(
             (record.get("compiled_patch") or {}).get("business_facts") or []
         ),
-        "job_transition": inspected.get("job_transition") or {},
-        "errors": [],
-        "warnings": [],
-    }
-
-
-def submit_generation_job_business_review(job_path, patch):
-    session_dir, job, state = _resolve_current_job(job_path)
-    request_path = _request_path_for_job(session_dir, job)
-    request = _read_json(request_path)
-    execution = dict(state.get("job_execution") or {})
-    if any((
-        state.get("status") != "running",
-        execution.get("phase") != "design",
-        execution.get("transaction"),
-        state.get("active_transaction"),
-    )):
-        raise ValueError("当前Generation Job不接受BusinessReviewPatch")
-    pack, _answers = _decision_artifacts(session_dir, request, state)
-    workset = _business_review_context(session_dir, job, state, pack)
-    if not workset:
-        raise ValueError("当前Generation Job没有待审查BusinessReviewWorkset")
-    errors = validate_business_review_patch(workset, patch)
-    if errors:
-        raise ValueError(f"BusinessReviewPatch无效: {errors}")
-    questions = _business_review_questions_from_patch(workset, patch)
-    execution["business_review"] = {
-        "status": "answers_required" if questions else "passed",
-        "workset_fingerprint": workset.get("workset_fingerprint"),
-        "question_count": len(questions),
-        "questions": questions,
-    }
-    state = dict(state)
-    state["job_execution"] = execution
-    state["next_action"] = (
-        "submit_business_review_answers"
-        if questions else "submit_generation_design"
-    )
-    state["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    write_workflow_state(session_dir, state)
-    if questions:
-        _record_job_interaction(
-            session_dir,
-            job,
-            state,
-            event="business_answers_required",
-            status="business_answers_required",
-            next_action="submit_business_review_answers",
-            details={"question_count": len(questions)},
-        )
-    inspected = inspect_generation_job(job_path)
-    return {
-        "generation_job_service_version": GENERATION_JOB_SERVICE_VERSION,
-        "status": "business_answers_required" if questions else "business_review_passed",
-        "next_action": (
-            "submit_business_review_answers" if questions else "advance_job"
-        ),
-        "request_id": request.get("request_id"),
-        "job_id": job.get("job_id"),
-        "job_path": inspected.get("job_path"),
-        "business_questions": questions,
-        "business_review": execution["business_review"],
         "job_transition": inspected.get("job_transition") or {},
         "errors": [],
         "warnings": [],
@@ -2105,38 +1933,6 @@ def _business_review_freeform_fact(question, answer_id, answer):
         "source": {"kind": "user_declared_literal"},
         "reason": "User provided a freeform BusinessReview answer.",
     }
-
-
-def _business_review_questions_from_patch(workset, patch):
-    units = {
-        str(unit.get("unit_id") or ""): unit
-        for unit in workset.get("units") or ()
-        if isinstance(unit, dict) and unit.get("unit_id")
-    }
-    questions = []
-    for decision in patch.get("unit_decisions") or ():
-        if not isinstance(decision, dict):
-            continue
-        unit = units.get(str(decision.get("unit_id") or "")) or {}
-        if (
-                decision.get("decision") == "include_as_is"
-                and unit.get("unit_type") == "system_decision_question"
-        ):
-            question = dict((unit.get("facts") or {}).get("question") or {})
-            question["source_decision_question_id"] = question.get("question_id")
-            questions.append(question)
-            continue
-        if decision.get("decision") not in {"ask_user", "rephrase_business_question"}:
-            continue
-        question = dict(decision.get("question") or {})
-        question.update({
-            "unit_id": decision.get("unit_id"),
-            "unit_type": unit.get("unit_type"),
-            "step_id": unit.get("step_id") or question.get("step_id"),
-            "blocking": True,
-        })
-        questions.append(question)
-    return questions
 
 
 def query_generation_job_evidence(
@@ -3098,7 +2894,7 @@ def query_generation_job_implementation_candidate(
     candidate_manifest = None
     candidate_index = None
     if selected_path is None and not all_included:
-        candidate_manifest = _persist_candidate_delivery_manifest(
+        candidate_manifest = _persist_candidate_diagnostic_manifest(
             session_dir,
             report_path,
             job,
@@ -3164,7 +2960,7 @@ def query_generation_job_implementation_candidate(
     }
 
 
-def _persist_candidate_delivery_manifest(
+def _persist_candidate_diagnostic_manifest(
         session_dir,
         report_path,
         job,
@@ -3179,7 +2975,7 @@ def _persist_candidate_delivery_manifest(
         source_path = str(item.get("source_workspace_path") or "")
         target_path = str(item.get("target_path") or item.get("path") or "")
         if not source_path or not target_path:
-            raise ValueError("Candidate delivery manifest缺少source或target路径")
+            raise ValueError("Candidate diagnostic manifest缺少source或target路径")
         _validate_project_relative_candidate_path(source_path)
         _validate_project_relative_candidate_path(target_path)
         manifest_files.append({
@@ -3191,7 +2987,7 @@ def _persist_candidate_delivery_manifest(
             "before_sha256": item.get("before_sha256"),
         })
     manifest_value = {
-        "candidate_delivery_manifest_version": CANDIDATE_DELIVERY_MANIFEST_VERSION,
+        "candidate_diagnostic_manifest_version": CANDIDATE_DIAGNOSTIC_MANIFEST_VERSION,
         "request_id": (job.get("request") or {}).get("request_id"),
         "job_id": job.get("job_id"),
         "transaction_id": report.get("transaction_id"),
@@ -3200,16 +2996,16 @@ def _persist_candidate_delivery_manifest(
         "files": manifest_files,
     }
     manifest_value["manifest_fingerprint"] = _fingerprint(manifest_value)
-    path = report_path.parent / "candidate-delivery-manifest.json"
+    path = report_path.parent / "candidate-diagnostic-manifest.json"
     if path.exists():
         existing = _read_json(path)
         if existing != manifest_value:
-            raise ValueError("Candidate delivery manifest fingerprint conflict")
+            raise ValueError("Candidate diagnostic manifest fingerprint conflict")
     else:
         write_json_atomic(path, manifest_value)
     project_root = _project_root_for_generation_session(session_dir)
     return {
-        "candidate_delivery_manifest_version": CANDIDATE_DELIVERY_MANIFEST_VERSION,
+        "candidate_diagnostic_manifest_version": CANDIDATE_DIAGNOSTIC_MANIFEST_VERSION,
         "path": path.relative_to(project_root).as_posix(),
         "session_path": path.relative_to(session_dir).as_posix(),
         "manifest_fingerprint": manifest_value["manifest_fingerprint"],
@@ -3309,7 +3105,7 @@ def _persist_candidate_index(
 def _validate_project_relative_candidate_path(path):
     value = str(path or "").replace("\\", "/")
     if not value or value.startswith("/") or ".." in Path(value).parts:
-        raise ValueError("Candidate delivery manifest path invalid")
+        raise ValueError("Candidate diagnostic manifest path invalid")
 
 
 def _with_native_edit_source_files(session_dir, report_path, candidate, files):

@@ -23,6 +23,7 @@ from autowork_core.utils.debug_tools.common import (
     iter_tree_children,
     make_element_key,
     make_xpath_suggestion,
+    read_element_snapshot,
     safe_parent,
     safe_get_element_rect,
     to_wrapper,
@@ -35,6 +36,7 @@ from autowork_core.utils.debug_tools.visual_tools import VisualToolMixin
 
 
 BACKEND = "uia"
+HIT_TEST_BUCKET_SIZE = 160
 
 VK_ESCAPE = 0x1B
 VK_F2 = 0x71
@@ -90,6 +92,8 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.tree_id_to_rect = {}
         self.tree_id_to_key = {}
         self.hit_test_items = []
+        self.hit_test_buckets = {}
+        self.hit_test_index_sorted = True
 
         # 属性行状态
         self.property_expanded_items = set()
@@ -829,6 +833,8 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.tree_id_to_rect.clear()
         self.tree_id_to_key.clear()
         self.hit_test_items.clear()
+        self.hit_test_buckets.clear()
+        self.hit_test_index_sorted = True
         self.property_expanded_items.clear()
         self.property_row_items.clear()
 
@@ -852,7 +858,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
 
             runtime_count = self.sync_runtime_descendants(root_obj, root_item_id)
 
-            self.hit_test_items.sort(key=lambda item: item[0])
+            self.sort_hit_test_index()
             self.expand_all(update_status=False)
 
             if runtime_count:
@@ -868,8 +874,9 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             return None
 
         try:
-            values = get_tree_values(element)
-            rect = safe_get_element_rect(element)
+            snapshot = read_element_snapshot(element)
+            values = snapshot.values
+            rect = snapshot.rect
 
             text = (
                 f"{values['control_type']} - {values['name']}"
@@ -892,7 +899,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                 tags=tags,
             )
 
-            key = make_element_key(element)
+            key = snapshot.key
 
             self.element_key_to_tree_id[key] = item_id
             self.tree_id_to_element[item_id] = element
@@ -905,7 +912,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                 area = width * height
 
                 if area > 0:
-                    self.hit_test_items.append((area, item_id, rect))
+                    self.register_hit_test_item(area, item_id, rect)
 
             if include_children:
                 for child in iter_tree_children(element):
@@ -924,6 +931,41 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             except Exception:
                 pass
             return None
+
+    def register_hit_test_item(self, area, item_id, rect):
+        item = (area, item_id, rect)
+        self.hit_test_items.append(item)
+        for bucket_key in self.hit_test_bucket_keys(rect):
+            self.hit_test_buckets.setdefault(bucket_key, []).append(item)
+        self.hit_test_index_sorted = False
+
+    def sort_hit_test_index(self):
+        self.hit_test_items.sort(key=lambda item: item[0])
+        for items in self.hit_test_buckets.values():
+            items.sort(key=lambda item: item[0])
+        self.hit_test_index_sorted = True
+
+    def hit_test_bucket_keys(self, rect):
+        left = int(min(rect.left, rect.right))
+        right = int(max(rect.left, rect.right))
+        top = int(min(rect.top, rect.bottom))
+        bottom = int(max(rect.top, rect.bottom))
+        left_bucket = left // HIT_TEST_BUCKET_SIZE
+        right_bucket = right // HIT_TEST_BUCKET_SIZE
+        top_bucket = top // HIT_TEST_BUCKET_SIZE
+        bottom_bucket = bottom // HIT_TEST_BUCKET_SIZE
+        for bucket_x in range(left_bucket, right_bucket + 1):
+            for bucket_y in range(top_bucket, bottom_bucket + 1):
+                yield bucket_x, bucket_y
+
+    def hit_test_candidates_for_point(self, x, y):
+        if not self.hit_test_index_sorted:
+            self.sort_hit_test_index()
+        bucket_key = (
+            int(x) // HIT_TEST_BUCKET_SIZE,
+            int(y) // HIT_TEST_BUCKET_SIZE,
+        )
+        return self.hit_test_buckets.get(bucket_key, ())
 
     def sync_runtime_descendants(self, root_obj, root_item_id):
         if not root_item_id:
@@ -1351,9 +1393,9 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
     def find_deepest_element_by_point(self, x, y):
         """
         基于缓存 rect 做命中测试。
-        hit_test_items 已按面积从小到大排序。
+        命中候选按面积从小到大排序；空间索引只减少候选数，不改变命中规则。
         """
-        for _area, tree_id, rect in self.hit_test_items:
+        for _area, tree_id, rect in self.hit_test_candidates_for_point(x, y):
             try:
                 if rect.left <= x <= rect.right and rect.top <= y <= rect.bottom:
                     element = self.tree_id_to_element.get(tree_id)

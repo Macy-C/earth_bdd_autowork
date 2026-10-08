@@ -1850,7 +1850,7 @@ def _agent_tool_stage(project_root, binding, control, tool_name, tool_input):
         ):
             return "candidate_index_read"
         if any(
-                "candidate-delivery-manifest.json" in str(path).replace("\\", "/")
+                "candidate-diagnostic-manifest.json" in str(path).replace("\\", "/")
                 for path in paths
         ):
             return "manifest_read"

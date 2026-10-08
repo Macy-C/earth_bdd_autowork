@@ -14,15 +14,17 @@ WindowPage/WindowView 拥有稳定窗口与 locator，通用 actions 不承载�
 - Generation Job 开始前封存 Generation Capsule；AI 和中途 Transaction 只能消费 Capsule
   中的冻结生成输入，live workspace 只在最终 commit gate 和安全门中读取。
 - 简单与复杂 Job 使用同一公开旅途：最多一次用户权威/授权 Answers 批次、一次有界 typed
-  choice 批次、一次候选原生编辑和一个终态结果；AI-authority 业务歧义留在 Job 中解决。
+  choice 批次、一次 system materializer 写入、一次 implementation diff 审阅和一个终态结果；
+  AI-authority 业务歧义留在 Job 中解决。
 - Workbench 主入口保持幂等：ready/running Job 继续，同一有效终态结果复用；显式
   “重新生成 Copilot 请求”在任意阶段都开启同一 Request 的新 attempt。
 - Workbench 创建并复制 Copilot Job；用户权威/授权 Answers 在粘贴 `advance-job` 后、完整生成前由
   Job-bound option batch 一次性提交。AI 可判断的业务歧义不阻塞 Copilot，问题前外部文件审批为零。
 - 完整 system-owned candidate 必须先在 Capsule 私有 staging 中通过 Python、locator、Step scope 与
-  Plan-to-Code，再取得 Transaction/file lease 和原生编辑入口；失败终态化且 `Bdd/` 零变化，AI 不得手修。
-- 仓库只投影紧凑候选索引和项目内只读 source files，不伪称拥有 VS Code 原子 WorkspaceEdit；宿主在
-  一个 assistant turn 提交独立原生编辑，Hook 禁止 `--all`、chat resource 和外部 terminal-output 读取。
+  Plan-to-Code，再取得 Transaction/file lease 并由 system materializer 写入；失败终态化且 `Bdd/` 零变化，AI 不得手修。
+- 正常交付只投影 terminal result、bounded diff summary 和 implementation diff 审阅入口；candidate index、
+  candidate manifest、native-edit sources 和 source files 只属于显式诊断、AI-editable 或 candidate-mismatch 边界，
+  Hook 禁止 `--all`、chat resource 和外部 terminal-output 读取。
 - 用户只决定缺失/冲突的业务真值、需其权威的证据修复、规格冲突和 PIC 授权；系统可追加唯一、
   验签的技术修复。已声明业务事实不重复询问。
 - 没有有效授权分支的 PIC 候选由系统默认拒绝，不形成用户问题；终态失败先展示 owner 阶段和

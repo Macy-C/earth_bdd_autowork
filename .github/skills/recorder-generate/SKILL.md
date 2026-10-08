@@ -25,6 +25,13 @@ of truth. The full module is
   Treat `advance_summary.deterministic_progression` as proof of system-owned
   stages already executed in this `advance-job`; do not split
   settle/start/prepare/validate/finish into manual sub-commands.
+  Command classes are fixed: `advance-job` is the normal product path,
+  `submit-business-review-answers` is the normal answer path, `job-code-diff`
+  is the terminal diff review path, `inspect-job` and `job-*` queries are
+  bounded diagnostics, `settle-job`/`generate-job` are compat helpers unless
+  returned by the protocol, and `submit-business-answers`,
+  `submit-business-review`, answer drafts, and candidate diagnostic artifacts as
+  delivery instructions are forbidden-normal.
 - **RG-AUTH**: User-authority/authorization questions are owned by the Decision
   Pack and handled after Workbench submits the Job. When `advance-job` returns
   one `business_answers_required` batch, treat `next_commands.ask_questions` as
@@ -77,11 +84,17 @@ of truth. The full module is
 - **RG-RESULT**: Use `terminal_result`, `implementation_diff_summary`,
   `unresolved_issues`, and `next_commands` directly. Report changed-file count,
   write/review channel, runtime/oracle state, service level, issues,
-  `implementation_diff_summary.summary`, and the returned file-level diff stat
-  preview. If `implementation_diff_summary.files_truncated=true`, label it as a
+  `implementation_diff_summary.summary`, `git_diff_visibility`, source-control
+  diff visibility, file-level diff stat entries, and every returned
+  `implementation_diff_summary.files[]` entry with path, change_type,
+  additions, and deletions. Do not collapse the file preview to only the total
+  change summary. If `implementation_diff_summary.files_truncated=true`, label it as a
   preview with displayed/total counts and use `job-code-diff` for the complete
-  file stats and diff. Do not list raw `changed_files` or normal-success
-  reports. Run returned `job-code-diff` only when explicit diff review is required.
+  file stats and diff. Do not run `job-code-diff` only to list returned file
+  stats when `implementation_diff_summary.files[]` is present and not truncated.
+  Do not list raw `changed_files` or normal-success reports. Run returned
+  `job-code-diff` only when the user asks for complete diff content or the file
+  preview is truncated.
 - **RG-STOP**: Continue non-super technical gaps as returned issue/low-confidence
   output. Stop only on the authoritative failure category and owner reason. SLA
   exceeded never replaces, retires, resets, or restarts the Job.

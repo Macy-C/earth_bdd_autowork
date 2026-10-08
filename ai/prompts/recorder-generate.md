@@ -16,6 +16,13 @@ Run one Workbench-created, already-claimed Generation Job. The returned
   parsing commands, or CLI help. Treat `advance_summary.deterministic_progression`
   as proof of system-owned stages already executed in this `advance-job`; do not
   split settle/start/prepare/validate/finish into manual sub-commands.
+  Command classes are fixed: `advance-job` is the normal product path,
+  `submit-business-review-answers` is the normal answer path, `job-code-diff`
+  is the terminal diff review path, `inspect-job` and `job-*` queries are
+  bounded diagnostics, `settle-job`/`generate-job` are compat helpers unless
+  returned by the protocol, and `submit-business-answers`,
+  `submit-business-review`, answer drafts, and candidate diagnostic artifacts as
+  delivery instructions are forbidden-normal.
 - **RG-AUTH**: User-authority/authorization questions are owned by the Decision
   Pack and handled after Workbench submits the Job. When `advance-job` returns
   one `business_answers_required` batch, treat `next_commands.ask_questions` as
@@ -70,12 +77,16 @@ Run one Workbench-created, already-claimed Generation Job. The returned
   candidate files.
 - **RG-RESULT**: Read `terminal_result`, `implementation_diff_summary`,
   `unresolved_issues`, and `next_commands` from the terminal envelope. Report
-  status, issue, write/review channel, changed-file count,
-  `implementation_diff_summary.summary`, and the returned file-level diff stat
-  preview. If `implementation_diff_summary.files_truncated=true`, label the
+  status, issue, `delivery_visibility`, `acceptance_summary`,
+  `git_diff_visibility`, source-control diff visibility, write/review channel, changed-file count,
+  `implementation_diff_summary.summary`, file-level diff stat entries, and every returned
+  `implementation_diff_summary.files[]` entry with path, change_type,
+  additions, and deletions. Do not collapse the file preview to only the total
+  change summary. If `implementation_diff_summary.files_truncated=true`, label the
   section as a preview with displayed/total counts and use `job-code-diff` for
-  the complete file stats and diff. Do not list raw `changed_files`, reopen a
-  report on normal completion, or claim host-native edit review for
+  the complete file stats and diff. Do not run `job-code-diff` only to list
+  returned file stats when `implementation_diff_summary.files[]` is present and
+  not truncated. Do not list raw `changed_files`, reopen a report on normal completion, or claim host-native edit review for
   system-materialized files.
 - **RG-STOP**: Only identity, integrity, authorization, scope/lease, or internal
   candidate failure stops a started Job. Other technical uncertainty returns as a

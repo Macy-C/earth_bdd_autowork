@@ -52,6 +52,13 @@ Run one Workbench-claimed Job. Returned `next_commands` and
   on the normal path. Treat `advance_summary.deterministic_progression` as proof
   of system-owned stages already executed in this `advance-job`; do not split
   settle/start/prepare/validate/finish into manual sub-commands.
+  Command classes are fixed: `advance-job` is the normal product path,
+  `submit-business-review-answers` is the normal answer path, `job-code-diff`
+  is the terminal diff review path, `inspect-job` and `job-*` queries are
+  bounded diagnostics, `settle-job`/`generate-job` are compat helpers unless
+  returned by the protocol, and `submit-business-answers`,
+  `submit-business-review`, answer drafts, and candidate diagnostic artifacts as
+  delivery instructions are forbidden-normal.
   The Hook only guards and does not claim the Job. Do not read the runtime hint
   when the pasted full command is available.
   If neither command nor runtime hint is available, ask one single-choice
@@ -109,12 +116,18 @@ Run one Workbench-claimed Job. Returned `next_commands` and
 - **RG-RESULT**: Final text reads `terminal_result`,
   `implementation_diff_summary`, `unresolved_issues`, and `next_commands`.
   Report status, write/review channel, runtime/oracle state, service level,
-  issues, the diff summary text, and the returned file-level diff stat preview.
+  issues, `git_diff_visibility`, source-control diff visibility, the diff
+  summary text, file-level diff stat entries, and every returned
+  `implementation_diff_summary.files[]` entry with path, change_type,
+  additions, and deletions. Do not collapse the file preview to only the total
+  change summary.
   If `implementation_diff_summary.files_truncated=true`, label it as a preview
   with displayed/total counts and use `job-code-diff` for the complete file
   stats and diff. Do not list raw `changed_files` or reopen a report on normal
-  completion. If explicit diff review is required, run the returned
-  `job-code-diff` path before final text and report that review channel; do not
+  completion. Do not run `job-code-diff` only to list returned file stats when
+  `implementation_diff_summary.files[]` is present and not truncated. Run the
+  returned `job-code-diff` path only when the user asks for complete diff content
+  or the file preview is truncated; report the implementation diff review channel without the extra command otherwise. Do not
   claim host-native edit review for system-materialized files.
 - **RG-STOP**: Only identity, integrity, authorization, scope/lease, or internal
   candidate failures stop a started Job. Other technical gaps become the returned

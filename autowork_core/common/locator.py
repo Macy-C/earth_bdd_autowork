@@ -28,6 +28,18 @@ from config.settings import settings
 from pywinauto.base_wrapper import BaseWrapper
 from pywinauto.findwindows import ElementAmbiguousError
 
+try:
+    import win32api
+    import win32con
+except Exception:  # pragma: no cover - non-Windows or optional dependency absent
+    win32api = None
+    win32con = None
+
+try:
+    from mss import mss as _mss
+except Exception:  # pragma: no cover - fallback only
+    _mss = None
+
 
 def _find_by_default(root, kwargs, control_type, timeout, first_only=True, monitor=None):
     """
@@ -539,6 +551,367 @@ def _draw_outline(target, first_only=True):
     for item in targets:
         item.draw_outline(colour='blue', thickness=5)
 
+
+def _effective_screen_selector(selector):
+    return dict(selector) if selector else {"role": "primary"}
+
+
+def _screen_selector_is_all(selector):
+    return selector and selector.get("mode") == "all"
+
+
+def _screen_monitors():
+    monitors = []
+    if win32api is not None:
+        try:
+            for index, item in enumerate(win32api.EnumDisplayMonitors(), start=1):
+                handle = item[0]
+                info = win32api.GetMonitorInfo(handle)
+                left, top, right, bottom = info["Monitor"]
+                device = str(info.get("Device") or "")
+                monitor_id = _screen_id_from_device(device) or index
+                monitors.append({
+                    "id": monitor_id,
+                    "index": index,
+                    "device": device,
+                    "name": device,
+                    "primary": bool(
+                        info.get("Flags", 0)
+                        & getattr(win32con, "MONITORINFOF_PRIMARY", 1)
+                    ),
+                    "rect": {
+                        "left": int(left),
+                        "top": int(top),
+                        "right": int(right),
+                        "bottom": int(bottom),
+                    },
+                })
+        except Exception as error:
+            logger.debug("枚举 Windows 显示器失败: {}", error)
+
+    if not monitors and _mss is not None:
+        try:
+            with _mss() as sct:
+                for index, monitor in enumerate(sct.monitors[1:], start=1):
+                    left = int(monitor.get("left", 0))
+                    top = int(monitor.get("top", 0))
+                    width = int(monitor.get("width", 0))
+                    height = int(monitor.get("height", 0))
+                    monitors.append({
+                        "id": index,
+                        "index": index,
+                        "device": f"monitor-{index}",
+                        "name": f"monitor-{index}",
+                        "primary": index == 1,
+                        "rect": {
+                            "left": left,
+                            "top": top,
+                            "right": left + width,
+                            "bottom": top + height,
+                        },
+                    })
+        except Exception as error:
+            logger.debug("枚举 mss 显示器失败: {}", error)
+
+    return monitors
+
+
+def _screen_id_from_device(device):
+    match = re.search(r"DISPLAY(\d+)$", str(device or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _select_screen_monitor(selector):
+    if _screen_selector_is_all(selector):
+        return None
+    monitors = _screen_monitors()
+    if not monitors:
+        raise RuntimeError("无法枚举显示器，不能按 screen 定位顶层窗口")
+
+    if "id" in selector:
+        matches = [
+            monitor for monitor in monitors
+            if monitor.get("id") == selector["id"]
+            or monitor.get("index") == selector["id"]
+        ]
+    elif "device" in selector:
+        expected = str(selector["device"]).casefold()
+        matches = [
+            monitor for monitor in monitors
+            if str(monitor.get("device") or "").casefold() == expected
+        ]
+    elif "name" in selector:
+        expected = str(selector["name"]).casefold()
+        matches = [
+            monitor for monitor in monitors
+            if str(monitor.get("name") or "").casefold() == expected
+        ]
+    else:
+        role = selector.get("role", "primary")
+        if role == "primary":
+            matches = [monitor for monitor in monitors if monitor.get("primary")]
+            if not matches and monitors:
+                matches = [monitors[0]]
+        elif role == "leftmost":
+            matches = [min(monitors, key=lambda item: item["rect"]["left"])]
+        elif role == "rightmost":
+            matches = [max(monitors, key=lambda item: item["rect"]["right"])]
+        else:
+            raise ValueError(f"不支持的 screen.role: {role}")
+
+    if not matches:
+        raise LookupError(f"未找到匹配 screen 的显示器: {selector}")
+    if len(matches) > 1:
+        raise ElementAmbiguousError(f"screen 匹配到多个显示器: {selector}")
+    return matches[0]
+
+
+def _rect_from_element(element):
+    rectangle = getattr(element, "rectangle", None)
+    rect = rectangle() if callable(rectangle) else rectangle
+    if rect is None:
+        raise RuntimeError("窗口不支持 rectangle()，不能按 screen 筛选")
+
+    left = _rect_value(rect, "left")
+    top = _rect_value(rect, "top")
+    right = _rect_value(rect, "right")
+    bottom = _rect_value(rect, "bottom")
+    if right <= left or bottom <= top:
+        raise RuntimeError(f"窗口 rectangle 无效: {rect}")
+    return {"left": left, "top": top, "right": right, "bottom": bottom}
+
+
+def _rect_value(rect, name):
+    value = getattr(rect, name, None)
+    value = value() if callable(value) else value
+    if value is None and isinstance(rect, dict):
+        value = rect.get(name)
+    if value is None:
+        raise RuntimeError(f"窗口 rectangle 缺少 {name}: {rect}")
+    return int(value)
+
+
+def _rect_area(rect):
+    return max(0, rect["right"] - rect["left"]) * max(0, rect["bottom"] - rect["top"])
+
+
+def _intersection_area(left, right):
+    width = min(left["right"], right["right"]) - max(left["left"], right["left"])
+    height = min(left["bottom"], right["bottom"]) - max(left["top"], right["top"])
+    return max(0, width) * max(0, height)
+
+
+def _center_inside(rect, monitor_rect):
+    x = (rect["left"] + rect["right"]) / 2
+    y = (rect["top"] + rect["bottom"]) / 2
+    return (
+        monitor_rect["left"] <= x < monitor_rect["right"]
+        and monitor_rect["top"] <= y < monitor_rect["bottom"]
+    )
+
+
+def _element_matches_screen_selector(element, selector):
+    if not selector or _screen_selector_is_all(selector):
+        return True
+    monitor = _select_screen_monitor(selector)
+    handle = _element_value(element, "handle")
+    if handle and win32api is not None and hasattr(win32api, "MonitorFromWindow"):
+        try:
+            monitor_handle = win32api.MonitorFromWindow(
+                int(handle),
+                getattr(win32con, "MONITOR_DEFAULTTONEAREST", 2),
+            )
+            info = win32api.GetMonitorInfo(monitor_handle)
+            assigned_id = _screen_id_from_device(info.get("Device"))
+            if assigned_id is not None:
+                return (
+                    assigned_id == monitor.get("id")
+                    or assigned_id == monitor.get("index")
+                )
+        except Exception:
+            pass
+
+    rect = _rect_from_element(element)
+    monitor_rect = monitor["rect"]
+    match = selector.get("match", "largest_overlap")
+    if match == "center_inside":
+        return _center_inside(rect, monitor_rect)
+
+    area = _rect_area(rect)
+    if area <= 0:
+        return False
+    ratio = _intersection_area(rect, monitor_rect) / area
+    return ratio >= float(selector.get("min_overlap_ratio", 0.5))
+
+
+def _candidate_root_from_wrapper(backend, wrapper):
+    handle = _element_value(wrapper, "handle")
+    if handle:
+        return Desktop(backend=backend).window(handle=handle)
+    return wrapper
+
+
+def _iter_screen_top_window_candidates(backend, criteria):
+    desktop = Desktop(backend=backend)
+    visible_only = _to_bool(criteria.get("visible_only", True))
+    yielded = False
+    try:
+        elements = findwindows.find_elements(
+            backend=backend,
+            top_level_only=True,
+            visible_only=visible_only,
+        )
+    except Exception:
+        elements = []
+
+    for element in elements:
+        handle = getattr(element, "handle", None)
+        if not handle:
+            continue
+        try:
+            root = desktop.window(handle=handle)
+            wrapper = root.wrapper_object()
+        except Exception:
+            continue
+        yielded = True
+        yield root, wrapper
+
+    if yielded:
+        return
+
+    try:
+        windows = desktop.windows()
+    except Exception:
+        windows = []
+    for wrapper in windows:
+        yield _candidate_root_from_wrapper(backend, wrapper), wrapper
+
+
+def _candidate_matches_top_root_criteria(wrapper, criteria):
+    candidate_criteria = _pywinauto_name_criteria(criteria)
+    if (
+        str(candidate_criteria.get("control_type") or "").casefold()
+        == "window"
+        and str(_element_value(wrapper, "control_type") or "").casefold()
+        != "window"
+    ):
+        candidate_criteria.pop("control_type", None)
+    return _element_matches_criteria(wrapper, candidate_criteria)
+
+
+def _apply_found_index(candidates, criteria):
+    if "found_index" not in criteria:
+        return candidates
+    try:
+        index = int(criteria["found_index"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("顶层窗口 found_index 必须是整数") from exc
+    if index < 0 or index >= len(candidates):
+        raise LookupError(
+            f"顶层窗口 found_index 越界: index={index}, count={len(candidates)}"
+        )
+    return [candidates[index]]
+
+
+def _screen_candidate_summary(wrapper, screen_ok=None, criteria_ok=None, error=None):
+    def read(label, getter):
+        try:
+            return getter()
+        except Exception as exc:
+            return f"<{label} error: {exc}>"
+
+    rect = read("rect", lambda: _rect_from_element(wrapper))
+    return {
+        "handle": read("handle", lambda: _element_value(wrapper, "handle")),
+        "title": read("title", lambda: _element_value(wrapper, "title")),
+        "class_name": read("class_name", lambda: _element_value(wrapper, "class_name")),
+        "control_type": read("control_type", lambda: _element_value(wrapper, "control_type")),
+        "rect": rect,
+        "screen": screen_ok,
+        "criteria": criteria_ok,
+        "error": error,
+    }
+
+
+def _format_screen_candidate_summaries(candidate_diagnostics, *, limit=30):
+    if not candidate_diagnostics:
+        return "候选窗口: 0"
+    lines = [f"候选窗口: {len(candidate_diagnostics)}"]
+    for index, diagnostic in enumerate(candidate_diagnostics[:limit], start=1):
+        wrapper, screen_ok, criteria_ok, error = diagnostic
+        item = _screen_candidate_summary(
+            wrapper,
+            screen_ok=screen_ok,
+            criteria_ok=criteria_ok,
+            error=error,
+        )
+        lines.append(
+            "#{} handle={!r} title={!r} class={!r} type={!r} "
+            "rect={!r} screen={} criteria={} error={!r}".format(
+                index,
+                item.get("handle"),
+                item.get("title"),
+                item.get("class_name"),
+                item.get("control_type"),
+                item.get("rect"),
+                item.get("screen"),
+                item.get("criteria"),
+                item.get("error"),
+            )
+        )
+    if len(candidate_diagnostics) > limit:
+        lines.append(f"... 其余 {len(candidate_diagnostics) - limit} 个候选已省略")
+    return "; ".join(lines)
+
+
+def _resolve_screen_filtered_top_root(
+        backend,
+        criteria,
+        screen_selector,
+        *,
+        root_name=None,
+):
+    if not screen_selector or _screen_selector_is_all(screen_selector):
+        return None
+
+    matches = []
+    candidate_diagnostics = []
+    for root, wrapper in _iter_screen_top_window_candidates(
+            backend,
+            criteria,
+    ):
+        try:
+            screen_ok = _element_matches_screen_selector(wrapper, screen_selector)
+        except Exception as exc:
+            candidate_diagnostics.append((wrapper, None, None, f"screen: {exc}"))
+            continue
+        if not screen_ok:
+            candidate_diagnostics.append((wrapper, False, None, None))
+            continue
+        try:
+            criteria_ok = _candidate_matches_top_root_criteria(wrapper, criteria)
+        except Exception as exc:
+            candidate_diagnostics.append((wrapper, True, None, f"criteria: {exc}"))
+            continue
+        candidate_diagnostics.append((wrapper, True, criteria_ok, None))
+        if not criteria_ok:
+            continue
+        matches.append((root, wrapper))
+
+    matches = _apply_found_index(matches, criteria)
+    if not matches:
+        raise LookupError(
+            f"顶层 root 未在指定 screen 上找到: root={root_name}, "
+            f"screen={screen_selector}; "
+            f"{_format_screen_candidate_summaries(candidate_diagnostics)}"
+        )
+    if len(matches) > 1:
+        raise ElementAmbiguousError(
+            f"顶层 root 在指定 screen 上匹配到多个窗口: "
+            f"root={root_name}, screen={screen_selector}, count={len(matches)}"
+        )
+    return matches[0][0]
+
 def _root_spec_from_handle(entry):
     if entry and entry.handle:
         return Desktop(backend=entry.backend).window(handle=entry.handle)
@@ -548,6 +921,15 @@ def _root_spec_from_handle(entry):
 def _root_spec_from_criteria(entry):
     if entry is None:
         return None
+    if entry.screen_selector and not _screen_selector_is_all(entry.screen_selector):
+        root = _resolve_screen_filtered_top_root(
+            entry.backend,
+            entry.criteria,
+            entry.screen_selector,
+            root_name=entry.name,
+        )
+        if root is not None:
+            return root
     return Desktop(backend=entry.backend).window(
         **_pywinauto_name_criteria(entry.criteria)
     )
@@ -628,6 +1010,11 @@ def _element_matches_criteria(
     for key, expected in criteria.items():
         if key in {"backend", "parent", "top_level_only", "depth", "found_index"}:
             continue
+        if key == "predicate_func":
+            element_info = getattr(element, "element_info", element)
+            if not expected(element_info):
+                return False
+            continue
         if ignore_dynamic_state and key in ("visible_only", "enabled_only"):
             continue
         if key in ("visible_only", "enabled_only"):
@@ -664,6 +1051,11 @@ def _restore_top_root_from_entry(entry):
             element,
             entry.criteria,
             ignore_dynamic_state=True,
+        ):
+            return None
+        if entry.screen_selector and not _element_matches_screen_selector(
+            element,
+            entry.screen_selector,
         ):
             return None
         entry.mark_hot(root, entry.handle, process_id or entry.process_id)
@@ -815,16 +1207,24 @@ def _resolve_self_top_root(windows, locator):
 
     criteria = dict(locator.criteria)
     backend = criteria.pop("backend", "uia")
-    native_bridge = _native_uia_window_bridge_root(backend, criteria)
-    if native_bridge is not None:
-        windows.set_last(native_bridge)
-        logger.debug(
-            f"^^^^^^ 已通过native handle切换UIA桥接root -> {locator.name}"
-        )
-        return RootResolveResult(root=native_bridge)
-    root = Desktop(backend=backend).window(
-        **_pywinauto_name_criteria(criteria)
+    screen_selector = _effective_screen_selector(locator.screen_selector)
+    root = _resolve_screen_filtered_top_root(
+        backend,
+        criteria,
+        screen_selector,
+        root_name=locator.name,
     )
+    if root is None:
+        native_bridge = _native_uia_window_bridge_root(backend, criteria)
+        if native_bridge is not None:
+            windows.set_last(native_bridge)
+            logger.debug(
+                f"^^^^^^ 已通过native handle切换UIA桥接root -> {locator.name}"
+            )
+            return RootResolveResult(root=native_bridge)
+        root = Desktop(backend=backend).window(
+            **_pywinauto_name_criteria(criteria)
+        )
     entry = None
 
     if cache_name:
@@ -833,6 +1233,7 @@ def _resolve_self_top_root(windows, locator):
             kind="top",
             backend=backend,
             criteria=dict(criteria),
+            screen_selector=dict(screen_selector) if screen_selector else None,
             root=root,
         )
         windows.set_entry(entry)

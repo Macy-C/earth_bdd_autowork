@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
@@ -43,6 +45,13 @@ COMMON_INSPECT_PROPERTIES = [
     "wrapper.is_visible",
     "wrapper.is_enabled",
 ]
+
+
+@dataclass(frozen=True)
+class DebugElementSnapshot:
+    key: str
+    rect: object | None
+    values: dict[str, str]
 
 
 MSAA_ROLE_NAMES = {
@@ -147,10 +156,15 @@ def get_element_rect(element):
 
 def safe_get_element_rect(element):
     element = try_to_wrapper(element)
+    info = _element_info(element)
+    return _safe_rect_from_element_info(element, info)
+
+
+def _safe_rect_from_element_info(element, info):
     for getter in (
         lambda: element.rectangle(),
         lambda: getattr(element, "rectangle", None),
-        lambda: getattr(_element_info(element), "rectangle", None),
+        lambda: getattr(info, "rectangle", None),
     ):
         try:
             rect = getter()
@@ -171,6 +185,10 @@ def _element_info(element):
 
 def _safe_info_attr(element, name, default=""):
     info = _element_info(element)
+    return _safe_info_attr_value(info, name, default)
+
+
+def _safe_info_attr_value(info, name, default=""):
     try:
         value = getattr(info, name, default)
         return default if value is None else value
@@ -321,6 +339,11 @@ def make_element_key(element):
     info = _element_info(element)
     rect = safe_get_element_rect(element)
 
+    return _element_key_from_info_rect(info, rect)
+
+
+def _element_key_from_info_rect(info, rect):
+
     handle = getattr(info, "handle", None)
     if handle:
         return f"handle:{handle}"
@@ -334,6 +357,23 @@ def make_element_key(element):
         f"{getattr(info, 'name', '')}|"
         f"{getattr(info, 'automation_id', '')}|"
         f"{_rect_text(rect)}"
+    )
+
+
+def read_element_snapshot(element):
+    element = try_to_wrapper(element)
+    info = _element_info(element)
+    rect = _safe_rect_from_element_info(element, info)
+    return DebugElementSnapshot(
+        key=_element_key_from_info_rect(info, rect),
+        rect=rect,
+        values={
+            "control_type": _safe_info_attr_value(info, "control_type"),
+            "name": _safe_info_attr_value(info, "name"),
+            "auto_id": _safe_info_attr_value(info, "automation_id"),
+            "class_name": _safe_info_attr_value(info, "class_name"),
+            "rect": _rect_text(rect),
+        },
     )
 
 
@@ -358,15 +398,7 @@ def make_xpath_suggestion(element):
 
 
 def get_tree_values(element):
-    rect = safe_get_element_rect(element)
-
-    return {
-        "control_type": _safe_info_attr(element, "control_type"),
-        "name": _safe_info_attr(element, "name"),
-        "auto_id": _safe_info_attr(element, "automation_id"),
-        "class_name": _safe_info_attr(element, "class_name"),
-        "rect": _rect_text(rect),
-    }
+    return dict(read_element_snapshot(element).values)
 
 
 def iter_tree_children(element):

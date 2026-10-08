@@ -1046,7 +1046,7 @@ def _generation_decision_authority_matrix():
             "user_when": "User answers declared options in the pre-generation Job-bound batch, and may provide separate freeform business text when the option set is insufficient; accepted submission automatically continues the same generation action.",
             "ai_when": "Resolves AI-authority business ambiguities through typed patch or Plan selection inside the claimed Job; transports user-authority selected options and structured freeform answers through submit-business-review-answers; never writes Answers JSON.",
             "forbidden": "Agent askQuestions prompts, answer drafts, retired submit-job-answers, duplicate media links, terminal parsing, external output reads, technical fields in Answers or BusinessFactPatch, evidence repair by answer, option guessing from freeform text, or repeated generation-phase questions.",
-            "validation_owner": "decision_pack + generation_job_service.submit_generation_job_business_answers/submit_generation_job_business_facts + workflow_service._compiled_decision_patch",
+            "validation_owner": "decision_pack + generation_job_service.submit_generation_job_business_review_answers/submit_generation_job_business_facts + workflow_service._compiled_decision_patch",
         },
         {
             "decision_id": "window_owner",

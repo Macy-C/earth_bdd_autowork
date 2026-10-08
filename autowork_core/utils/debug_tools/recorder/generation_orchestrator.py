@@ -21,8 +21,6 @@ from autowork_core.utils.debug_tools.recorder.generation_job_service import (
     submit_generation_job_design,
     submit_generation_job_ambiguity_choice_patch,
     submit_generation_job_assertion_choice_patch,
-    business_review_patch_from_direct_arguments,
-    submit_generation_job_business_review,
     submit_generation_job_method_choice_patch,
     submit_generation_job_naming_patch,
     submit_generation_job_operation_choice_patch,
@@ -327,23 +325,6 @@ def generate_generation_job(
         **result,
     }
     return value
-
-
-def submit_business_review(job_path, patch=None, *, decisions=None, reasons=None):
-    job_path = Path(job_path).resolve()
-    if patch is None:
-        patch = business_review_patch_from_direct_arguments(
-            job_path,
-            decisions or {},
-            reasons or {},
-        )
-    result = submit_generation_job_business_review(job_path, patch)
-    return {
-        **result,
-        "generation_entrypoint_version": GENERATION_ENTRYPOINT_VERSION,
-        "entrypoint": "submit-business-review",
-        "job_path": str(job_path),
-    }
 
 
 def advance_generation_job(
@@ -2069,13 +2050,13 @@ def _implementation_required(inspected, prepared, transition, validation=None):
         if native_edit_allowed
         else []
     )
-    candidate_delivery = (
-        _candidate_delivery_projection(prepared)
+    candidate_diagnostic = (
+        _candidate_diagnostic_projection(prepared)
         if native_edit_allowed
         else {}
     )
-    candidate_manifest = candidate_delivery.get("candidate_manifest")
-    candidate_index = candidate_delivery.get("candidate_index")
+    candidate_manifest = candidate_diagnostic.get("candidate_manifest")
+    candidate_index = candidate_diagnostic.get("candidate_index")
     projected_status = validation.get("projected_transaction_status")
     return {
         "generation_orchestrator_version": GENERATION_ORCHESTRATOR_VERSION,
@@ -2204,7 +2185,7 @@ def _implementation_boundary_next_action(boundary):
     }.get(boundary, "inspect_system_candidate_materialization")
 
 
-def _candidate_delivery_projection(prepared):
+def _candidate_diagnostic_projection(prepared):
     report_path = prepared.get("report_path")
     if not report_path:
         return {}
@@ -2971,7 +2952,7 @@ def _ready_to_generate_after_refresh(prepared):
         "generation_profile": prepared.get("generation_profile") or {},
         "workload": prepared.get("workload") or {},
         "execution_boundary": prepared.get("execution_boundary") or {},
-        "reason": "generation_job_refreshed_before_candidate_delivery",
+        "reason": "generation_job_refreshed_before_candidate_diagnostic_projection",
         "errors": list(prepared.get("errors") or ()),
         "warnings": list(prepared.get("warnings") or ()),
     }
