@@ -1,6 +1,4 @@
-import os
 import subprocess
-from pathlib import Path
 from time import sleep
 from loguru import logger
 from autowork_core.page import get_page
@@ -68,6 +66,12 @@ def prepare_scenario(context, scenario):
         except Exception:
             cleanup_scenario(context, scenario)
             raise
+    # if settings.app_launch_mode == "auto":
+    #     # 软件已经启动，在这里等待登录界面并执行登录
+    #     pass
+    # elif settings.app_launch_mode == "attach":
+    #     # 使用已打开的软件，在这里执行 attach 所需的准备操作
+    #     pass
 
 
 def cleanup_scenario(context, scenario):
