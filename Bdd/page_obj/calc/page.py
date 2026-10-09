@@ -2,7 +2,7 @@ from autowork_core.page import WindowPage
 
 
 class CalcPage(WindowPage):
-    root_locator_file = "calc/window.yaml"
+    root_locator_file = "calc/right_screen.yaml"
     root_locator = "calc_window"
 
     # @property

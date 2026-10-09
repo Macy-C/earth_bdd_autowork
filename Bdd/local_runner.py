@@ -2,7 +2,7 @@ import sys
 from autowork_core.runtime.local_runner import main
 
 if __name__ == "__main__":
-    feature_path = r'C:\Users\320321651\Messy\projects\bdd_autowork\Bdd\test_features\calc\calc.feature'
+    feature_path = r'E:\projects\earth_bdd_autowork\Bdd\test_features\calc\calc.feature'
     scenario_name = None
     example_id = None
     # 完整复跑一个普通 Scenario：

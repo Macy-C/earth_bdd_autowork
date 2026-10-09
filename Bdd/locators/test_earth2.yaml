@@ -1,8 +1,0 @@
-earth_2_window:
-  top_level: true
-  backend: uia
-  control_type: Window
-  title: '计算器'
-  class_name: 'ApplicationFrameWindow'
-  screen:
-    id: 2

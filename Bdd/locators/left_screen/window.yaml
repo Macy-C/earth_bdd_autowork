@@ -1,11 +1,10 @@
-earth_1_window:
+left_screen_window:
   top_level: true
   backend: uia
   control_type: Window
-  title: '计算器'
-  class_name: 'ApplicationFrameWindow'
+  auto_id: 'chBasis:HostWindow_1'
   screen:
-    id: 1
+    role: leftmost
 
 # # 不限定屏幕，在所有屏幕上查找
 # screen: all
@@ -19,3 +18,4 @@ earth_1_window:
 #   role: rightmost
 # screen:
   # device: '\\.\DISPLAY1'
+#  id: 1

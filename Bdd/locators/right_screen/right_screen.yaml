@@ -1,0 +1,22 @@
+right_screen_window:
+  top_level: true
+  backend: uia
+  control_type: Window
+  auto_id: 'chBasis:HostWindow_1'
+  screen:
+    role: rightmost
+
+
+# # 不限定屏幕，在所有屏幕上查找
+# screen: all
+# screen:
+#   role: primary
+# # 最左侧屏幕或最右侧屏幕
+# screen:
+#   role: leftmost
+# # 或
+# screen:
+#   role: rightmost
+# screen:
+  # device: '\\.\DISPLAY1'
+#  id: 1
