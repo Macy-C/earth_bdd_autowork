@@ -8,9 +8,36 @@ from pathlib import Path
 
 from loguru import logger
 from mss import mss
+import numpy as np
 
 from config.paths import Paths
 from autowork_core.utils.bus import timestamp, safe_name
+
+
+def _clip_capture_region(monitor, desktop):
+    try:
+        region = {key: int(monitor[key]) for key in ("left", "top", "width", "height")}
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"Invalid screenshot region: {monitor!r}") from error
+    if region["width"] <= 0 or region["height"] <= 0:
+        raise ValueError(f"Screenshot region must have positive dimensions: {region}")
+
+    left = max(desktop["left"], region["left"])
+    top = max(desktop["top"], region["top"])
+    right = min(desktop["left"] + desktop["width"], region["left"] + region["width"])
+    bottom = min(desktop["top"] + desktop["height"], region["top"] + region["height"])
+    if right <= left or bottom <= top:
+        raise ValueError(f"Screenshot region does not intersect the virtual desktop: {region}")
+    return {"left": left, "top": top, "width": right - left, "height": bottom - top}
+
+
+def capture_screen_region(monitor=None):
+    with mss() as sct:
+        requested = sct.monitors[1] if monitor is None else monitor
+        actual = _clip_capture_region(requested, sct.monitors[0])
+        shot = sct.grab(actual)
+        image = np.ascontiguousarray(np.asarray(shot)[:, :, :3])
+    return image, actual
 
 
 class ScreenRecorder:

@@ -1,10 +1,13 @@
 import re
 
 from autowork_core.common.compile import XPATH_KEY_MAP
+from autowork_core.common.element_locator_properties import get_locator_property
 from autowork_core.common.element_properties import (
     ElementPropertyReadError,
+    matches_property_value as _equals,
     read_accessible_name,
 )
+from autowork_core.common.uia_tree import iter_descendants_via_children
 from pywinauto.uia_defines import NoPatternInterfaceError
 
 
@@ -149,43 +152,8 @@ def _get_attr(element, key):
     """
     根据 XPath 属性名读取 pywinauto 元素属性。
     """
-    info = element.element_info
-
     key = key.strip().lower()
-
-    if key in XPATH_KEY_MAP:
-        real_key = XPATH_KEY_MAP[key]
-
-        if real_key == "name":
-            return _get_name(element, info)
-
-        if real_key == "enabled":
-            return _call_wrapper_bool(element, "is_enabled")
-
-        if real_key == "visible":
-            return _call_wrapper_bool(element, "is_visible")
-
-        if real_key == "value.value":
-            return _get_value(element, info)
-
-        if real_key == "value.isreadonly":
-            return _get_value_is_readonly(element, info)
-
-        if real_key.startswith("legacyiaccessible."):
-            return _get_legacy_attr(element, info, real_key)
-
-        return getattr(info, real_key, None)
-
-    if key.startswith("legacyiaccessible."):
-        return _get_legacy_attr(element, info, key)
-
-    if key == "value.value":
-        return _get_value(element, info)
-
-    if key == "value.isreadonly":
-        return _get_value_is_readonly(element, info)
-
-    return getattr(info, key, None)
+    return get_locator_property(element, XPATH_KEY_MAP.get(key, key))
 
 
 def _get_name(element, info):
@@ -219,9 +187,9 @@ def _get_legacy_attr(element, info, key):
     except Exception as error:
         raise ElementPropertyReadError(key) from error
 
-    for k, v in legacy_props.items():
-        if str(k).lower() == legacy_key:
-            return v
+    for current_key, value in legacy_props.items():
+        if str(current_key).lower() == legacy_key:
+            return value
 
     return None
 
@@ -606,81 +574,6 @@ def _parse_explicit_axis(axis, step_text):
     return normalized, target
 
 
-def _equals(actual, expected):
-    if isinstance(actual, (list, tuple, set)):
-        return any(_equals(value, expected) for value in actual)
-
-    if isinstance(actual, bool):
-        expected_text = str(expected).strip().lower()
-        if expected_text in ("true", "1", "yes", "y"):
-            return actual is True
-        if expected_text in ("false", "0", "no", "n"):
-            return actual is False
-
-    actual_text = str(actual).strip()
-    expected_text = str(expected).strip()
-
-    if actual_text == expected_text:
-        return True
-
-    if _is_number_equivalent_allowed(actual, expected):
-        actual_number = _number_value(actual)
-        expected_number = _number_value(expected)
-        if actual_number is not None and expected_number is not None:
-            return actual_number == expected_number
-
-    expected_label = _display_label(expected_text)
-    if expected_label and actual_text == expected_label:
-        return True
-
-    actual_label = _display_label(actual_text)
-    if actual_label and actual_label == expected_text:
-        return True
-
-    return False
-
-
-def _number_value(value):
-    if isinstance(value, bool):
-        return None
-
-    if isinstance(value, int):
-        return value
-
-    text = str(value).strip()
-    match = re.search(r"\(\s*0x([0-9a-fA-F]+)\s*\)", text)
-    if match:
-        return int(match.group(1), 16)
-
-    if re.fullmatch(r"0x[0-9a-fA-F]+", text):
-        return int(text, 16)
-
-    if re.fullmatch(r"-?\d+", text):
-        return int(text)
-
-    return None
-
-
-def _is_number_equivalent_allowed(actual, expected):
-    return (
-        isinstance(actual, int)
-        and not isinstance(actual, bool)
-    ) or _has_hex_number(actual) or _has_hex_number(expected)
-
-
-def _has_hex_number(value):
-    text = str(value).strip()
-    return bool(
-        re.search(r"\(\s*0x[0-9a-fA-F]+\s*\)", text)
-        or re.fullmatch(r"0x[0-9a-fA-F]+", text)
-    )
-
-
-def _display_label(text):
-    match = re.match(r"^(.+?)\s*\(\s*0x[0-9a-fA-F]+\s*\)$", text)
-    return match.group(1).strip() if match else None
-
-
 def _match_element(element, step):
     """
     判断元素是否匹配 step。
@@ -728,13 +621,17 @@ def _select_candidates(parent, step, include_self=False):
         return parent.children()
 
     if step["axis"] == "desc":
-        if control_type:
-            candidates = parent.descendants(control_type=control_type)
-        else:
-            candidates = parent.descendants()
-        return [parent] + candidates if include_self else candidates
+        candidates = iter_descendants_via_children(parent)
+        if include_self:
+            return _chain_self(parent, candidates)
+        return candidates
 
     raise ValueError(f"不支持的 axis: {step['axis']}")
+
+
+def _chain_self(element, candidates):
+    yield element
+    yield from candidates
 
 
 def _select_candidate_nodes(parent_node, step):

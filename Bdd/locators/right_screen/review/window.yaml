@@ -1,0 +1,44 @@
+2D_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@help_text='2D']" }
+MPR_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@help_text='MPR']" }
+Volume_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@help_text='Volume']" }
+Endo_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@help_text='Endo']" }
+
+
+
+show_tools_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ListItem//Text[@name='Tools']" }
+tools_help_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='PART_HelpToggleButton'][0]" }
+show_series_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ListItem//Text[@name='Series']" }
+show_CreateMovieorSeries_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ListItem//Text[@name='Create Movie or Series']" }
+CreateMovieorSeries_help_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='PART_HelpToggleButton'][1]" }
+
+
+show_PresetWindowCenterWidth_selectBox: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@help_text='PresetWindowCenterWidth']" }
+Invert_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@helptext='Invert']" }
+SaveImage_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@help_text='Save Image']" }
+SendImagetoFilm_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@help_text='Send Image to Film']" }
+SendImagetoReport_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@help_text='Send Image to Report']" }
+exit_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@name='Exit']" }
+
+
+# common toolbar -------------------------------
+Axial_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='axialOri']" }
+Coronal_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='corOri']" }
+Sagittal_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='sagOri']" }
+
+Show/Hide_Protocol_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='ProtocolButton']" }
+
+FlipHorizontally_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@auto_id='FlipButton']" }
+RotateClockwise_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@auto_id='RotateButton']" }
+Scroll_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@help_text='Scroll']" }
+Pan_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@help_text='Pan']" }
+Zoom_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@help_text='Zoom']" }
+Roll_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@help_text='Roll']" }
+WindowWidthCenter_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@help_text='Window Width Center']" }
+Enhance_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@help_text='Enhance']" }
+Ellipse_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@help_text='Ellipse']" }
+Line_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@help_text='Line']" }
+PixelValue_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@help_text='Pixel Value']" }
+DeleteAllAnnotations_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@help_text='Delete All Annotations']" }
+Show_information_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@help_text='Show information']" }
+Informationlist_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@help_text='Information list']" }
+ResetAll_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@help_text='Reset All']" }

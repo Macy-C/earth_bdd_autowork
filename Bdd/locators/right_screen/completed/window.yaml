@@ -1,0 +1,33 @@
+# completed filter input info ------------------------------------
+name_edit: {root: 'right_screen_window', by: 'xpath',value: "//Edit[@auto_id='PART_TextBoxFilter'][0]"}
+PatientID_edit: {root: 'right_screen_window', by: 'xpath',value: "//Edit[@auto_id='PART_TextBoxFilter'][1]"}
+StudyID_edit: {root: 'right_screen_window', by: 'xpath',value: "//Edit[@auto_id='PART_TextBoxFilter'][2]"}
+ProcedureDescription_edit: {root: 'right_screen_window', by: 'xpath',value: "//Edit[@auto_id='PART_TextBoxFilter'][3]"}
+StudyDescription_edit: {root: 'right_screen_window', by: 'xpath',value: "//Edit[@auto_id='PART_TextBoxFilter'][4]"}
+ReferringPhysician_edit: {root: 'right_screen_window', by: 'xpath',value: "//Edit[@auto_id='PART_TextBoxFilter'][5]"}
+AccessionNumber_edit: {root: 'right_screen_window', by: 'xpath',value: "//Edit[@auto_id='PART_TextBoxFilter'][6]"}
+Modality_edit: {root: 'right_screen_window', by: 'xpath',value: "//Edit[@auto_id='PART_TextBoxFilter'][7]"}
+
+# completed dataItem ------------------------------------
+completed_first_dataItem: {root: 'right_screen_window', by: 'xpath',value: "//DataGrid[@auto_id='FlatDataGrid']//DataItem[0]"}
+
+# details table ------------------------------------
+Series_table: {root: 'right_screen_window', by: 'xpath',value: "//Tab[@auto_id='tabControl']//TabItem/Text[@name='Series']"}
+Images_table: {root: 'right_screen_window', by: 'xpath',value: "//Tab[@auto_id='tabControl']//TabItem/Text[@name='Images']"}
+Reports_table: {root: 'right_screen_window', by: 'xpath',value: "//Tab[@auto_id='tabControl']//TabItem/Text[@name='Reports']"}
+Bookmarks_table: {root: 'right_screen_window', by: 'xpath',value: "//Tab[@auto_id='tabControl']//TabItem/Text[@name='Bookmarks']"}
+Files_table: {root: 'right_screen_window', by: 'xpath',value: "//Tab[@auto_id='tabControl']//TabItem/Text[@name='Files']"}
+Raw Data_table: {root: 'right_screen_window', by: 'xpath',value: "//Tab[@auto_id='tabControl']//TabItem/Text[@name='Raw Data']"}
+
+# details dataItem ------------------------------------
+details_first_dataItem: {root: 'right_screen_window', by: 'xpath',value: "//DataGrid[@auto_id='DataGrid_1']//DataItem[0]"}
+
+# other ----------------------------------------------
+Clear_button: {root: 'right_screen_window', by: 'xpath',value: "//Button[@auto_id='ClearButton']"}
+review_button: {root: 'right_screen_window', by: 'xpath',value: "//Button[@auto_id='ViewExamButton']"}
+
+# caution option ------------------------------
+OK_button: {region: 'right_screen_window',by: 'ocr',value: 'OK'}
+Cancel_button: {region: 'right_screen_window',by: 'ocr',value: 'Cancel'}
+Yes_button: {region: 'right_screen_window',by: 'ocr',value: 'Yes'}
+No_button: {region: 'right_screen_window',by: 'ocr',value: 'No'}

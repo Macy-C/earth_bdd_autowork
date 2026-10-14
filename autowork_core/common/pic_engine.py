@@ -4,7 +4,6 @@ from collections import OrderedDict
 from pathlib import Path
 
 import cv2
-import mss
 import numpy as np
 from airtest.aircv.keypoint_matching import AKAZEMatching, BRISKMatching, KAZEMatching, ORBMatching
 from airtest.aircv.keypoint_matching_contrib import BRIEFMatching, SIFTMatching, SURFMatching
@@ -19,6 +18,7 @@ from config.paths import Paths
 from config.settings import settings
 from autowork_core.common.wait_coordinator import poll_value
 from autowork_core.utils.bus import normalize, safe_name, timestamp
+from autowork_core.utils.screenshot import capture_screen_region
 
 logging.getLogger("airtest").setLevel(logging.ERROR)
 
@@ -227,31 +227,8 @@ def normalize_pic_criteria(criteria):
     }
 
 
-def _screenshot_to_bgr(screenshot):
-    return cv2.cvtColor(np.asarray(screenshot), cv2.COLOR_BGRA2BGR)
-
-
-def _clip_monitor(monitor, screen_monitor):
-    if monitor is None:
-        return screen_monitor
-
-    left = max(screen_monitor["left"], _to_int(monitor.get("left"), 0))
-    top = max(screen_monitor["top"], _to_int(monitor.get("top"), 0))
-    right = min(screen_monitor["left"] + screen_monitor["width"], left + _to_int(monitor.get("width"), 1))
-    bottom = min(screen_monitor["top"] + screen_monitor["height"], top + _to_int(monitor.get("height"), 1))
-    return {
-        "left": left,
-        "top": top,
-        "width": max(1, right - left),
-        "height": max(1, bottom - top),
-    }
-
-
 def screenshot(monitor=None):
-    with mss.mss() as sct:
-        monitor = _clip_monitor(monitor, sct.monitors[1])
-        shot = sct.grab(monitor)
-        return _screenshot_to_bgr(shot), monitor
+    return capture_screen_region(monitor)
 
 
 def _get_bounds(match_result):

@@ -1,0 +1,41 @@
+EarthPlatformSimulator_window:
+  top_level: true
+  backend: uia
+  control_type: Window
+  class_name: wxWindowNR
+  title: 'Earth Platform simulator'
+  screen:
+    role: leftmost
+
+ESTOP_On_button: {root: 'EarthPlatformSimulator_window', by: 'xpath',value: "//Button[@name='ESTOP On']"}
+Scan_button: {root: 'EarthPlatformSimulator_window', by: 'xpath',value: "//Button[@name='Scan']"}
+Abort_button: {root: 'EarthPlatformSimulator_window', by: 'xpath',value: "//Button[@name='Abort']"}
+Enable_button: {root: 'EarthPlatformSimulator_window', by: 'xpath',value: "//Button[@name='Enable']"}
+
+
+Up_button: {root: 'EarthPlatformSimulator_window', by: 'xpath',value: "//Button[@name='Up']"}
+Down_button: {root: 'EarthPlatformSimulator_window', by: 'xpath',value: "//Button[@name='Down']"}
+In_button: {root: 'EarthPlatformSimulator_window', by: 'xpath',value: "//Button[@name='In']"}
+Out_button: {root: 'EarthPlatformSimulator_window', by: 'xpath',value: "//Button[@name='Out']"}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

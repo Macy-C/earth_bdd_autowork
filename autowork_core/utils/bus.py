@@ -222,6 +222,7 @@ if __name__ == '__main__':
     del_all_file(Paths.SCREENSHOTS_DIR)
     # del_all_file(Paths.REPORTS_DIR / 'allure-results')
     print(get_screen_size())
+    print(random_num_and_str(7))
 
 
 

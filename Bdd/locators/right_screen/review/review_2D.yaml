@@ -1,0 +1,63 @@
+# toolbar -------------------------------
+2D_1*1_Layout_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@auto_id='seriesWndLayout']" }
+2D_SelectSingleImage_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@auto_id='SingleRadioButton']" }
+2D_SelectSeries_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@auto_id='SeriesRadioButton']" }
+2D_SelectAll_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@auto_id='AllRadioButton']" }
+
+
+# Information list ----------------------------
+2D_ImageInformation_tab: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Image Information']" }
+2D_DICOMInformation_tab: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='DICOM Information']" }
+2D_InfomationList_search_input: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='SearchTextBox']" }
+
+2D_SendParametertoFilm_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Send Parameter to Film']" }
+2D_Save_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Save']" }
+2D_Close_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Close']" }
+
+# Series -------------------------------
+2D_Series1_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][0]" }
+2D_Series2_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][1]" }
+2D_Series3_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][2]" }
+2D_Series_AutoCompare_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Auto Compare']" }
+
+
+# Create Movie or Series ------------------------------
+  # 1. Define Batch Range ------------------------------
+2D_CMoS_StartRange_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='rangeStartButton']" }
+2D_CMoS_EndRange_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='rangeEndButton']" }
+2D_CMoS_AllImages_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='rangeAllButton']" }
+
+2D_CMoS_BanchRangeFrom_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_TextBox'][0]" }
+2D_CMoS_BanchRangeTo_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_TextBox'][1]" }
+
+  # 2. Set Batch Parameters ------------------------------
+2D_CMoS_Include_every_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_TextBox'][2]" }
+
+  # 3. Add to Batch ------------------------------
+2D_CMoS_InformationImage_option: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Information Image']" }
+2D_CMoS_Surview_option: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Surview']" }
+
+  # 4. Preview Batch ------------------------------
+2D_CMoS_Preview_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='PART_ToggleButton']" }
+2D_CMoS_SaveBatch_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Save Batch']" }
+2D_CMoS_Reset_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Reset']" }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

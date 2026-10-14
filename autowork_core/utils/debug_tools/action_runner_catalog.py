@@ -417,6 +417,11 @@ def _input_value(value: str, parameter: ActionParameterDescriptor):
             return True
         if lowered in {"false", "0", "no", "n", "off"}:
             return False
+    if parameter.annotation in {"float", "float | None"}:
+        try:
+            return float(value)
+        except ValueError:
+            pass
     if parameter.default_code is not None and _looks_numeric(parameter.default_code):
         try:
             return float(value) if "." in value else int(value)

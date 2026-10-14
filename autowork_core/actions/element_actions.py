@@ -1,6 +1,7 @@
 from autowork_core.actions.action_helper import _is_coords_target, _target_to_wrapper
 from autowork_core.common.compile import XPATH_KEY_MAP
 from autowork_core.common.element_finder import get_element, get_elements
+from autowork_core.common.element_locator_properties import get_locator_property
 from autowork_core.common.log_helper import log_call
 
 
@@ -160,72 +161,12 @@ def _attr_from_element(context, locator, el, attr_name, timeout=3, default=None,
             return el[0]
         return default
 
-    info = getattr(el, "element_info", None)
     attr_name = _normalize_attr_name(attr_name)
-
-    # ---------- 状态类 ----------
-    if attr_name == "enabled":
-        try:
-            return el.is_enabled()
-        except Exception:
-            return default
-
-    if attr_name == "visible":
-        try:
-            return el.is_visible()
-        except Exception:
-            return default
-
-    # ---------- 文本/值类 ----------
-    if attr_name == "name":
-        try:
-            value = getattr(info, "name", default)
-            return value if value is not None else default
-        except Exception:
-            return default
-
-    if attr_name == "value.value":
-        value = _value_pattern_value(el)
+    try:
+        value = get_locator_property(el, attr_name)
         return value if value is not None else default
-
-    if attr_name == "value.isreadonly":
-        value = _value_pattern_is_readonly(el)
-        return value if value is not None else default
-
-    if attr_name.startswith("legacyiaccessible."):
-        value = _legacy_property(el, attr_name)
-        return value if value is not None else default
-
-    # ---------- 标识类 ----------
-    if attr_name in ("automation_id", "auto_id"):
-        try:
-            value = getattr(info, "automation_id", default)
-            return value if value is not None else default
-        except Exception:
-            return default
-
-    if attr_name == "class_name":
-        try:
-            value = getattr(info, "class_name", default)
-            return value if value is not None else default
-        except Exception:
-            return default
-
-    if attr_name == "control_type":
-        try:
-            value = getattr(info, "control_type", default)
-            return value if value is not None else default
-        except Exception:
-            return default
-
-    if attr_name == "handle":
-        try:
-            value = getattr(info, "handle", default)
-            return value if value is not None else default
-        except Exception:
-            return default
-
-    return default
+    except Exception:
+        return default
 
 
 def _value_pattern_value(element):
@@ -270,6 +211,7 @@ def get_attr(context, locator, attr_name, timeout=3, default=None, first_only=Tr
     - name
     - value / Value.Value
     - Value.IsReadOnly
+    - selection / Selection.Selection (list of selected item names)
     - LegacyIAccessible.*
     - class_name
     - control_type

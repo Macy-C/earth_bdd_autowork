@@ -2,8 +2,8 @@ import sys
 from autowork_core.runtime.local_runner import main
 
 if __name__ == "__main__":
-    feature_path = r'E:\projects\earth_bdd_autowork\Bdd\test_features\calc\calc.feature'
-    scenario_name = None
+    feature_path = r'E:\projects\earth_bdd_autowork\Bdd\test_features\CT-NMP-SSRS-Console.1007.feature'
+    scenario_name = 'Repeat a helical scan'
     example_id = None
     # 完整复跑一个普通 Scenario：
     # scenario_name = "计算相加"

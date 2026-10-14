@@ -1,11 +1,8 @@
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-import cv2
-import mss
-import numpy as np
-
 from config.settings import settings
+from autowork_core.utils.screenshot import capture_screen_region
 from autowork_core.common.ocr_engine import (
     enrich_ocr_candidates,
     match_ocr_candidates,
@@ -284,8 +281,8 @@ class VisualToolMixin:
         try:
             root_obj = to_wrapper(self.root_window)
             rect = root_obj.rectangle()
-            width = max(1, int(rect.right - rect.left))
-            height = max(1, int(rect.bottom - rect.top))
+            width = int(rect.right - rect.left)
+            height = int(rect.bottom - rect.top)
             monitor = {
                 "left": int(rect.left),
                 "top": int(rect.top),
@@ -293,9 +290,7 @@ class VisualToolMixin:
                 "height": height,
             }
 
-            with mss.mss() as sct:
-                screenshot = sct.grab(monitor)
-                image = np.ascontiguousarray(np.asarray(screenshot)[:, :, :3])
+            image, monitor = capture_screen_region(monitor)
 
             self.ocr_image = image
             self.ocr_monitor = monitor
@@ -720,12 +715,10 @@ class VisualToolMixin:
             monitor = {
                 "left": int(rect.left),
                 "top": int(rect.top),
-                "width": max(1, int(rect.right - rect.left)),
-                "height": max(1, int(rect.bottom - rect.top)),
+                "width": int(rect.right - rect.left),
+                "height": int(rect.bottom - rect.top),
             }
-            with mss.mss() as sct:
-                screenshot = sct.grab(monitor)
-                self.pic_source_image = cv2.cvtColor(np.asarray(screenshot), cv2.COLOR_BGRA2BGR)
+            self.pic_source_image, monitor = capture_screen_region(monitor)
 
             self.pic_source_monitor = monitor
             self.pic_candidate = None

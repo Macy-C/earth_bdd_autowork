@@ -1,4 +1,5 @@
 from Bdd.page_obj.left_screen.patient.page import NewPatientPage
+from Bdd.page_obj.left_screen.scan.page import ScanPage
 from Bdd.page_obj.left_screen.scheduled.add_patient import AddPatientPage
 from Bdd.page_obj.left_screen.scheduled.page import ScheduledPage
 from Bdd.page_obj.left_screen.service.QA import QAPage
@@ -13,12 +14,16 @@ from autowork_core.page import WindowPage
 
 
 class LeftScreenPage(WindowPage):
-    root_locator_file = "left_screen/right_screen.yaml"
+    root_locator_file = "left_screen/window.yaml"
     root_locator = "left_screen_window"
 
     @property
     def patient(self) -> NewPatientPage:
         return self.get_view(NewPatientPage)
+
+    @property
+    def scan(self) -> ScanPage:
+        return self.get_view(ScanPage)
 
     #--------------------------------------------------
     @property

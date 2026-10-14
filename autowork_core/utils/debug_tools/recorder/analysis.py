@@ -5,6 +5,10 @@ import math
 import re
 from types import SimpleNamespace
 
+from autowork_core.common.uia_tree import (
+    iter_descendants_via_children,
+    iter_self_and_descendants_via_children,
+)
 from autowork_core.common.winauto_xpath import find_by_xpath
 from autowork_core.utils.debug_tools.common import make_xpath_predicate
 from autowork_core.utils.debug_tools.recorder.models import SCHEMA_VERSION, public_dict
@@ -566,7 +570,7 @@ def _snapshot_stability(
         if targets is None:
             targets = [
                 item
-                for item in [root, *root.descendants()]
+                for item in iter_self_and_descendants_via_children(root)
                 if _snapshot_target_matches(item, target)
             ]
             target_cache[target_key] = targets
@@ -626,7 +630,7 @@ def _snapshot_locator_matches(root, locator):
     }
     return [
         item
-        for item in root.descendants()
+        for item in iter_descendants_via_children(root)
         if _snapshot_criteria_match(item, criteria)
     ]
 
@@ -1062,7 +1066,7 @@ def _stable_snapshot_index_fallback(
         if targets is None:
             targets = [
                 item
-                for item in [root, *root.descendants()]
+                for item in iter_self_and_descendants_via_children(root)
                 if _snapshot_target_matches(item, target)
             ]
             target_cache[target_key] = targets
@@ -1098,7 +1102,7 @@ def _stable_snapshot_index_fallback(
     for root in snapshot_roots:
         targets = [
             item
-            for item in [root, *root.descendants()]
+            for item in iter_self_and_descendants_via_children(root)
             if _snapshot_target_matches(item, target)
         ]
         try:

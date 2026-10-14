@@ -6,7 +6,7 @@ from autowork_core.actions.action_helper import (
     _target_to_wrapper,
 )
 from autowork_core.common.element_finder import get_element
-from autowork_core.common.locator import _restore_cached_root
+from autowork_core.common.locator import _restore_cached_root, resolve_window_root
 from autowork_core.common.log_helper import log_call
 from autowork_core.common.root_store import RootEntry
 
@@ -27,13 +27,17 @@ def bring_to_front(context, locator, wait_type="exists", wait_timeout=5, visual_
         visual_timeout=visual_timeout,
         activate=activate,
     )
-    cached_handle = _cached_top_root_handle(context, locator)
-    if cached_handle:
+    top_window = resolve_window_root(context, locator, include_hidden=True)
+    window_prepared = top_window is not None
+    if window_prepared:
         if activate:
-            _activate_handle(cached_handle)
+            _restore_window(top_window)
+            try:
+                _force_foreground(top_window)
+            except Exception:
+                pass
         else:
-            _send_handle_to_front(cached_handle)
-        return Desktop(backend="uia").window(handle=cached_handle)
+            _send_window_to_front(top_window)
 
     target = get_element(
         context,
@@ -58,15 +62,16 @@ def bring_to_front(context, locator, wait_type="exists", wait_timeout=5, visual_
     top_window = _top_level_wrapper(target)
 
     if not activate:
-        _send_window_to_front(top_window)
+        if not window_prepared:
+            _send_window_to_front(top_window)
         return target
 
-    _restore_window(top_window)
-
-    try:
-        _force_foreground(top_window)
-    except Exception:
-        pass
+    if not window_prepared:
+        _restore_window(top_window)
+        try:
+            _force_foreground(top_window)
+        except Exception:
+            pass
 
     try:
         target.set_focus()

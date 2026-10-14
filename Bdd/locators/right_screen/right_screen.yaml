@@ -6,7 +6,6 @@ right_screen_window:
   screen:
     role: rightmost
 
-
 # # 不限定屏幕，在所有屏幕上查找
 # screen: all
 # screen:
@@ -20,3 +19,11 @@ right_screen_window:
 # screen:
   # device: '\\.\DISPLAY1'
 #  id: 1
+
+Completed_tab_button: {root: 'right_screen_window', by: 'xpath',value: "//Text[@auto_id='TextBlock_1'][@name='Completed']"}
+Review_tab_button: {root: 'right_screen_window', by: 'xpath',value: "//Text[@auto_id='TextBlock_1'][@name='Review']"}
+IV_tab_button: {root: 'right_screen_window', by: 'xpath',value: "//Text[@auto_id='TextBlock_1'][@name='IV']"}
+Filming_tab_button: {root: 'right_screen_window', by: 'xpath',value: "//Text[@auto_id='TextBlock_1'][@name='Filming']"}
+recon_tab_button: {root: 'right_screen_window', by: 'xpath',value: "//RadioButton[@auto_id='RadioButton_1'][4]"}
+report_tab_button: {root: 'right_screen_window', by: 'xpath',value: "//RadioButton[@auto_id='RadioButton_1'][5]"}
+

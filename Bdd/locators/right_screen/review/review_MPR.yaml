@@ -1,0 +1,31 @@
+# toolbar -------------------------------
+MRP_ShowCrosshairs_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='ShowCrosshair']" }
+MRP_OrthogonalPlane_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='PlanarMode']" }
+
+
+# Series -------------------------------
+MRP_Series1_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][0]" }
+
+# Create Movie or Series ------------------------------
+  # 1. Define Batch Range ------------------------------
+MRP_CMoS_StartRange_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='rangeStartButton']" }
+MRP_CMoS_EndRange_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='rangeEndButton']" }
+MRP_CMoS_AllImages_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='rangeAllButton']" }
+MRP_CMoS_showPreset_selectbox: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@auto_id='PART_IBatchComboBox']" }
+
+  # 2. Set Batch Parameters ------------------------------
+MRP_CMoS_SliceThickness_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_TextBox'][0]" }
+MRP_CMoS_SliceIncrement_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_EditableTextBox']" }
+MRP_CMoS_showSliceIncrement_selectbox: {root: 'DICOM_window' ,by: 'xpath' ,value: "//ComboBox[@auto_id='PART_MPRXIncreament']" }
+MRP_CMoS_No_of_Images_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_TextBox'][1]" }
+
+  # 3. Add to Batch ------------------------------
+MRP_CMoS_InformationImage_option: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Information Image']" }
+MRP_CMoS_MiniImage_option: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Mini Image']" }
+MRP_CMoS_ReferenceImage_option: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Reference Image']" }
+
+  # 4. Preview Batch ------------------------------
+MRP_CMoS_Preview_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='PART_ToggleButton']" }
+MRP_CMoS_SaveBatch_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Save Batch']" }
+MRP_CMoS_Reset_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Reset']" }
+

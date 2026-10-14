@@ -1,0 +1,55 @@
+# New Patient ----------------------------------------
+SameAsPrevious_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='SameAsPrevious']"}
+Anonymous_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='Anonymous']"}
+
+PatientId_Edit: {root: 'left_screen_window', by: 'xpath',value: "//Edit[@auto_id='PatientIdTextBox']"}
+LastName_Edit: {root: 'left_screen_window', by: 'xpath',value: "//Edit[@auto_id='LastNameTextBox']"}
+FirstName_Edit: {root: 'left_screen_window', by: 'xpath',value: "//Edit[@auto_id='FirstNameTextBox']"}
+
+
+
+Child_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ChildRadioButton']"}
+Adult_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='AdultRadioButton']"}
+
+
+# Select Exam Card ----------------------------------------
+Suggested_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Suggested']"}
+Abdomen_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Abdomen']"}
+Cardiac_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Cardiac']"}
+CTA_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='CTA']"}
+Ear_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Ear']"}
+Head_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Head']"}
+Biopsy_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Biopsy']"}
+Thorax_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Thorax']"}
+Neck_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Neck']"}
+Extremity_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Extremity']"}
+Pelvis_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Pelvis']"}
+Spine_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Spine']"}
+Emergency_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ExamGroupName'][@name='Emergency']"}
+
+Reference_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='Reference']"}
+User_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='User']"}
+
+# Select Patient Orientation ----------------------------------------
+Supine_Prone_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='TextBlock_1'][@name='Supine/Prone']"}
+Decubitus_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='TextBlock_1'][@name='Decubitus']"}
+
+posture_option1: {root: 'left_screen_window', by: 'xpath',value: "//Tab[@auto_id='TabControl_1']//RadioButton[0]"}
+posture_option2: {root: 'left_screen_window', by: 'xpath',value: "//Tab[@auto_id='TabControl_1']//RadioButton[1]"}
+posture_option3: {root: 'left_screen_window', by: 'xpath',value: "//Tab[@auto_id='TabControl_1']//RadioButton[2]"}
+posture_option4: {root: 'left_screen_window', by: 'xpath',value: "//Tab[@auto_id='TabControl_1']//RadioButton[3]"}
+
+# other ----------------------------------------
+Start_Exam_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='Start Exam']"}
+
+
+
+
+# Protocol ----------------------------------------
+  # Head ----------------------------------------
+Head_BrainAxial420_protocol: {root: 'left_screen_window', by: 'xpath',value: "//List[@auto_id='ExamCardsListBox']//Text[@name='Brain Axial 420']"}
+Head_BrainHelical_protocol: {root: 'left_screen_window', by: 'xpath',value: "//List[@auto_id='ExamCardsListBox']//Text[@name='Brain Helical']"}
+
+
+
+

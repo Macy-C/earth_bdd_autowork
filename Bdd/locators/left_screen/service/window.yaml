@@ -1,0 +1,21 @@
+# switch / exit ------------------------------
+SwitchUser_button: {root: 'left_screen_window', by: 'xpath',value: "//Button[@name='Switch User']"}
+ExitConsole_button: {root: 'left_screen_window', by: 'xpath',value: "//Button[@name='Exit Console']"}
+
+
+# Daily / Advanced button ------------------------------
+Daily_button: {root: 'left_screen_window', by: 'xpath',value: "//RadioButton[@name='Daily']"}
+Advanced_button: {root: 'left_screen_window', by: 'xpath',value: "//RadioButton[@name='Advanced']"}
+
+# Daily options ------------------------------
+ShortTubeConditioning_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ButtonContent'][@name='Short Tube Conditioning']"}
+AuditTrail_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ButtonContent'][@name='Audit Trail']"}
+BugReports_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ButtonContent'][@name='Bug Reports']"}
+DoseCheckReport_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ButtonContent'][@name='Dose Check Report']"}
+QA_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ButtonContent'][@name='QA']"}
+Daily_SystemSetting_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ButtonContent'][@name='System Setting']"}
+ExamCardManager_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ButtonContent'][@name='Exam Card Manager']"}
+
+# Advanced options ------------------------------
+Advanced_SystemSetting_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='ButtonContent'][@name='System Setting']"}
+

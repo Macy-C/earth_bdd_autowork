@@ -158,7 +158,7 @@ def _audit_candidate(
     if region_rectangle is None:
         errors.append("授权 Region 缺失或无效")
     if source_monitor is None:
-        errors.append("source frame 缺少 monitor geometry")
+        errors.append("source frame 缺少 monitor geometry.yaml")
     template_image = None
     if not errors:
         try:
@@ -264,7 +264,7 @@ def _validate_frame(
     path = _frame_path(take_dir, relative, errors)
     monitor = _monitor(frame.get("monitor"))
     if monitor is None:
-        errors.append(f"frame 缺少 monitor geometry: {relative}")
+        errors.append(f"frame 缺少 monitor geometry.yaml: {relative}")
     candidates = []
     target_box = None
     if not errors:

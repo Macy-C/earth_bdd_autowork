@@ -1,0 +1,33 @@
+# toolbar -------------------------------
+Volume_ShowRelatedPosition_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='RelatePositionButton']" }
+Volume_CalculateVolume_tool: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='Calculate Volume']" }
+
+# tools --------------------------
+
+# Series -------------------------------
+Volume_Series1_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][0]" }
+Volume_Series2_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][1]" }
+Volume_Series3_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][2]" }
+
+# Create Movie or Series ------------------------------
+  # 1. Define Batch Range ------------------------------
+Volume_CMoS_SingleAxis_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@auto_id='singleAxisRadioButton2']" }
+Volume_CMoS_freeStyle_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@auto_id='freeStyleRadioButton2']" }
+
+Volume_CMoS_Rotation_up_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@auto_id='UpToggleButton']" }
+Volume_CMoS_Rotation_bottom_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@auto_id='bottomToggleButton']" }
+Volume_CMoS_Rotation_left_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@auto_id='leftToggleButton']" }
+Volume_CMoS_Rotation_right_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//RadioButton[@auto_id='rightToggleButton']" }
+
+Volume_CMoS_RotationRange_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_TextBox'][0]" }
+
+  # 2. Set Batch Parameters ------------------------------
+Volume_CMoS_No_of_Images_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_TextBox'][1]" }
+
+  # 3. Add to Batch ------------------------------
+MRP_CMoS_InformationImage_option: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Information Image']" }
+
+  # 4. Preview Batch ------------------------------
+MRP_CMoS_Preview_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='PART_ToggleButton']" }
+MRP_CMoS_SaveBatch_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Save Batch']" }
+MRP_CMoS_Reset_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Reset']" }

@@ -3,13 +3,15 @@ from pywinauto import Desktop, findwindows
 import re
 from time import monotonic, sleep
 from autowork_core.common.compile import (
+    CHILD_FILTER_KEYS,
     CompiledLocator,
     _get_locator_separator_index,
     compile_locator,
     normalize_child_criteria,
     parse_pos_coordinates,
 )
-from autowork_core.common.element_properties import read_accessible_name
+from autowork_core.common.element_properties import matches_property_value, read_accessible_name
+from autowork_core.common.element_locator_properties import get_locator_property
 from autowork_core.common.log_helper import log_call
 from autowork_core.common.ocr_engine import find_ocr_text
 from autowork_core.common.pic_engine import find_pic
@@ -20,13 +22,23 @@ from autowork_core.common.runtime_diagnostics import (
     attach_runtime_diagnostic,
     runtime_diagnostic_from_exception,
 )
+from autowork_core.common.uia_tree import iter_descendants_via_children
 from autowork_core.common.wait_coordinator import poll_value
 from autowork_core.common.wait_policy import WaitPolicy, normalize_wait_state
 from autowork_core.common.winauto_xpath import find_by_xpath
 from autowork_core.utils.visual_marker import mark_visual_target
 from config.settings import settings
 from pywinauto.base_wrapper import BaseWrapper
+from pywinauto.controls.uiawrapper import UIAWrapper
 from pywinauto.findwindows import ElementAmbiguousError
+from pywinauto.uia_element_info import UIAElementInfo
+
+
+_PYWINAUTO_CHILD_FILTER_KEYS = frozenset({
+    "auto_id", "title", "title_re", "control_type",
+    "class_name", "class_name_re", "process", "handle",
+    "depth", "framework_id", "visible_only", "enabled_only",
+})
 
 try:
     import win32api
@@ -82,7 +94,12 @@ def _pywinauto_name_criteria(criteria):
     native = dict(criteria)
     title = native.pop("title", None)
     title_re = native.pop("title_re", None)
-    if title is None and title_re is None:
+    extended = {
+        key: native.pop(key)
+        for key in tuple(native)
+        if key in CHILD_FILTER_KEYS and key not in _PYWINAUTO_CHILD_FILTER_KEYS
+    }
+    if title is None and title_re is None and not extended:
         return native
 
     existing_predicate = native.pop("predicate_func", None)
@@ -91,10 +108,16 @@ def _pywinauto_name_criteria(criteria):
     def matches_name(element):
         if existing_predicate is not None and not existing_predicate(element):
             return False
-        actual = _element_name(element)
-        if title is not None and str(actual) != str(title):
-            return False
-        return title_pattern is None or title_pattern.match(str(actual)) is not None
+        if title is not None or title_re is not None:
+            actual = _element_name(element)
+            if title is not None and str(actual) != str(title):
+                return False
+            if title_pattern is not None and title_pattern.match(str(actual)) is None:
+                return False
+        if extended:
+            candidate = UIAWrapper(element) if isinstance(element, UIAElementInfo) else element
+            return _element_matches_criteria(candidate, extended)
+        return True
 
     native["predicate_func"] = matches_name
     return native
@@ -125,7 +148,7 @@ def _find_by_child_window(root, kwargs, first_only, control_type, timeout=0, int
 
     if hasattr(root, "wrapper_object"):
         root = root.wrapper_object()
-    return _by_descendants_get_elements(root, kwargs)
+    return _by_child_tree_get_elements(root, kwargs)
 
 
 def _has_target(target, timeout=0):
@@ -159,7 +182,7 @@ def _find_child_from_wrapper_root(root, kwargs, first_only, wait_type, timeout, 
 
     def probe():
         nonlocal last_candidate_count
-        candidates = _by_descendants_get_elements(root, dict(kwargs))
+        candidates = _by_child_tree_get_elements(root, dict(kwargs))
         last_candidate_count = len(candidates)
         if first_only and len(candidates) > 1:
             error = ElementAmbiguousError(
@@ -236,24 +259,22 @@ def _to_bool(value):
     return bool(value)
 
 
-def _by_descendants_get_elements(root, kwargs):
+def _by_child_tree_get_elements(root, kwargs):
     """
     在 BaseWrapper root 下执行 child_window 等价查找，返回 wrapper 列表。
 
-    wrapper root 已经是解析后的容器，这里只通过 root.descendants()
+    wrapper root 已经是解析后的容器，这里通过 children() 递归
     获取 wrapper，再做 child locator 需要的条件过滤，保证返回值仍可被
     wait/click/text 直接使用。
     """
     kwargs = dict(kwargs or {})
-    if not hasattr(root, "descendants"):
-        raise AttributeError(f"root 不支持 descendants(): {root!r}")
+    if not hasattr(root, "children"):
+        raise AttributeError(f"root 不支持 children(): {root!r}")
 
-    descendant_kwargs = {}
-    for key in ("control_type", "class_name", "process", "depth"):
-        if key in kwargs and kwargs[key] is not None:
-            descendant_kwargs[key] = kwargs[key]
-
-    candidates = root.descendants(**descendant_kwargs)
+    candidates = list(iter_descendants_via_children(
+        root,
+        max_depth=kwargs.get("depth"),
+    ))
 
     result = [element for element in candidates if _element_matches_criteria(element, kwargs)]
 
@@ -288,8 +309,8 @@ def _find_by_pic(kwargs, timeout, pos=5, monitor=None):
 def _find_by_ocr(kwargs, timeout, monitor=None, debug_on_fail=None):
     if monitor is not None:
         monitor = {
-            "left": max(0, monitor["left"] - 20),
-            "top": max(0, monitor["top"] - 10),
+            "left": monitor["left"] - 20,
+            "top": monitor["top"] - 10,
             "width": monitor["width"] + 40,
             "height": monitor["height"] + 20,
         }
@@ -780,7 +801,7 @@ def _iter_screen_top_window_candidates(backend, criteria):
         return
 
     try:
-        windows = desktop.windows()
+        windows = desktop.windows(visible_only=visible_only)
     except Exception:
         windows = []
     for wrapper in windows:
@@ -870,15 +891,21 @@ def _resolve_screen_filtered_top_root(
         screen_selector,
         *,
         root_name=None,
+        include_hidden=False,
 ):
-    if not screen_selector or _screen_selector_is_all(screen_selector):
+    if not include_hidden and (not screen_selector or _screen_selector_is_all(screen_selector)):
         return None
 
+    enumeration_criteria = dict(criteria)
+    identity_criteria = dict(criteria)
+    if include_hidden:
+        enumeration_criteria["visible_only"] = False
+        identity_criteria.pop("visible_only", None)
     matches = []
     candidate_diagnostics = []
     for root, wrapper in _iter_screen_top_window_candidates(
             backend,
-            criteria,
+            enumeration_criteria,
     ):
         try:
             screen_ok = _element_matches_screen_selector(wrapper, screen_selector)
@@ -889,7 +916,7 @@ def _resolve_screen_filtered_top_root(
             candidate_diagnostics.append((wrapper, False, None, None))
             continue
         try:
-            criteria_ok = _candidate_matches_top_root_criteria(wrapper, criteria)
+            criteria_ok = _candidate_matches_top_root_criteria(wrapper, identity_criteria)
         except Exception as exc:
             candidate_diagnostics.append((wrapper, True, None, f"criteria: {exc}"))
             continue
@@ -918,15 +945,16 @@ def _root_spec_from_handle(entry):
     return None
 
 
-def _root_spec_from_criteria(entry):
+def _root_spec_from_criteria(entry, *, include_hidden=False):
     if entry is None:
         return None
-    if entry.screen_selector and not _screen_selector_is_all(entry.screen_selector):
+    if include_hidden or (entry.screen_selector and not _screen_selector_is_all(entry.screen_selector)):
         root = _resolve_screen_filtered_top_root(
             entry.backend,
             entry.criteria,
             entry.screen_selector,
             root_name=entry.name,
+            include_hidden=include_hidden,
         )
         if root is not None:
             return root
@@ -977,28 +1005,7 @@ def _native_uia_window_bridge_root(backend, criteria):
 
 
 def _element_value(element, key):
-    source = getattr(element, "element_info", element)
-    if key == "auto_id":
-        return getattr(source, "automation_id", None)
-    if key == "title":
-        return _element_name(element)
-    if key == "class_name":
-        return getattr(source, "class_name", None)
-    if key == "control_type":
-        return getattr(source, "control_type", None)
-    if key == "process":
-        return getattr(source, "process_id", None)
-    if key == "handle":
-        return getattr(source, "handle", None)
-    if key == "framework_id":
-        return getattr(source, "framework_id", None)
-    if key in ("visible", "visible_only"):
-        visible = getattr(element, "is_visible", None)
-        return visible() if callable(visible) else getattr(source, "visible", None)
-    if key in ("enabled", "enabled_only"):
-        enabled = getattr(element, "is_enabled", None)
-        return enabled() if callable(enabled) else getattr(source, "enabled", None)
-    return None
+    return get_locator_property(element, key)
 
 
 def _element_matches_criteria(
@@ -1007,7 +1014,10 @@ def _element_matches_criteria(
         *,
         ignore_dynamic_state=False,
 ):
-    for key, expected in criteria.items():
+    for key, expected in sorted(
+        criteria.items(),
+        key=lambda item: item[0] not in _PYWINAUTO_CHILD_FILTER_KEYS,
+    ):
         if key in {"backend", "parent", "top_level_only", "depth", "found_index"}:
             continue
         if key == "predicate_func":
@@ -1033,7 +1043,12 @@ def _element_matches_criteria(
                 return False
             continue
         actual = _element_value(element, key)
-        if actual is None or str(actual) != str(expected):
+        if actual is None:
+            return False
+        if isinstance(actual, (list, tuple, set)):
+            if not matches_property_value(actual, expected):
+                return False
+        elif str(actual) != str(expected):
             return False
     return True
 
@@ -1119,7 +1134,7 @@ def _finalize_successful_find(windows, locator, self_top_root=False, confirmed=F
         _upgrade_named_root_entry(windows, locator)
 
 
-def _restore_cached_root(windows, name):
+def _restore_cached_root(windows, name, *, include_hidden=False):
     entry = windows.get_entry(name)
     if entry is None:
         return RootResolveResult(root=windows.get(name))
@@ -1129,22 +1144,22 @@ def _restore_cached_root(windows, name):
             root = _restore_top_root_from_entry(entry)
             if root is not None:
                 return RootResolveResult(root=root, stale_entry=entry)
-            entry.mark_cold(_root_spec_from_criteria(entry))
+            entry.mark_cold(_root_spec_from_criteria(entry, include_hidden=include_hidden))
             return RootResolveResult(root=entry.root, stale_entry=entry)
 
-        entry.root = _root_spec_from_criteria(entry)
+        entry.root = _root_spec_from_criteria(entry, include_hidden=include_hidden)
         entry.state = "cold"
         return RootResolveResult(root=entry.root, stale_entry=entry)
 
     return RootResolveResult(root=entry.root)
 
 
-def _switch_root(context, locator: CompiledLocator):
+def _switch_root(context, locator: CompiledLocator, *, include_hidden=False):
     """恢复或创建 locator 直接引用的顶层 Root。"""
     windows = context.autowork_scenario.windows
     cache_name = locator.root_cache_name or locator.root_name
     if locator.root_name and windows.has(cache_name):
-        root_result = _restore_cached_root(windows, cache_name)
+        root_result = _restore_cached_root(windows, cache_name, include_hidden=include_hidden)
         if root_result.root is not None:
             windows.set_last(root_result.root)
             logger.debug(f"^^^^^^ 命中 root 缓存 -> {cache_name}")
@@ -1167,7 +1182,7 @@ def _switch_root(context, locator: CompiledLocator):
     if not _is_self_top_root_locator(root_locator):
         raise ValueError(f"locator root 必须是顶层窗口: {locator.root_name}")
 
-    root_result = _resolve_self_top_root(windows, root_locator)
+    root_result = _resolve_self_top_root(windows, root_locator, include_hidden=include_hidden)
     if root_result.root is not None:
         windows.set_last(root_result.root)
         logger.debug(f"^^^^^^ 已切换顶层 root -> {locator.root_name}")
@@ -1191,7 +1206,7 @@ def _is_self_top_root_locator(locator):
     return control_type == "window"
 
 
-def _resolve_self_top_root(windows, locator):
+def _resolve_self_top_root(windows, locator, *, include_hidden=False):
     if not isinstance(locator.criteria, dict):
         raise RuntimeError(
             f"顶层 root 必须是 dict 定位: root={locator.name}, criteria={locator.criteria}"
@@ -1199,7 +1214,7 @@ def _resolve_self_top_root(windows, locator):
 
     cache_name = locator.root_cache_name or locator.name
     if cache_name and windows.has(cache_name):
-        root_result = _restore_cached_root(windows, cache_name)
+        root_result = _restore_cached_root(windows, cache_name, include_hidden=include_hidden)
         if root_result.root is not None:
             windows.set_last(root_result.root)
             logger.debug(f"^^^^^^ 命中 root 缓存 -> {cache_name}")
@@ -1213,6 +1228,7 @@ def _resolve_self_top_root(windows, locator):
         criteria,
         screen_selector,
         root_name=locator.name,
+        include_hidden=include_hidden,
     )
     if root is None:
         native_bridge = _native_uia_window_bridge_root(backend, criteria)
@@ -1244,6 +1260,28 @@ def _resolve_self_top_root(windows, locator):
 
     windows.set_last(root)
     return RootResolveResult(root=root, stale_entry=entry)
+
+
+def resolve_window_root(context, locator, *, include_hidden=False):
+    """Resolve the owning window without activating it; position targets return None."""
+    compiled = locator
+    if not isinstance(compiled, CompiledLocator):
+        compiled = _bind_runtime_root_if_needed(context, compile_locator(compiled))
+    if compiled.returns_position:
+        return None
+
+    windows = context.autowork_scenario.windows
+    self_top_root = _is_self_top_root_locator(compiled)
+    if self_top_root:
+        result = _resolve_self_top_root(windows, compiled, include_hidden=include_hidden)
+    else:
+        result = _switch_root(context, compiled, include_hidden=include_hidden)
+    root = result.root
+    window = root.wrapper_object() if hasattr(root, "wrapper_object") else root
+    if window is None:
+        raise LookupError(f"未找到目标所属窗口: {compiled.name or compiled.root_name}")
+    _finalize_successful_find(windows, compiled, self_top_root=self_top_root, confirmed=True)
+    return window
 
 
 def _bind_runtime_root_if_needed(context, locator: CompiledLocator):

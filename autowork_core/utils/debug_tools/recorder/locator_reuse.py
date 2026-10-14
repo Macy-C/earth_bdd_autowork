@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from autowork_core.common.compile import compile_locator
+from autowork_core.common.uia_tree import iter_self_and_descendants_via_children
 from autowork_core.utils.debug_tools.recorder.analysis import (
     _snapshot_locator_matches,
     _snapshot_root,
@@ -603,7 +604,7 @@ def _match_snapshot_target(snapshots, target, locator):
     for root in snapshots:
         targets = [
             item
-            for item in [root, *root.descendants()]
+            for item in iter_self_and_descendants_via_children(root)
             if _snapshot_target_matches(item, target)
         ]
         if not targets:

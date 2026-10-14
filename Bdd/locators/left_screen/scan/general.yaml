@@ -1,0 +1,2 @@
+general_Collimation_Combobox: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='General'][0]/parent::Custom//Text[@name='Collimation']/next::ComboBox"}
+general_Cycles_Combobox: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='General'][0]/parent::Custom//Text[@name='Cycles']/next::ComboBox"}

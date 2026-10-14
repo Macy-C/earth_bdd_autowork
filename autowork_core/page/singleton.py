@@ -155,9 +155,9 @@ class BasePage:
                 yield file_name
 
     # ========================================== click ===============================================
-    def click(self, locator_or_name, offset_x=None, offset_y=None, wait_type="visible", wait_timeout=5, visual_timeout=10):
+    def click(self, locator_or_name, offset_x=None, offset_y=None, wait_type="visible", wait_timeout=5, visual_timeout=10, *, hold_duration: float | None = None):
         locator = self.get_locator(locator_or_name)
-        return click(self.ctx, locator, offset_x=offset_x, offset_y=offset_y, wait_type=wait_type, wait_timeout=wait_timeout, visual_timeout=visual_timeout)
+        return click(self.ctx, locator, offset_x=offset_x, offset_y=offset_y, wait_type=wait_type, wait_timeout=wait_timeout, visual_timeout=visual_timeout, hold_duration=hold_duration)
 
     def double_click(self, locator_or_name, wait_type="visible", wait_timeout=5, visual_timeout=10):
         locator = self.get_locator(locator_or_name)

@@ -53,7 +53,7 @@ def prepare_scenario(context, scenario):
     """
     auto_mode = settings.app_launch_mode != "attach"
     if _uses_gantry(scenario):
-        from Bdd.page_obj.simulator.page import SimulatorPage
+        from Bdd.page_obj.simulator_controller.page import SimulatorPage
 
         if auto_mode:
             sleep(2)
@@ -61,7 +61,7 @@ def prepare_scenario(context, scenario):
         simulator = get_page(context, SimulatorPage)
         context.autowork_scenario.simulator = simulator
         try:
-            # simulator.initialize(auto_mode=auto_mode, timeout=60)
+            # earth_platform_simulator.initialize(auto_mode=auto_mode, timeout=60)
             simulator.wait_until_open(timeout=20)
         except Exception:
             cleanup_scenario(context, scenario)
@@ -79,10 +79,10 @@ def cleanup_scenario(context, scenario):
     state = context.autowork_scenario
     state.simulator = None
 
-    # simulator = getattr(state, "simulator", None)
+    # earth_platform_simulator = getattr(state, "earth_platform_simulator", None)
     # try:
-    #     if simulator is not None:
-    #         simulator.close()
+    #     if earth_platform_simulator is not None:
+    #         earth_platform_simulator.close()
     # except Exception as error:
     #     logger.warning(f"释放 SimulatorPage 失败: {error}")
 

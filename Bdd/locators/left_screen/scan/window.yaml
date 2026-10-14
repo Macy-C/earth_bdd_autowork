@@ -1,0 +1,14 @@
+ShowAll_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='Show All...']"}
+GO_button: {root: 'left_screen_window', by: 'xpath',value: "//Button[@auto_id='control:FocusDisabledButton_1'][@name='GO']"}
+EndExam_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='End Exam']"}
+Repeat_button: {root: 'left_screen_window', by: 'xpath',value: "//Button[@auto_id='Button_1'][@name='Repeat']"}
+
+
+# protocol ------------------
+protocol1_option: {root: 'left_screen_window', by: 'xpath',value: "//Tree[@auto_id='TreeView_1']/TreeItem[0]/Text[-1]"}
+protocol2_option: {root: 'left_screen_window', by: 'xpath',value: "//Tree[@auto_id='TreeView_1']/TreeItem[1]/Text[-1]"}
+protocol3_option: {root: 'left_screen_window', by: 'xpath',value: "//Tree[@auto_id='TreeView_1']/TreeItem[2]/Text[-1]"}
+protocol4_option: {root: 'left_screen_window', by: 'xpath',value: "//Tree[@auto_id='TreeView_1']/TreeItem[3]/Text[-1]"}
+
+# other ------------------
+

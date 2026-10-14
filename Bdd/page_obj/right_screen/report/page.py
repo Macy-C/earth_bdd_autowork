@@ -1,6 +1,6 @@
-from autowork_core.page import WindowView
+from autowork_core.page import WindowPage
 
 
-class ReportPage(WindowView):
-    locator_file = "right_screen/report/window.yaml"
-    active_locator = None
+class ReportPage(WindowPage):
+    root_locator_file = "right_screen/report/window.yaml"
+    root_locator = "Report_window"

@@ -1,0 +1,22 @@
+# Series -------------------------------
+Endo_Series1_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][0]" }
+Endo_Series2_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][1]" }
+Endo_Series3_img: {root: 'DICOM_window' ,by: 'xpath' ,value: "//TreeItem[@name='PNMS.MIF.Data.GenericSeries'][2]" }
+
+# Create Movie or Series ------------------------------
+  # 1. Define Batch Range ------------------------------
+Endo_CMoS_StartRange_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='rangeStartButton']" }
+Endo_CMoS_EndRange_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='rangeEndButton']" }
+Endo_CMoS_AllImages_Button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='rangeAllButton']" }
+
+  # 2. Set Batch Parameters ------------------------------
+Endo_CMoS_SliceIncrement_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_TextBox'][0]" }
+Endo_CMoS_No_of_Images_edit: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Edit[@auto_id='PART_TextBox'][1]" }
+
+  # 3. Add to Batch ------------------------------
+Endo_CMoS_InformationImage_option: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Information Image']" }
+
+  # 4. Preview Batch ------------------------------
+Endo_CMoS_Preview_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Button[@auto_id='PART_ToggleButton']" }
+Endo_CMoS_SaveBatch_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Save Batch']" }
+Endo_CMoS_Reset_button: {root: 'DICOM_window' ,by: 'xpath' ,value: "//Text[@name='Reset']" }

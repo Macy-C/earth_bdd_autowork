@@ -1,7 +1,7 @@
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional
 from autowork_core.utils.bus import normalize
 
@@ -143,6 +143,15 @@ KEY_MAP = {
     "visible": "visible",
     "enabled": "enabled",
 
+    "localized_control_type": "localized_control_type",
+    "localized_type": "localized_control_type",
+    "help_text": "help_text",
+    "helptext": "help_text",
+    "accelerator_key": "accelerator_key",
+    "access_key": "access_key",
+    "item_status": "item_status",
+    "item_type": "item_type",
+
     # =========================
     # 特殊属性
     # descendants / xpath 自定义过滤时用
@@ -152,6 +161,9 @@ KEY_MAP = {
 
     "value.value": "value.value",
     "value_value": "value.value",
+    "selection": "selection",
+    "Selection.Selection": "selection",
+    "selection.selection": "selection",
 }
 
 XPATH_KEY_MAP = {
@@ -163,6 +175,8 @@ XPATH_KEY_MAP = {
     "value_value": "value.value",
     "value.value": "value.value",
     "value.isreadonly": "value.isreadonly",
+    "selection": "selection",
+    "selection.selection": "selection",
     "value.is_readonly": "value.isreadonly",
     "value_isreadonly": "value.isreadonly",
     "value_is_readonly": "value.isreadonly",
@@ -247,6 +261,28 @@ STRING_CHILD_KEYS = {
     "parent",
     "process",
     "handle",
+    "localized_control_type",
+    "help_text",
+    "accelerator_key",
+    "access_key",
+    "item_status",
+    "item_type",
+    "is_offscreen",
+    "is_keyboard_focusable",
+    "has_keyboard_focus",
+    "provider_description",
+    "value.value",
+    "value.isreadonly",
+    "selection",
+    "legacyiaccessible.name",
+    "legacyiaccessible.value",
+    "legacyiaccessible.role",
+    "legacyiaccessible.state",
+    "legacyiaccessible.description",
+    "legacyiaccessible.help",
+    "legacyiaccessible.defaultaction",
+    "legacyiaccessible.keyboardshortcut",
+    "legacyiaccessible.childid",
 }
 
 CHILD_FILTER_KEYS = frozenset({
@@ -261,6 +297,28 @@ CHILD_FILTER_KEYS = frozenset({
     "handle",
     "depth",
     "framework_id",
+    "localized_control_type",
+    "help_text",
+    "accelerator_key",
+    "access_key",
+    "item_status",
+    "item_type",
+    "is_offscreen",
+    "is_keyboard_focusable",
+    "has_keyboard_focus",
+    "provider_description",
+    "value.value",
+    "value.isreadonly",
+    "selection",
+    "legacyiaccessible.name",
+    "legacyiaccessible.value",
+    "legacyiaccessible.role",
+    "legacyiaccessible.state",
+    "legacyiaccessible.description",
+    "legacyiaccessible.help",
+    "legacyiaccessible.defaultaction",
+    "legacyiaccessible.keyboardshortcut",
+    "legacyiaccessible.childid",
     "visible",
     "visible_only",
     "enabled",
@@ -775,6 +833,40 @@ def compile_locators(data, external_locators=None):
     return compiled_map
 
 
+def bind_window_locator(locator, locators, root_name):
+    if locator.prefix in {"default", "child", "xpath"} and not locator.root_name:
+        raise ValueError(f"窗口包结构 locator[{locator.name}] 缺少窗口 root")
+    if locator.prefix in {"ocr", "pic"} and not locator.region_name:
+        raise ValueError(f"窗口包视觉 locator[{locator.name}] 缺少本地 region")
+    root_locator = locator.root_locator
+    root_cache_name = locator.root_cache_name
+    region_locator = locator.region_locator
+    if locator.root_name:
+        root_locator = locators.get(locator.root_name)
+        if root_locator is None:
+            raise KeyError(f"窗口包 root 不存在: {locator.root_name}")
+        if not _is_top_level_locator(root_locator):
+            raise ValueError(f"locator root 必须是顶层窗口: {locator.root_name}")
+        if locator.root_name != root_name:
+            raise ValueError(
+                f"locator[{locator.name}] 不属于窗口 root {root_name}: "
+                f"{locator.root_name}"
+            )
+        root_cache_name = root_locator.root_cache_name
+    if locator.region_name:
+        region_locator = locators.get(locator.region_name)
+        if region_locator is None:
+            raise KeyError(f"窗口包 region 不存在: {locator.region_name}")
+        if region_locator.prefix not in {"child", "xpath"}:
+            raise ValueError(f"locator region 必须是 Child/XPath: {locator.region_name}")
+    return replace(
+        locator,
+        root_locator=root_locator,
+        root_cache_name=root_cache_name,
+        region_locator=region_locator,
+    )
+
+
 def compile_window_locator_package(
     root_locators,
     view_locators=(),
@@ -826,29 +918,11 @@ def compile_window_locator_package(
     root_cache_name = f"{root_name}:{cache_digest}"
     root_locator = compiled[root_name]
     root_locator.root_cache_name = root_cache_name
-    for name, locator in compiled.items():
-        if name == root_name:
-            continue
-        if locator.prefix in {"default", "child", "xpath"} and not (
-            locator.root_name
-        ):
-            raise ValueError(
-                f"窗口包结构 locator[{name}] 缺少窗口 root"
-            )
-        if locator.prefix in {"ocr", "pic"} and not locator.region_name:
-            raise ValueError(
-                f"窗口包视觉 locator[{name}] 缺少本地 region"
-            )
-        if locator.root_name and locator.root_name != root_name:
-            raise ValueError(
-                f"locator[{name}] 不属于窗口 root {root_name}: "
-                f"{locator.root_name}"
-            )
-        if locator.root_name:
-            locator.root_locator = root_locator
-            locator.root_cache_name = root_cache_name
-        if locator.region_name:
-            locator.region_locator = compiled[locator.region_name]
+    for has_region in (False, True):
+        for name, locator in compiled.items():
+            if name == root_name or bool(locator.region_name) != has_region:
+                continue
+            compiled[name] = bind_window_locator(locator, compiled, root_name)
 
     return CompiledWindowLocatorPackage(
         root_name=root_name,

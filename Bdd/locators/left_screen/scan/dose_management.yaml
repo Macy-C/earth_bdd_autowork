@@ -1,0 +1,4 @@
+DoseRightIndexDM_option: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='DoseRight Index']"}
+
+DM_kV_Combobox: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='Dose Management'][0]/parent::Custom//Text[@name='kV']/next::ComboBox"}
+DM_mAs_Combobox: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='Dose Management'][0]/parent::Custom//Text[@name='mAs(mA)']/next::ComboBox"}

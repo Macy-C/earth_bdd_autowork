@@ -1,6 +1,6 @@
-from autowork_core.page import WindowView
+from autowork_core.page import WindowPage
 
 
-class FilmingPage(WindowView):
-    locator_file = "right_screen/filming/window.yaml"
-    active_locator = None
+class RootFilmingPage(WindowPage):
+    root_locator_file = "right_screen/filming/window.yaml"
+    root_locator = "Filming_window"

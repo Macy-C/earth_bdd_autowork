@@ -19,3 +19,31 @@ left_screen_window:
 # screen:
   # device: '\\.\DISPLAY1'
 #  id: 1
+
+NewPatient_button: {root: 'left_screen_window', by: 'xpath',value: "//Text[@auto_id='NewPatient']"}
+Scheduled_button: {root: 'left_screen_window', by: 'xpath',value: "//RadioButton[@auto_id='ScheduledRadioButton']"}
+
+switch_patients_button: {root: 'left_screen_window', by: 'xpath',value: "//RadioButton[@auto_id='workflowButtonView:PatientRadioButton_1']"}
+scan_button: {root: 'left_screen_window', by: 'xpath',value: "//RadioButton[@auto_id='RadioButton_1'][2]"}
+help_button: {root: 'left_screen_window', by: 'xpath',value: "//RadioButton[@auto_id='RadioButton_1'][3]"}
+service_button: {root: 'left_screen_window', by: 'xpath',value: "//RadioButton[@auto_id='RadioButton_1'][4]"}
+
+
+
+# caution option ------------------------------
+OK_button: {region: 'left_screen_window',by: 'ocr',value: 'OK'}
+Cancel_button: {region: 'left_screen_window',by: 'ocr',value: 'Cancel'}
+Yes_button: {region: 'left_screen_window',by: 'ocr',value: 'Yes'}
+No_button: {region: 'left_screen_window',by: 'ocr',value: 'No'}
+
+
+
+
+
+
+
+
+
+
+
+

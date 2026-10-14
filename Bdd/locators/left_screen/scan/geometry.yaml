@@ -1,0 +1,4 @@
+geometry_Start_Combobox: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='Geometry'][0]/parent::Custom//Text[@name='Start']/next::ComboBox"}
+geometry_End_Edit: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='Geometry'][0]/parent::Custom//Text[@name='End']/next::Edit"}
+geometry_Length_Edit: {root: 'left_screen_window', by: 'xpath',value: "//Text[@name='Geometry'][0]/parent::Custom//Text[@name='Length']/next::Edit"}
+

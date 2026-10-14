@@ -1,0 +1,32 @@
+Report_window:
+  top_level: true
+  backend: uia
+  control_type: Window
+  name: 'Report'
+  auto_id: 'Window_1'
+  screen:
+    role: rightmost
+
+
+# table ---------------------------------
+CaseTemplate_table: {root: 'Report_window', by: 'xpath',value: "//TabItem[@auto_id='TabItem_1']"}
+Glossary_table: {root: 'Report_window', by: 'xpath',value: "//TabItem[@auto_id='TabItem_2']"}
+RelevantReport_table: {root: 'Report_window', by: 'xpath',value: "//TabItem[@auto_id='TabItem_3']"}
+
+# CaseTemplate ---------------------------------
+CaseTemplate_TemplateFolder_button: {root: 'Report_window', by: 'xpath',value: "//Tree[@auto_id='caseTemplate']//*[@name='Template']"}
+CaseTemplate_RecentTemplateFolder_button: {root: 'Report_window', by: 'xpath',value: "//Tree[@auto_id='caseTemplate']//*[@name='Recent Template']"}
+
+# Glossary ---------------------------------
+Glossary_TemplateFolder_button: {root: 'Report_window', by: 'xpath',value: "//Tree[@auto_id='VocabularyTemplate']//*[@name='Template']"}
+
+# RelevantReport ---------------------------------
+RelevantReportSearch_edit: {root: 'Report_window', by: 'xpath',value: "//Edit[@auto_id='searchReportTxtblk']"}
+
+
+# other ---------------------------------
+save_button: {root: 'Report_window', by: 'xpath',value: "//Button[0]"}
+approve_button: {root: 'Report_window', by: 'xpath',value: "//Button[1]"}
+printPreview_button: {root: 'Report_window', by: 'xpath',value: "//Button[2]"}
+print_button: {root: 'Report_window', by: 'xpath',value: "//Button[3]"}
+

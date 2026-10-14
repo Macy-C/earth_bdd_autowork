@@ -1,19 +1,20 @@
 import pyperclip
 from pywinauto.keyboard import SendKeys
-from autowork_core.actions.action_helper import _do_click, _is_coords_target
+from autowork_core.actions.action_helper import _do_click, _is_coords_target, _normalized_hold_duration
 from autowork_core.actions.element_actions import get_text
 from autowork_core.common.element_finder import get_element
 from autowork_core.common.log_helper import log_call
 
 
 #========================================== click ===============================================
-def click(context, locator, offset_x=None, offset_y=None, wait_type="visible", wait_timeout=5, visual_timeout=10, entry_point=None):
-    entry_point = log_call(entry_point,locator=locator,offset_x=offset_x,offset_y=offset_y,wait_type=wait_type,wait_timeout=wait_timeout,visual_timeout=visual_timeout)
+def click(context, locator, offset_x=None, offset_y=None, wait_type="visible", wait_timeout=5, visual_timeout=10, entry_point=None, *, hold_duration: float | None = None):
+    hold_duration = _normalized_hold_duration(hold_duration)
+    entry_point = log_call(entry_point,locator=locator,offset_x=offset_x,offset_y=offset_y,wait_type=wait_type,wait_timeout=wait_timeout,visual_timeout=visual_timeout,hold_duration=hold_duration)
     el = get_element(context, locator, wait_type=wait_type, wait_timeout=wait_timeout, visual_timeout=visual_timeout, entry_point=entry_point)
     if (offset_x is None) != (offset_y is None):
         raise ValueError("offset_x和offset_y必须同时提供")
     offset = None if offset_x is None else (offset_x, offset_y)
-    _do_click(el, offset=offset)
+    _do_click(el, offset=offset, hold_duration=hold_duration)
 
 def double_click(context, locator, wait_type="visible", wait_timeout=5, visual_timeout=10, entry_point=None):
     entry_point = log_call(entry_point,locator=locator,wait_type=wait_type,wait_timeout=wait_timeout,visual_timeout=visual_timeout)

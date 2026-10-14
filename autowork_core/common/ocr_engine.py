@@ -4,13 +4,13 @@ import zlib
 from pathlib import Path
 
 import cv2
-import mss
 import numpy as np
 from loguru import logger
 
 from config.paths import Paths
 from config.settings import settings
 from autowork_core.utils.bus import normalize, safe_name, timestamp
+from autowork_core.utils.screenshot import capture_screen_region
 from autowork_core.common.wait_coordinator import poll_value
 
 
@@ -331,38 +331,6 @@ def recognize_text_by_ocr(image, det_unclip_ratio=None, det_limit_side_len=None,
     return data
 
 
-def _mss_screenshot_to_bgr(screenshot):
-    return np.ascontiguousarray(np.asarray(screenshot)[:, :, :3])
-
-
-def _normalize_monitor(monitor):
-    if monitor is None:
-        return None
-    return {
-        "left": _to_int(monitor.get("left"), 0),
-        "top": _to_int(monitor.get("top"), 0),
-        "width": _to_int(monitor.get("width"), 0),
-        "height": _to_int(monitor.get("height"), 0),
-    }
-
-
-def _clip_monitor(monitor, screen_monitor):
-    if monitor is None:
-        return screen_monitor
-
-    monitor = _normalize_monitor(monitor)
-    left = max(screen_monitor["left"], monitor["left"])
-    top = max(screen_monitor["top"], monitor["top"])
-    right = min(screen_monitor["left"] + screen_monitor["width"], monitor["left"] + monitor["width"])
-    bottom = min(screen_monitor["top"] + screen_monitor["height"], monitor["top"] + monitor["height"])
-    return {
-        "left": left,
-        "top": top,
-        "width": max(1, right - left),
-        "height": max(1, bottom - top),
-    }
-
-
 def _get_box_points(candidate):
     points = candidate.get("text_box_position") or candidate.get("box") or []
     if hasattr(points, "tolist"):
@@ -441,10 +409,7 @@ def select_ocr_candidate(candidates, index=0):
 
 def scan_ocr(monitor=None, det_unclip_ratio=None, det_limit_side_len=None, det_limit_type=None,
              det_box_thresh=None, cache_ttl=None, use_cache=False):
-    with mss.mss() as sct:
-        monitor = _clip_monitor(monitor, sct.monitors[1])
-        screenshot = sct.grab(monitor)
-        image = _mss_screenshot_to_bgr(screenshot)
+    image, monitor = capture_screen_region(monitor)
 
     cache_key = (monitor["left"], monitor["top"], monitor["width"], monitor["height"])
     raw_candidates = recognize_text_by_ocr(

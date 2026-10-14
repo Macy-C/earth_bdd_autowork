@@ -1,0 +1,13 @@
+SimulatorController_window:
+  top_level: true
+  backend: uia
+  control_type: Window
+  title: 'Simulator Controller'
+  screen:
+    role: leftmost
+
+SimulatorControl_button: {root: 'SimulatorController_window', by: 'xpath',value: "//Button[@help_text='Simulator Control']"}
+ShowDesktop_button: {root: 'SimulatorController_window', by: 'xpath',value: "//Button[@help_text='Show Desktop']"}
+ShowCanOpenSimulator_button: {root: 'SimulatorController_window', by: 'xpath',value: "//Button[@help_text='Show CanOpen Simulator']"}
+
+

@@ -1,9 +1,15 @@
+from functools import partial
+from math import isfinite
+from time import sleep
+
 from loguru import logger
 from pywinauto.base_wrapper import BaseWrapper
 from pywinauto.controls.hwndwrapper import HwndWrapper
 from pywinauto.controls.uiawrapper import UIAWrapper
 from pywinauto.mouse import click as mouse_click, double_click as mouse_double_click, right_click as mouse_right_click
+from pywinauto.mouse import press as mouse_press, release as mouse_release
 from autowork_core.common.element_finder import get_element
+from autowork_core.common.locator import is_transient_lookup_error
 from autowork_core.common.log_helper import log_call
 from autowork_core.common.target import ResolvedTarget
 from autowork_core.common.runtime_diagnostics import (
@@ -33,8 +39,10 @@ def _exists(context, locator, timeout=3,entry_point=None):
         el = get_element(context, locator, visual_timeout=timeout, wait_type=None, required=False,entry_point=entry_point)
         return _target_exists(el, timeout=timeout)
     except Exception as error:
+        if is_transient_lookup_error(error):
+            return False
         _remember_probe_error(error, locator, "locate_exists")
-        return False
+        raise
 
 def _is_visible(context, locator, timeout=3,entry_point=None):
     entry_point = log_call(entry_point,locator=locator,timeout=timeout)
@@ -290,10 +298,7 @@ def _target_exists(el, timeout=0):
     if isinstance(el, BaseWrapper):
         return True
     if _is_spec(el):
-        try:
-            return el.exists(timeout=timeout)
-        except Exception:
-            return False
+        return el.exists(timeout=timeout)
     return bool(el)
 
 def _target_to_wrapper(el, timeout=0):
@@ -311,12 +316,43 @@ def _target_to_wrapper(el, timeout=0):
     return target.value
 
 
-def _do_click(el, button="left", double=False, offset=None):
+def _normalized_hold_duration(hold_duration):
+    if hold_duration is None:
+        return None
+    if isinstance(hold_duration, bool) or not isinstance(hold_duration, (int, float)):
+        raise TypeError("hold_duration must be a number of seconds or None")
+    try:
+        duration = float(hold_duration)
+    except OverflowError as error:
+        raise ValueError("hold_duration must be finite and non-negative") from error
+    if not isfinite(duration) or duration < 0:
+        raise ValueError("hold_duration must be finite and non-negative")
+    return duration
+
+
+def _hold_click(press, release, hold_duration):
+    try:
+        press()
+        sleep(hold_duration)
+    finally:
+        release()
+
+
+def _do_click(el, button="left", double=False, offset=None, *, hold_duration=None):
+    hold_duration = _normalized_hold_duration(hold_duration)
+    if double and hold_duration:
+        raise ValueError("hold_duration is not supported for double clicks")
     target = ResolvedTarget.from_legacy(el)
     if target.coords is not None:
         if offset is not None:
             raise ValueError("坐标型目标不能叠加控件内点击偏移")
-        if double:
+        if hold_duration:
+            _hold_click(
+                partial(mouse_press, button=button, coords=target.coords),
+                partial(mouse_release, button=button, coords=target.coords),
+                hold_duration,
+            )
+        elif double:
             mouse_double_click(coords=target.coords)
         elif button == "right":
             mouse_right_click(coords=target.coords)
@@ -324,30 +360,42 @@ def _do_click(el, button="left", double=False, offset=None):
             mouse_click(coords=target.coords)
         return
 
-    if offset is None:
+    if offset is None and not hold_duration:
         target.value.click_input(
             button=button,
             double=double,
             use_log=False,
         )
         return
-    offset_x, offset_y = _normalized_click_offset(offset)
+    if offset is not None:
+        offset_x, offset_y = _normalized_click_offset(offset)
     rectangle = target.value.rectangle()
     width = int(rectangle.right) - int(rectangle.left)
     height = int(rectangle.bottom) - int(rectangle.top)
+    if offset is None:
+        offset_x, offset_y = width // 2, height // 2
     if not (0 <= offset_x < width and 0 <= offset_y < height):
         raise ValueError(
             "控件内点击偏移超出当前目标区域: "
             f"offset=({offset_x}, {offset_y}), size=({width}, {height})"
         )
+    coords = (
+        int(rectangle.left) + offset_x,
+        int(rectangle.top) + offset_y,
+    )
+    if hold_duration:
+        options = dict(button=button, use_log=False, coords=coords, absolute=True)
+        _hold_click(
+            partial(target.value.click_input, button_down=True, button_up=False, **options),
+            partial(target.value.click_input, button_down=False, button_up=True, **options),
+            hold_duration,
+        )
+        return
     target.value.click_input(
         button=button,
         double=double,
         use_log=False,
-        coords=(
-            int(rectangle.left) + offset_x,
-            int(rectangle.top) + offset_y,
-        ),
+        coords=coords,
         absolute=True,
     )
 

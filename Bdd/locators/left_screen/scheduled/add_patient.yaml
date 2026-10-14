@@ -1,0 +1,15 @@
+# add patient input info ----------------------------------------------
+PatientId_edit: {root: 'left_screen_window', by: 'xpath',value: "//Edit[@auto_id='PatientIdTextBox']"}
+OtherPatientID_edit: {root: 'left_screen_window', by: 'xpath',value: "//Edit[@auto_id='TextBox_1']"}
+LastName_edit: {root: 'left_screen_window', by: 'xpath',value: "//Edit[@auto_id='LastNameTextBox']"}
+FirstName_edit: {root: 'left_screen_window', by: 'xpath',value: "//Edit[@auto_id='FirstNameTextBox']"}
+
+adult_button: {root: 'left_screen_window', by: 'xpath',value: "//RadioButton[@auto_id='RadioButton_3']"}
+
+# other ----------------------------------------------
+AddtoScheduled_button: {root: 'left_screen_window', by: 'xpath',value: "//Button[@auto_id='Add2Schedule']"}
+
+
+
+
+

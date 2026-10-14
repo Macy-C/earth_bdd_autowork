@@ -1,0 +1,12 @@
+# filter info ----------------------------------------------
+Name_edit: {root: 'left_screen_window', by: 'xpath',value: "//HeaderItem[@name='Name']/Edit"}
+Patient_ID_edit: {root: 'left_screen_window', by: 'xpath',value: "//HeaderItem[@name='Patient ID']/Edit"}
+Study_ID_edit: {root: 'left_screen_window', by: 'xpath',value: "//HeaderItem[@name='Study ID']/Edit"}
+
+# dataitem ----------------------------------------------
+first_dataItem: {root: 'left_screen_window', by: 'xpath',value: "//DataGrid[@auto_id='PatientStudyInfoCollectionView']//DataItem[0]"}
+
+# other ----------------------------------------------
+Clear_button: {root: 'left_screen_window', by: 'xpath',value: "//Button[@auto_id='ClearButton']"}
+AddPatient_button: {root: 'left_screen_window', by: 'xpath',value: "//Button[@auto_id='AddPatientButton']"}
+SelectPatient_button: {root: 'left_screen_window', by: 'xpath',value: "//Button[@auto_id='SelectPatient']"}

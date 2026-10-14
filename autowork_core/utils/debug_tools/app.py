@@ -37,6 +37,8 @@ from autowork_core.utils.debug_tools.visual_tools import VisualToolMixin
 
 BACKEND = "uia"
 HIT_TEST_BUCKET_SIZE = 160
+TREE_LOAD_MAX_DEPTH = 32
+TREE_LOAD_MAX_NODES = 5000
 
 VK_ESCAPE = 0x1B
 VK_F2 = 0x71
@@ -95,11 +97,9 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.hit_test_buckets = {}
         self.hit_test_index_sorted = True
 
-        # 属性行状态
-        self.property_expanded_items = set()
-        self.property_row_items = {}
-
         self.selected_cell_value = tk.StringVar(value="")
+        self.property_tree = None
+        self.last_property_column = "value"
         self.tree_expanded = False
         self.tree_toggle_button = None
         self.locator_workspace = None
@@ -199,7 +199,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         workspace.add(tree_panel, weight=3)
         workspace.add(inspector_panel, weight=2)
 
-        tree_panel.rowconfigure(1, weight=1)
+        tree_panel.rowconfigure(2, weight=1)
         tree_panel.columnconfigure(0, weight=1)
         tree_toolbar = ttk.Frame(tree_panel)
         tree_toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
@@ -230,21 +230,54 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             command=self.clear_overlay,
         ).pack(side="left")
 
+        xpath_toolbar = ttk.LabelFrame(tree_panel, text="XPath 定位")
+        xpath_toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        xpath_toolbar.columnconfigure(0, weight=1)
+        xpath_buttons = ttk.Frame(xpath_toolbar)
+        xpath_buttons.grid(row=0, column=0, sticky="w", padx=8, pady=(6, 3))
+        ttk.Button(
+            xpath_buttons,
+            text="前兄弟",
+            command=lambda: self.generate_sibling_xpath("prev"),
+        ).pack(side="left")
+        ttk.Button(
+            xpath_buttons,
+            text="后兄弟",
+            command=lambda: self.generate_sibling_xpath("next"),
+        ).pack(side="left", padx=(4, 0))
+        ttk.Button(
+            xpath_buttons,
+            text="前任意",
+            command=lambda: self.generate_sibling_xpath("prev", wildcard=True),
+        ).pack(side="left", padx=(4, 0))
+        ttk.Button(
+            xpath_buttons,
+            text="后任意",
+            command=lambda: self.generate_sibling_xpath("next", wildcard=True),
+        ).pack(side="left", padx=(4, 0))
+        ttk.Button(
+            xpath_buttons,
+            text="清空",
+            command=self.clear_input,
+        ).pack(side="left", padx=(4, 0))
+        self.entry = ttk.Entry(xpath_toolbar, font=("Consolas", 10))
+        self.entry.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self.entry.bind("<KeyRelease>", self.on_xpath_change)
+
         tree_frame = ttk.LabelFrame(tree_panel, text="控件树")
-        tree_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        tree_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
 
         self.tree = ttk.Treeview(
             tree_frame,
-            columns=("type", "props", "name", "value", "class", "rect"),
+            columns=("type", "name", "value", "class", "rect"),
             show="tree headings",
             selectmode="extended"
         )
 
         self.tree.heading("#0", text="控件树")
         self.tree.heading("type", text="type")
-        self.tree.heading("props", text="属性")
         self.tree.heading("name", text="name / key")
         self.tree.heading("value", text="value / auto_id")
         self.tree.heading("class", text="class")
@@ -252,7 +285,6 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
 
         self.tree.column("#0", width=300, minwidth=180)
         self.tree.column("type", width=90, minwidth=60)
-        self.tree.column("props", width=80, minwidth=60)
         self.tree.column("name", width=260, minwidth=120)
         self.tree.column("value", width=360, minwidth=160)
         self.tree.column("class", width=120, minwidth=80)
@@ -282,46 +314,13 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
 
         self.locator_notebook = ttk.Notebook(inspector_panel)
         self.locator_notebook.pack(fill="both", expand=True)
-        xpath_page = ttk.Frame(self.locator_notebook)
+        property_page = ttk.Frame(self.locator_notebook)
         tools_page = ttk.Frame(self.locator_notebook)
-        self.locator_notebook.add(xpath_page, text="XPath")
+        self.locator_notebook.add(property_page, text="属性信息")
         self.locator_notebook.add(tools_page, text="验证工具")
 
-        xpath_box = ttk.LabelFrame(xpath_page, text="XPath 定位")
-        xpath_box.pack(fill="x", padx=8, pady=8)
-        for column in range(4):
-            xpath_box.columnconfigure(column, weight=1)
-        self.entry = ttk.Entry(xpath_box, font=("Consolas", 10))
-        self.entry.grid(row=0, column=0, columnspan=4, sticky="ew", padx=8, pady=8)
-        self.entry.bind("<KeyRelease>", self.on_xpath_change)
-        ttk.Button(
-            xpath_box,
-            text="前兄弟",
-            command=lambda: self.generate_sibling_xpath("prev"),
-        ).grid(row=1, column=0, sticky="ew", padx=(8, 3), pady=(0, 6))
-        ttk.Button(
-            xpath_box,
-            text="后兄弟",
-            command=lambda: self.generate_sibling_xpath("next"),
-        ).grid(row=1, column=1, sticky="ew", padx=3, pady=(0, 6))
-        ttk.Button(
-            xpath_box,
-            text="前任意",
-            command=lambda: self.generate_sibling_xpath("prev", wildcard=True),
-        ).grid(row=1, column=2, sticky="ew", padx=3, pady=(0, 6))
-        ttk.Button(
-            xpath_box,
-            text="后任意",
-            command=lambda: self.generate_sibling_xpath("next", wildcard=True),
-        ).grid(row=1, column=3, sticky="ew", padx=(3, 8), pady=(0, 6))
-        ttk.Button(
-            xpath_box,
-            text="清空 XPath",
-            command=self.clear_input,
-        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
-
-        selected_box = ttk.LabelFrame(xpath_page, text="选中属性")
-        selected_box.pack(fill="x", padx=8, pady=(0, 8))
+        selected_box = ttk.LabelFrame(property_page, text="选中属性")
+        selected_box.pack(fill="x", padx=8, pady=8)
         selected_box.columnconfigure(0, weight=1)
         self.selected_cell_entry = ttk.Entry(
             selected_box,
@@ -334,6 +333,53 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             text="复制属性",
             command=self.copy_selected_cell,
         ).grid(row=0, column=1, padx=(0, 8), pady=8)
+
+        property_box = ttk.LabelFrame(property_page, text="控件属性")
+        property_box.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        property_box.rowconfigure(0, weight=1)
+        property_box.columnconfigure(0, weight=1)
+
+        self.property_tree = ttk.Treeview(
+            property_box,
+            columns=("sep1", "value", "sep2", "source"),
+            show="tree headings",
+            selectmode="browse",
+        )
+        self.property_tree.heading("#0", text="key")
+        self.property_tree.heading("sep1", text="")
+        self.property_tree.heading("value", text="值")
+        self.property_tree.heading("sep2", text="")
+        self.property_tree.heading("source", text="来源")
+        self.property_tree.column("#0", width=230, minwidth=160, stretch=False)
+        self.property_tree.column("sep1", width=10, minwidth=10, stretch=False)
+        self.property_tree.column("value", width=360, minwidth=240, stretch=True)
+        self.property_tree.column("sep2", width=10, minwidth=10, stretch=False)
+        self.property_tree.column("source", width=300, minwidth=220, stretch=False)
+        property_y_scroll = ttk.Scrollbar(
+            property_box,
+            orient="vertical",
+            command=self.property_tree.yview,
+        )
+        property_x_scroll = ttk.Scrollbar(
+            property_box,
+            orient="horizontal",
+            command=self.property_tree.xview,
+        )
+        self.property_tree.configure(
+            yscrollcommand=property_y_scroll.set,
+            xscrollcommand=property_x_scroll.set,
+        )
+        self.property_tree.grid(row=0, column=0, sticky="nsew")
+        property_y_scroll.grid(row=0, column=1, sticky="ns")
+        property_x_scroll.grid(row=1, column=0, sticky="ew")
+        self.property_tree.bind(
+            "<<TreeviewSelect>>",
+            self.on_property_tree_select,
+        )
+        self.property_tree.bind(
+            "<ButtonRelease-1>",
+            self.on_property_tree_cell_click,
+        )
 
         structural = ttk.LabelFrame(tools_page, text="结构定位")
         structural.pack(fill="x", padx=8, pady=8)
@@ -377,7 +423,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         if width <= 1:
             self.app.after_idle(self.initialize_locator_workspace)
             return
-        self.locator_workspace.sashpos(0, round(width * 0.62))
+        self.locator_workspace.sashpos(0, round(width * 0.52))
         self.locator_workspace_initialized = True
 
     # =====================================================
@@ -433,23 +479,32 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             return
 
         try:
-            if self.root_window is not None:
-                self.load_control_tree()
             x, y = self._cursor_position()
-            element = _wrapper_from_point(x, y, self.backend)
-            self.select_captured_element(element, x, y)
+            element, tree_id = self.capture_element_at_point(x, y)
+            self.select_captured_element(element, x, y, tree_id=tree_id)
         except Exception as e:
             self.set_status(f"捕获鼠标点控件失败: {type(e).__name__}: {e}")
 
-    def select_captured_element(self, element, x=None, y=None):
-        tree_id = None
-        xpath = make_xpath_suggestion(element)
+    def capture_element_at_point(self, x, y):
+        element, tree_id = self.find_deepest_element_by_point(x, y)
+        if element is not None:
+            return element, tree_id
 
+        element = _wrapper_from_point(x, y, self.backend)
+        return element, self.find_tree_item_for_element(element)
+
+    def find_tree_item_for_element(self, element):
         try:
             key = make_element_key(element)
-            tree_id = self.element_key_to_tree_id.get(key)
+            return self.element_key_to_tree_id.get(key)
         except Exception:
-            key = None
+            return None
+
+    def select_captured_element(self, element, x=None, y=None, tree_id=None):
+        xpath = make_xpath_suggestion(element)
+
+        if tree_id is None:
+            tree_id = self.find_tree_item_for_element(element)
 
         try:
             xpath = self.make_unique_xpath_for_element(element, xpath)
@@ -472,6 +527,8 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         else:
             self.clear_tree_selection()
             self.clear_captured_tree_mark()
+
+        self.show_element_properties(element)
 
         self.entry.delete(0, "end")
         self.entry.insert(0, xpath)
@@ -536,14 +593,10 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             return
 
         # #1 type
-        # #2 props
-        # #3 name / key
-        # #4 value / auto_id
-        # #5 class
-        # #6 rect
-        if column_id == "#2":
-            self.toggle_properties_for_control(row_id)
-            return "break"
+        # #2 name / key
+        # #3 value / auto_id
+        # #4 class
+        # #5 rect
 
         values = self.tree.item(row_id, "values")
 
@@ -579,11 +632,14 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         selected_items = self.tree.selection()
 
         if not selected_items:
+            self.clear_property_panel()
             return
 
         self.overlay_manager.clear()
 
         count = 0
+        focused_item = self.tree.focus()
+        property_item = focused_item if focused_item in selected_items else selected_items[0]
 
         for item_id in selected_items:
             element = self.tree_id_to_element.get(item_id)
@@ -605,6 +661,9 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                 self.set_status(f"框选失败: {type(e).__name__}: {e}")
 
         if count:
+            property_element = self.tree_id_to_element.get(property_item)
+            if property_element is not None:
+                self.show_element_properties(property_element)
             self.set_status(f"已框选控件树选中元素: {count} 个。")
 
     def on_tree_double_click(self, event=None):
@@ -628,7 +687,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             except Exception:
                 pass
 
-        xpath = self.make_unique_xpath_for_element(
+        xpath, xpath_matches = self.make_unique_xpath_match(
             element,
             make_xpath_suggestion(element)
         )
@@ -654,15 +713,20 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.app.update_idletasks()
 
         self.last_xpath = None
-        self.run_xpath(force=True)
+        self.show_element_properties(element)
+        self.run_xpath(force=True, precomputed_elements=xpath_matches)
 
         self.set_status(f"已生成并复制 XPath: {xpath}")
 
         return "break"
 
     def make_unique_xpath_for_element(self, element, xpath):
+        xpath, _elements = self.make_unique_xpath_match(element, xpath)
+        return xpath
+
+    def make_unique_xpath_match(self, element, xpath):
         if self.root_window is None:
-            return xpath
+            return xpath, None
 
         try:
             elements = find_by_xpath(
@@ -675,18 +739,18 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                 elements = [elements]
 
             if len(elements) <= 1:
-                return xpath
+                return xpath, elements
 
             target_key = make_element_key(element)
 
             for index, candidate in enumerate(elements):
                 if make_element_key(candidate) == target_key:
-                    return f"{xpath}[{index}]"
+                    return f"{xpath}[{index}]", [candidate]
 
         except Exception:
             pass
 
-        return xpath
+        return xpath, None
 
     def generate_sibling_xpath(self, direction, wildcard=False):
         selected_items = [
@@ -835,8 +899,9 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.hit_test_items.clear()
         self.hit_test_buckets.clear()
         self.hit_test_index_sorted = True
-        self.property_expanded_items.clear()
-        self.property_row_items.clear()
+        clear_property_panel = getattr(self, "clear_property_panel", None)
+        if callable(clear_property_panel):
+            clear_property_panel()
 
     def load_control_tree(self):
         self.tree.delete(*self.tree.get_children())
@@ -848,35 +913,72 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
 
         try:
             root_obj = to_wrapper(self.root_window)
+            build_state = {
+                "count": 0,
+                "truncated": False,
+                "max_nodes": TREE_LOAD_MAX_NODES,
+            }
 
             root_item_id = self.insert_tree_node(
                 parent_item="",
                 element=root_obj,
                 level=0,
-                max_depth=10
+                max_depth=TREE_LOAD_MAX_DEPTH,
+                max_nodes=TREE_LOAD_MAX_NODES,
+                visited_keys=set(),
+                build_state=build_state,
             )
-
-            runtime_count = self.sync_runtime_descendants(root_obj, root_item_id)
 
             self.sort_hit_test_index()
             self.expand_all(update_status=False)
 
-            if runtime_count:
-                self.set_status(f"控件树加载完成：{root_obj.window_text()}，补充运行时可定位元素 {runtime_count} 个。")
+            if build_state["truncated"]:
+                self.set_status(f"控件树加载完成：{root_obj.window_text()}，已达到节点上限 {TREE_LOAD_MAX_NODES} 个。")
             else:
                 self.set_status(f"控件树加载完成：{root_obj.window_text()}")
 
         except Exception as e:
             self.set_status(f"控件树加载失败: {type(e).__name__}: {e}")
 
-    def insert_tree_node(self, parent_item, element, level=0, max_depth=10, include_children=True, tags=()):
+    def insert_tree_node(
+            self,
+            parent_item,
+            element,
+            level=0,
+            max_depth=TREE_LOAD_MAX_DEPTH,
+            include_children=True,
+            tags=(),
+            max_nodes=TREE_LOAD_MAX_NODES,
+            visited_keys=None,
+            build_state=None,
+    ):
+        if visited_keys is None:
+            visited_keys = set()
+        if build_state is None:
+            build_state = {
+                "count": 0,
+                "truncated": False,
+                "max_nodes": max_nodes,
+            }
+
         if level > max_depth:
+            build_state["truncated"] = True
+            return None
+
+        if build_state["count"] >= max_nodes:
+            build_state["truncated"] = True
             return None
 
         try:
             snapshot = read_element_snapshot(element)
             values = snapshot.values
             rect = snapshot.rect
+            key = snapshot.key
+
+            if key in visited_keys:
+                return None
+            visited_keys.add(key)
+            build_state["count"] += 1
 
             text = (
                 f"{values['control_type']} - {values['name']}"
@@ -890,7 +992,6 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                 text=text,
                 values=(
                     values["control_type"],   # type
-                    "▶ 属性",                # props
                     values["name"],           # name / key
                     values["auto_id"],        # value / auto_id
                     values["class_name"],     # class
@@ -898,8 +999,6 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                 ),
                 tags=tags,
             )
-
-            key = snapshot.key
 
             self.element_key_to_tree_id[key] = item_id
             self.tree_id_to_element[item_id] = element
@@ -920,7 +1019,10 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                         parent_item=item_id,
                         element=child,
                         level=level + 1,
-                        max_depth=max_depth
+                        max_depth=max_depth,
+                        max_nodes=max_nodes,
+                        visited_keys=visited_keys,
+                        build_state=build_state,
                     )
 
             return item_id
@@ -1021,74 +1123,79 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             current = parent
 
     # =====================================================
-    # 属性行展开 / 收起
+    # 右侧属性面板
     # =====================================================
-    def toggle_properties_for_control(self, item_id):
-        if item_id not in self.tree_id_to_element:
-            self.set_status("当前行不是控件节点。")
-            return
-
-        if item_id in self.property_expanded_items:
-            self.collapse_properties_for_control(item_id)
-        else:
-            self.expand_properties_for_control(item_id)
-
-    def expand_properties_for_control(self, item_id):
-        if item_id in self.property_expanded_items:
-            return
-
-        element = self.tree_id_to_element.get(item_id)
-
-        if element is None:
-            return
-
+    def show_element_properties(self, element):
+        self.clear_property_panel()
         props = get_all_element_properties(element)
-        prop_row_ids = []
 
         for prop_name, prop_value in iter_ordered_properties(props):
-            row_id = self.tree.insert(
-                item_id,
-                0,
-                text="",
-                values=(
-                    "",          # type
-                    "",          # props
-                    prop_name,   # name / key
-                    prop_value,  # value / auto_id
-                    "",          # class
-                    "",          # rect
-                )
+            if isinstance(prop_value, dict):
+                value = prop_value.get("value", "")
+                source = prop_value.get("source", "")
+            else:
+                value = prop_value
+                source = ""
+            self.property_tree.insert(
+                "",
+                "end",
+                text=prop_name,
+                values=("", value, "", source),
             )
-            prop_row_ids.append(row_id)
 
-        self.property_row_items[item_id] = prop_row_ids
-        self.property_expanded_items.add(item_id)
+        self.set_status("已在右侧显示当前控件属性。")
 
-        values = list(self.tree.item(item_id, "values"))
-        values[1] = "▼ 属性"
-        self.tree.item(item_id, values=values, open=True)
+    def clear_property_panel(self):
+        property_tree = getattr(self, "property_tree", None)
+        if property_tree is None:
+            return
+        try:
+            property_tree.delete(*property_tree.get_children(""))
+        except Exception:
+            pass
 
-        self.set_status("已展开当前控件属性。")
+    def on_property_tree_select(self, event=None):
+        property_tree = getattr(self, "property_tree", None)
+        if property_tree is None:
+            return
+        selected = property_tree.selection()
+        if not selected:
+            return
+        item_id = selected[0]
+        self.selected_cell_value.set(
+            self.property_cell_value(item_id, self.last_property_column)
+        )
 
-    def collapse_properties_for_control(self, item_id):
-        row_ids = self.property_row_items.pop(item_id, [])
+    def on_property_tree_cell_click(self, event=None):
+        property_tree = getattr(self, "property_tree", None)
+        if property_tree is None or event is None:
+            return
+        row_id = property_tree.identify_row(event.y)
+        if not row_id:
+            return
+        column_id = property_tree.identify_column(event.x)
+        column = {
+            "#0": "key",
+            "#1": "separator",
+            "#2": "value",
+            "#3": "separator",
+            "#4": "source",
+        }.get(column_id, "value")
+        if column == "separator":
+            return
+        self.last_property_column = column
+        self.selected_cell_value.set(self.property_cell_value(row_id, column))
 
-        for row_id in row_ids:
-            try:
-                self.tree.delete(row_id)
-            except Exception:
-                pass
-
-        self.property_expanded_items.discard(item_id)
-
-        if self.tree.exists(item_id):
-            values = list(self.tree.item(item_id, "values"))
-
-            if len(values) >= 2:
-                values[1] = "▶ 属性"
-                self.tree.item(item_id, values=values)
-
-        self.set_status("已收起当前控件属性。")
+    def property_cell_value(self, item_id, column):
+        property_tree = getattr(self, "property_tree", None)
+        if property_tree is None:
+            return ""
+        if column == "key":
+            return property_tree.item(item_id, "text")
+        values = property_tree.item(item_id, "values")
+        if column == "source":
+            return values[3] if len(values) > 3 else ""
+        return values[1] if len(values) > 1 else ""
 
     # =====================================================
     # 刷新 / 展开 / 收起
@@ -1098,7 +1205,6 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.last_xpath = None
 
         self.load_control_tree()
-        self.collapse_then_expand_tree(delay=220)
 
         if self.entry.get().strip():
             self.run_xpath(force=True)
@@ -1157,9 +1263,6 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             self.set_status("已展开全部控件节点。")
 
     def collapse_all(self):
-        for item_id in list(self.property_expanded_items):
-            self.collapse_properties_for_control(item_id)
-
         def _collapse(item):
             for child in self.tree.get_children(item):
                 _collapse(child)
@@ -1366,6 +1469,8 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                 self.open_tree_parents(tree_id)
                 self.tree.see(tree_id)
 
+            self.show_element_properties(element)
+
             xpath = self.make_unique_xpath_for_element(
                 element,
                 make_xpath_suggestion(element)
@@ -1416,7 +1521,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
 
         self.after_id = self.app.after(300, self.run_xpath)
 
-    def run_xpath(self, force=False):
+    def run_xpath(self, force=False, precomputed_elements=None):
         if self.root_window is None:
             self.set_status("请先选择并切换一个窗口。")
             return
@@ -1431,15 +1536,19 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         if not xpath:
             self.overlay_manager.clear()
             self.clear_tree_selection()
+            self.clear_property_panel()
             self.set_status("等待输入 XPath...")
             return
 
         try:
-            elements = find_by_xpath(
-                root=self.root_window,
-                xpath=xpath,
-                first_only=False
-            )
+            if precomputed_elements is None:
+                elements = find_by_xpath(
+                    root=self.root_window,
+                    xpath=xpath,
+                    first_only=False
+                )
+            else:
+                elements = precomputed_elements
 
             if not isinstance(elements, list):
                 elements = [elements]
@@ -1504,6 +1613,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
 
         self.overlay_manager.clear()
         self.clear_tree_selection()
+        self.clear_property_panel()
 
         self.set_status("已清空输入框。")
 

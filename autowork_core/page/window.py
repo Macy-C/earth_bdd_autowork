@@ -5,7 +5,7 @@ from typing import TypeVar, cast
 
 import yaml
 
-from autowork_core.common.compile import compile_window_locator_package
+from autowork_core.common.compile import CompiledLocator, bind_window_locator, compile_locator, compile_window_locator_package
 from autowork_core.page.singleton import BasePage
 from autowork_core.utils.bus import normalize
 from config.paths import Paths
@@ -85,6 +85,19 @@ class WindowPage(BasePage):
             )
         return locator
 
+    def get_locator(self, locator_or_name):
+        locator = super().get_locator(locator_or_name)
+        if (
+            isinstance(locator, CompiledLocator)
+            or self._parse_strict_ref(locator_or_name)
+            or not isinstance(locator, (dict, str))
+        ):
+            return locator
+        compiled = compile_locator(locator)
+        if not (compiled.root_name or compiled.region_name):
+            return locator
+        return bind_window_locator(compiled, self._window_locators, self.window_root_name)
+
     def get_visual_value(self, value):
         ref = self._parse_strict_ref(value)
         if not ref or ref["kind"] == "literal":
@@ -130,6 +143,7 @@ class WindowPage(BasePage):
 
 class WindowView(BasePage):
     locator_file = None
+    locator_files = None
     active_locator = None
 
     def __init__(self, page):
@@ -137,8 +151,12 @@ class WindowView(BasePage):
             raise TypeError("WindowView 必须由 WindowPage 创建")
         self.page = page
         self.ctx = page.ctx
-        if self.locator_file:
-            page.load_window_views(self.locator_file)
+        locator_files = list(self._iter_resource_files(
+            self.locator_files,
+            self.locator_file,
+        ))
+        if locator_files:
+            page.load_window_views(locator_files)
 
     @property
     def window_root_name(self):
@@ -156,6 +174,9 @@ class WindowView(BasePage):
 
     def _require_data(self, key, source=None):
         return self.page._require_data(key, source)
+
+    def get_locator(self, locator_or_name):
+        return self.page.get_locator(locator_or_name)
 
     def get_visual_value(self, value):
         return self.page.get_visual_value(value)

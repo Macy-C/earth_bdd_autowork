@@ -194,11 +194,14 @@ class _ResourceAnalyzer:
         owned_views = []
         for view_class in usage.views:
             view_file = getattr(view_class, "locator_file", None)
-            if view_file:
-                if getattr(view_class, "root_locator", None):
+            if getattr(view_class, "root_locator", None):
+                if view_file:
                     owned_views.append((view_class, str(view_file)))
-                else:
-                    view_files.append(str(view_file))
+            else:
+                view_files.extend(_resource_values(
+                    getattr(view_class, "locator_files", None),
+                    view_file,
+                ))
         view_files = list(dict.fromkeys(view_files))
         view_data = [
             _load_mapping(
