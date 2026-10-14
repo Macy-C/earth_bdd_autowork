@@ -16,6 +16,7 @@ from autowork_core.runtime.single_step import (
     find_single_step_plan,
     generated_single_step_feature,
 )
+from autowork_core.runtime.temporary_features import cleanup_temporary_features
 
 
 def main(
@@ -27,6 +28,7 @@ def main(
         example_id=None,
 ):
     feature_path = feature_path or Paths.TEST_FEATURES_DIR
+    cleanup_temporary_features(feature_path)
     scenario_subset_plan = find_scenario_subset_plan(
         feature_path,
         scenario_name=scenario_name,

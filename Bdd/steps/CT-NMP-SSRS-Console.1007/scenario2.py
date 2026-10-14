@@ -54,38 +54,24 @@ def step_complete_helical_scan_and_repeat(context):
     scan.set_variable('kV', kV)
     scan.set_variable('mAs', mAs)
 
+    simulator.move_to_horizontal(350)
+    simulator.move_to_vertical(400)
+
     scan.click('$loc:DoseRightIndexDM_option')
     scan.click('$loc:GO_button')
-    # if scan.wait_ocr_text_present('Table is in maximum outward position',region='$loc:left_screen_window',timeout=5):
-    #     scan.click('$loc:OK_button')
-    sleep(3)
-
-    # simulator_ctrl = get_page(context, SimulatorControllerPage)
-    simulator.bring_to_front('$loc:EarthPlatformSimulator_window', activate=True)
-    sleep(2)
-    simulator.click('$loc:Scan_button', hold_duration=0.15)
-
-    sleep(1)
-    simulator.minimize_window('$loc:EarthPlatformSimulator_window')
+    sleep(5)
+    simulator.scan()
 
     scan.wait_enabled('$loc:GO_button')
 
     scan.click('$loc:GO_button')
-    sleep(3)
-    simulator.bring_to_front('$loc:EarthPlatformSimulator_window', activate=True)
-    sleep(2)
-    simulator.click('$loc:Scan_button', hold_duration=0.15)
-    sleep(1)
-    simulator.minimize_window('$loc:EarthPlatformSimulator_window')
+    sleep(5)
+    simulator.scan()
     scan.wait_enabled('$loc:Repeat_button', timeout=35)
 
     scan.click('$loc:Repeat_button')
-    sleep(3)
-    simulator.bring_to_front('$loc:EarthPlatformSimulator_window', activate=True)
-    sleep(2)
-    simulator.click('$loc:Scan_button', hold_duration=0.15)
-    sleep(1)
-    simulator.minimize_window('$loc:EarthPlatformSimulator_window')
+    sleep(5)
+    simulator.scan()
 
     scan.wait_enabled('$loc:Repeat_button', timeout=35)
 

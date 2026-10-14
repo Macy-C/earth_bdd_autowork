@@ -7,7 +7,6 @@ final report.
 
 from __future__ import annotations
 
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ from autowork_core.runtime.step_scope import (
     collect_feature_files,
     resolved_step_scope_for_scenario,
 )
+from autowork_core.runtime.temporary_features import generated_temporary_feature
 from config.paths import Paths
 
 
@@ -100,21 +100,12 @@ def render_scenario_subset_feature(plan):
 @contextmanager
 def generated_scenario_subset_feature(plan):
     content = render_scenario_subset_feature(plan)
-    with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            prefix=f".{plan.source_path.stem}.rerun.",
-            suffix=".feature",
-            dir=plan.source_path.parent,
-            delete=False,
-    ) as stream:
-        stream.write(content)
-        generated_path = Path(stream.name)
-    try:
+    with generated_temporary_feature(
+            plan.source_path,
+            "rerun",
+            content,
+    ) as generated_path:
         yield generated_path
-    finally:
-        generated_path.unlink(missing_ok=True)
 
 
 def _plans_for_feature(source_path, *, scenario_name, example_id, steps_dir):

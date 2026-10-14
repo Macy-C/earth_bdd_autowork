@@ -6,7 +6,6 @@ temporary feature for execution by Behave.
 
 from __future__ import annotations
 
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +23,7 @@ from autowork_core.runtime.tag_manager import (
     TagOwner,
     normalize_tag,
 )
+from autowork_core.runtime.temporary_features import generated_temporary_feature
 from config.paths import Paths
 STEP_KEYWORDS = {
     "given": "Given",
@@ -97,21 +97,12 @@ def render_single_step_feature(plan):
 @contextmanager
 def generated_single_step_feature(plan):
     content = render_single_step_feature(plan)
-    with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            prefix=f".{plan.source_path.stem}.single-step.",
-            suffix=".feature",
-            dir=plan.source_path.parent,
-            delete=False,
-    ) as stream:
-        stream.write(content)
-        generated_path = Path(stream.name)
-    try:
+    with generated_temporary_feature(
+            plan.source_path,
+            "single-step",
+            content,
+    ) as generated_path:
         yield generated_path
-    finally:
-        generated_path.unlink(missing_ok=True)
 
 
 def _plan_for_feature(source_path, *, steps_dir):

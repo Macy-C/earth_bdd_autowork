@@ -18,6 +18,7 @@ from autowork_core.runtime.tag_manager import (
     TAG_MANAGER,
     TagOwner,
 )
+from autowork_core.runtime.temporary_features import is_temporary_feature
 
 SKIPPED_STEP_FILE_NAMES = {
     "__init__.py",
@@ -112,9 +113,16 @@ class ResolvedStepScope:
 def collect_feature_files(feature_path):
     path = Path(feature_path)
     if path.is_file():
-        return [path] if path.suffix.lower() == ".feature" else []
+        return [path] if (
+            path.suffix.lower() == ".feature"
+            and not is_temporary_feature(path)
+        ) else []
     if path.is_dir():
-        return sorted(path.rglob("*.feature"))
+        return [
+            item
+            for item in sorted(path.rglob("*.feature"))
+            if not is_temporary_feature(item)
+        ]
     return []
 
 
