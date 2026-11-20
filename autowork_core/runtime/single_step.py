@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from behave.model import ScenarioOutline
 from behave.parser import Parser
@@ -18,6 +19,7 @@ from autowork_core.runtime.step_scope import (
     resolved_step_scope_for_scenario,
 )
 from autowork_core.runtime.tag_manager import (
+    SKIP_TAG_PRIORITY,
     TAG_MANAGER,
     TagConfigurationError,
     TagOwner,
@@ -30,6 +32,7 @@ STEP_KEYWORDS = {
     "when": "When",
     "then": "Then",
 }
+_EXAMPLE_ID_RE = re.compile(r"^([1-9]\d*)\.([1-9]\d*)$")
 
 
 class SingleStepConfigError(ValueError):
@@ -51,6 +54,8 @@ class SingleStepPlan:
     scenario_tags: tuple[str, ...]
     steps: tuple[object, ...]
     step_scope: dict
+    rule_name: str | None = None
+    scenario_line: int | None = None
 
     @property
     def example_id(self):
@@ -73,6 +78,74 @@ def find_single_step_plan(feature_path, *, steps_dir=None):
             f"Only one @single tag is allowed per run. Found {len(plans)} in: {locations}"
         )
     return plans[0] if plans else None
+
+
+def build_single_step_plan(
+        feature_path,
+        *,
+        scenario_name,
+        step_index,
+        mode="previous",
+        example_id=None,
+        rule_name=None,
+        scenario_line=None,
+        steps_dir=None,
+):
+    if not scenario_name:
+        raise SingleStepConfigError("单步调试必须指定 scenario_name")
+    normalized_mode = str(mode or "previous").strip().lower()
+    if normalized_mode == "only":
+        normalized_mode = "none"
+    if normalized_mode not in {"previous", "background", "none"}:
+        raise SingleStepConfigError(
+            f"单步调试 mode 无效: {mode!r}（可选 previous / background / none）"
+        )
+    try:
+        step_index = int(step_index)
+    except (TypeError, ValueError) as exc:
+        raise SingleStepConfigError(f"step_index 必须为正整数: {step_index!r}") from exc
+    if step_index < 1:
+        raise SingleStepConfigError(f"step_index 必须 >= 1: {step_index}")
+
+    example_index = None
+    row_index = None
+    if example_id not in (None, ""):
+        match = _EXAMPLE_ID_RE.fullmatch(str(example_id).strip())
+        if not match:
+            raise SingleStepConfigError(
+                f"单步调试 example_id 必须形如 1.1: {example_id!r}"
+            )
+        example_index = int(match.group(1))
+        row_index = int(match.group(2))
+
+    steps_dir = Path(steps_dir or (Paths.BDD_DIR / "steps")).resolve()
+    matches = []
+    for source_path in collect_feature_files(feature_path):
+        matches.extend(_explicit_plans_for_feature(
+            source_path,
+            scenario_name=scenario_name,
+            step_index=step_index,
+            mode=normalized_mode,
+            example_index=example_index,
+            row_index=row_index,
+            rule_name=rule_name,
+            scenario_line=scenario_line,
+            steps_dir=steps_dir,
+        ))
+    if not matches:
+        detail = f" scenario={scenario_name!r}"
+        if rule_name:
+            detail += f" rule={rule_name!r}"
+        raise SingleStepConfigError(f"没有找到可单步调试的场景:{detail}")
+    if len(matches) > 1:
+        locations = ", ".join(
+            f"{plan.source_path}:{plan.scenario_line or '?'}"
+            for plan in matches
+        )
+        raise SingleStepConfigError(
+            f"匹配到多个同名场景，请收窄 feature_path 或指定行号: {locations}"
+        )
+    return matches[0]
 
 
 def render_single_step_feature(plan):
@@ -144,12 +217,96 @@ def _plan_for_feature(source_path, *, steps_dir):
     if not candidates:
         return None
 
-    scenario, scenario_decision, scenario_owner = candidates[0]
-    directive = scenario_decision.directive
-    mode = directive.mode
-    step_index = directive.step_index
-    example_index = directive.example_index
-    row_index = directive.row_index
+    scenario, _scenario_decision, scenario_owner = candidates[0]
+    directive = _scenario_decision.directive
+    return _construct_single_step_plan(
+        source_path=source_path,
+        feature=feature,
+        feature_decision=feature_decision,
+        scenario=scenario,
+        scenario_owner=scenario_owner,
+        mode=directive.mode,
+        step_index=directive.step_index,
+        example_index=directive.example_index,
+        row_index=directive.row_index,
+        steps_dir=steps_dir,
+        selector_label=f"@{directive.raw_tag}",
+    )
+
+
+def _explicit_plans_for_feature(
+        source_path,
+        *,
+        scenario_name,
+        step_index,
+        mode,
+        example_index,
+        row_index,
+        rule_name=None,
+        scenario_line=None,
+        steps_dir,
+):
+    source_path = Path(source_path).resolve()
+    text = source_path.read_text(encoding="utf-8-sig")
+    feature = Parser().parse(text, filename=str(source_path))
+    feature_decision = _resolve_tags(
+        feature.tags,
+        TagOwner.FEATURE,
+        feature.name,
+        feature.effective_tags,
+    )
+    for rule in feature.rules:
+        _resolve_tags(rule.tags, TagOwner.RULE, rule.name)
+
+    results = []
+    for scenario in _iter_scenarios(feature):
+        if str(scenario.name) != str(scenario_name):
+            continue
+        parent_rule = _scenario_rule(scenario)
+        current_rule_name = parent_rule.name if parent_rule is not None else None
+        if rule_name is not None and str(current_rule_name or "") != str(rule_name):
+            continue
+        if scenario_line is not None and getattr(scenario, "line", None) != int(scenario_line):
+            continue
+        scenario_owner = (
+            TagOwner.SCENARIO_OUTLINE
+            if isinstance(scenario, ScenarioOutline)
+            else TagOwner.SCENARIO
+        )
+        for examples in getattr(scenario, "examples", ()):
+            _resolve_tags(examples.tags, TagOwner.EXAMPLES, examples.name)
+        results.append(_construct_single_step_plan(
+            source_path=source_path,
+            feature=feature,
+            feature_decision=feature_decision,
+            scenario=scenario,
+            scenario_owner=scenario_owner,
+            mode=mode,
+            step_index=step_index,
+            example_index=example_index,
+            row_index=row_index,
+            steps_dir=steps_dir,
+            selector_label=f"single:{mode}:{step_index}",
+            check_skip_conflict=True,
+        ))
+    return results
+
+
+def _construct_single_step_plan(
+        *,
+        source_path,
+        feature,
+        feature_decision,
+        scenario,
+        scenario_owner,
+        mode,
+        step_index,
+        example_index,
+        row_index,
+        steps_dir,
+        selector_label,
+        check_skip_conflict=False,
+):
     selected_scenario = _select_scenario(
         scenario,
         example_index=example_index,
@@ -161,6 +318,14 @@ def _plan_for_feature(source_path, *, steps_dir):
         selected_scenario.name,
         selected_scenario.effective_tags,
     )
+    if check_skip_conflict:
+        effective_tag_keys = {normalize_tag(tag) for tag in selected_scenario.effective_tags or ()}
+        for skip_tag in SKIP_TAG_PRIORITY:
+            if skip_tag in effective_tag_keys:
+                raise SingleStepConfigError(
+                    f"@{skip_tag} cannot be combined with {selector_label} "
+                    f"on {scenario_owner.value} {selected_scenario.name!r}"
+                )
     try:
         step_scope = resolved_step_scope_for_scenario(
             feature,
@@ -177,7 +342,7 @@ def _plan_for_feature(source_path, *, steps_dir):
     scenario_steps = list(selected_scenario.steps)
     if step_index > len(scenario_steps):
         raise SingleStepConfigError(
-            f"@{directive.raw_tag} selects step {step_index}, but scenario {scenario.name!r} "
+            f"{selector_label} selects step {step_index}, but scenario {scenario.name!r} "
             f"contains only {len(scenario_steps)} steps"
         )
 
@@ -190,6 +355,7 @@ def _plan_for_feature(source_path, *, steps_dir):
     else:
         selected_steps = [target_step]
 
+    parent_rule = _scenario_rule(scenario)
     return SingleStepPlan(
         source_path=source_path,
         feature_name=feature.name,
@@ -204,7 +370,14 @@ def _plan_for_feature(source_path, *, steps_dir):
         scenario_tags=scenario_tags,
         steps=tuple(selected_steps),
         step_scope=step_scope,
+        rule_name=parent_rule.name if parent_rule is not None else None,
+        scenario_line=getattr(scenario, "line", None),
     )
+
+
+def _scenario_rule(scenario):
+    parent = getattr(scenario, "parent", None)
+    return parent if getattr(parent, "keyword", None) == "Rule" or type(parent).__name__ == "Rule" else None
 
 
 def _select_scenario(scenario, *, example_index, row_index):

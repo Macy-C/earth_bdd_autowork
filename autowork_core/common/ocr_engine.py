@@ -480,11 +480,14 @@ def save_ocr_debug_image(image=None, monitor=None, candidates=None, target_text=
         labels.append((int(left), int(top), f"{index}: {text} ({confidence:.2f})", color))
 
     debug_image = _draw_debug_labels(debug_image, labels)
-    Paths.SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    from autowork_core.runtime.evidence.context import debug_image_directory, register_debug_image
+    output_dir = debug_image_directory(Paths.SCREENSHOTS_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
     unique_suffix = time.perf_counter_ns() % 1000000
     file_name = f"{safe_name(reason)}_{safe_name(str(target_text or 'all'))}_{timestamp()}_{unique_suffix}.png"
-    file_path = Paths.SCREENSHOTS_DIR / file_name
+    file_path = output_dir / file_name
     cv2.imwrite(str(file_path), debug_image)
+    register_debug_image(file_path, "OCR 调试图")
     logger.error("OCR debug image saved: {}", file_path)
     return str(file_path)
 

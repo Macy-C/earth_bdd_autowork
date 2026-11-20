@@ -18,6 +18,10 @@ from autowork_core.runtime.context_runtime import (
 from autowork_core.runtime.feature_runtime import create_feature_state as _create_feature_state
 from autowork_core.runtime.status import should_keep_artifacts
 from autowork_core.runtime.reporting import dispatch_report_hook
+from autowork_core.runtime.knowledge_capture import (
+    dispatch_knowledge_hook,
+    initialize_knowledge_capture,
+)
 from autowork_core.runtime.tag_manager import (
     TAG_MANAGER,
     TagOwner,
@@ -33,6 +37,8 @@ from autowork_core.runtime.scenario_runtime import (
     log_scenario_runtime_state as _log_scenario_runtime_state,
 )
 from config.settings import settings
+from autowork_core.runtime.evidence.context import ACTIVE_COLLECTOR, collector_for
+from autowork_core.runtime.evidence.lifecycle import dispatch_evidence
 
 
 __all__ = (
@@ -48,10 +54,16 @@ __all__ = (
 
 
 def before_all(context):
-    _set_log()
-    context.autowork_run = _create_run_state()
+    collector = ACTIVE_COLLECTOR.get()
+    if collector is None:
+        _set_log()
+    context.autowork_run = _create_run_state(collector=collector) if collector is not None else _create_run_state()
+    initialize_knowledge_capture(context)
     _start_run_indicator(context)
-    dispatch_report_hook(context.autowork_run.reporter, "before_all", context)
+    if collector is not None:
+        dispatch_evidence(context, "before_all")
+    else:
+        dispatch_report_hook(context.autowork_run.reporter, "before_all", context)
     logger.opt(colors=True).info(f"<green>{'《》' * 15} Test Start {'《》' * 15}</green>")
     if settings.ocr_warmup:
         try:
@@ -62,14 +74,19 @@ def before_all(context):
 
 def after_all(context):
     try:
-        dispatch_report_hook(context.autowork_run.reporter, "after_all", context)
+        if collector_for(context) is None:
+            dispatch_report_hook(context.autowork_run.reporter, "after_all", context)
     finally:
+        if collector_for(context) is None:
+            dispatch_knowledge_hook(context, "after_all")
         _close_run_indicator(context)
         logger.opt(colors=True).info(f"<green>{'《》' * 15} Test End {'《》' * 15}</green>")
 
 
 def before_feature(context, feature):
     context.autowork_feature = _create_feature_state(context.autowork_run)
+    dispatch_evidence(context, "before_feature", feature)
+    dispatch_knowledge_hook(context, "before_feature", feature)
     logger.opt(colors=True).info(fr"<green>{'#' * 34} Feature Start: {feature.name} {'#' * 34}</green>")
     logger.info(f"Feature step file: {_feature_display_path(feature)} -> {_current_step_scope_label()}")
     decision = TAG_MANAGER.resolve_runtime(
@@ -78,7 +95,8 @@ def before_feature(context, feature):
         feature.name,
         effective_tags=feature.effective_tags,
     )
-    dispatch_report_hook(context.autowork_run.reporter, "before_feature", context, feature)
+    if collector_for(context) is None:
+        dispatch_report_hook(context.autowork_run.reporter, "before_feature", context, feature)
     if decision.skip_reason:
         feature.skip()
         logger.opt(colors=True).info(
@@ -87,13 +105,19 @@ def before_feature(context, feature):
         return
 
 def after_feature(context, feature):
-    dispatch_report_hook(context.autowork_run.reporter, "after_feature", context, feature)
+    dispatch_knowledge_hook(context, "after_feature", feature)
+    if collector_for(context) is not None:
+        dispatch_evidence(context, "after_feature", feature)
+    else:
+        dispatch_report_hook(context.autowork_run.reporter, "after_feature", context, feature)
     logger.opt(colors=True).info(fr"<green>{'#' * 34} Feature End: {feature.name} {'#' * 34}</green>")
 
 
 def before_scenario(context, scenario):
     state = ScenarioRuntimeState()
     context.autowork_scenario = state
+    dispatch_evidence(context, "before_scenario", scenario)
+    dispatch_knowledge_hook(context, "before_scenario", scenario)
     logger.opt(colors=True).info(fr"<green>{'*' * 34} Scenario Start: {scenario.name} {'*' * 34}</green>")
     decision = TAG_MANAGER.resolve_runtime(
         scenario.tags,
@@ -102,7 +126,8 @@ def before_scenario(context, scenario):
         effective_tags=scenario.effective_tags,
     )
     state.tag_decision = decision
-    dispatch_report_hook(context.autowork_run.reporter, "before_scenario", context, scenario)
+    if collector_for(context) is None:
+        dispatch_report_hook(context.autowork_run.reporter, "before_scenario", context, scenario)
     if decision.skip_reason:
         _hide_run_indicator(context)
         scenario.skip()
@@ -119,7 +144,10 @@ def before_scenario(context, scenario):
     _show_run_indicator(context, scenario)
     try:
         _initialize_ui_scenario(context, scenario)
-    except Exception:
+    except Exception as error:
+        collector = collector_for(context)
+        if collector is not None:
+            collector.record_exception("before_scenario", error, node=collector.current_scenario)
         _hide_run_indicator(context)
         raise
 
@@ -149,7 +177,14 @@ def after_scenario(context, scenario):
             _finish_application_lifecycle(context, scenario)
         except Exception as error:
             errors.append(error)
-    dispatch_report_hook(context.autowork_run.reporter,"after_scenario",context,scenario,record_path=record_path,)
+    collector = collector_for(context)
+    if collector is not None:
+        for error in errors:
+            collector.record_exception("after_scenario", error, node=collector.current_scenario)
+        dispatch_evidence(context, "after_scenario", scenario, record_path=record_path)
+    else:
+        dispatch_report_hook(context.autowork_run.reporter,"after_scenario",context,scenario,record_path=record_path,)
+    dispatch_knowledge_hook(context, "after_scenario", scenario)
     logger.opt(colors=True).info(fr"<green>{'*' * 34} Scenario End: {scenario.name} {'*' * 34}</green>")
     if len(errors) == 1:
         raise errors[0]
@@ -158,12 +193,24 @@ def after_scenario(context, scenario):
 
 
 def before_step(context, step):
+    dispatch_evidence(context, "before_step", step)
+    dispatch_knowledge_hook(context, "before_step", step)
     _finalize_process_tracking_before_step(context)
     logger.opt(colors=True).info(fr"<green>proceed step ------ {step.name}</green>")
-    dispatch_report_hook(context.autowork_run.reporter, "before_step", context, step)
+    if collector_for(context) is None:
+        dispatch_report_hook(context.autowork_run.reporter, "before_step", context, step)
 
 
 def after_step(context, step):
+    dispatch_knowledge_hook(context, "after_step", step)
+    collector = collector_for(context)
+    if collector is not None:
+        dispatch_evidence(context, "after_step", step)
+        try:
+            collector.capture_failure(context, step)
+        except Exception as error:
+            collector.record_error("failure_screenshot", error)
+        return
     screenshot_path = None
     screenshot_error = None
     if should_keep_artifacts(step.status):

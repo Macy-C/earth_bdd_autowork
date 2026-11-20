@@ -45,6 +45,10 @@ class FeatureScopedRunner(BehaveRunner):
         reset_behave_step_state()
 
     def run_with_paths(self):
+        from autowork_core.runtime.evidence.lifecycle import execute_with_evidence
+        return execute_with_evidence(self, self._run_with_paths)
+
+    def _run_with_paths(self):
         self.context = Context(self)
         self.load_hooks()
         self.load_step_definitions()
@@ -71,6 +75,10 @@ class FeatureScopedRunner(BehaveRunner):
         return self.run_model()
 
     def run_model(self, features=None):
+        from autowork_core.runtime.evidence.lifecycle import execute_with_evidence
+        return execute_with_evidence(self, lambda: self._run_model(features))
+
+    def _run_model(self, features=None):
         selected_features = list(self.features if features is None else features)
         if not hasattr(self, "step_preflight"):
             self._preflight_steps(selected_features)
@@ -260,15 +268,10 @@ def _as_feature_path(feature_path):
 
 def _prepare_output_dirs(clear_screenshots=True):
     Paths.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    Paths.SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    Paths.RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
     if clear_screenshots:
-        del_all_file(Paths.SCREENSHOTS_DIR)
-        del_all_file(Paths.RECORDINGS_DIR)
-        del_all_file(Paths.REPORTS_DIR)
-    Paths.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    Paths.SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    Paths.RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        for directory in (Paths.SCREENSHOTS_DIR, Paths.RECORDINGS_DIR, Paths.REPORTS_DIR):
+            if directory.is_dir():
+                del_all_file(directory)
 
 
 def build_behave_args(feature_path, tags=None, verbose=True, formatter=None):

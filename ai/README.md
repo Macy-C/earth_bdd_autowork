@@ -9,16 +9,73 @@ ai/
   context/                  # 长期架构共识、维护与迁移约定
   prompts/                  # Copilot 工作流的权威正文
   instructions/             # Recorder 生成规则的权威正文
+  tools/
+    README.md               # 实现归属和工具清单
+    knowledge/              # 知识任务的实际 AI 辅助实现
+    __init__.py             # 包定义，不聚合业务 API
 ```
 
 项目资产入口见[`Bdd/ai/README.md`](../Bdd/ai/README.md)。
+
+## 目录分工与唯一正文
+
+| 层次 | 位置 | 职责 |
+| --- | --- | --- |
+| 平台接入 | [`.github/`](../.github/README.md) | Copilot 的发现、命令、Agent 和事件适配 |
+| 任务正文 | [prompts/](prompts/) | 意图判断、能力组合、停止条件和任务级边界 |
+| Recorder 领域规则 | [instructions/](instructions/) | 绑定 Recorder Job 的生成约束，不是普通 BDD 脚本的通用生成指南 |
+| 项目背景 | [context/](context/) | 架构共识、Schema 和 Policy，不保存运行事实 |
+| AI 辅助 | [工具索引](tools/README.md) | 按能力归类的 AI 专属内容编辑、上下文提取和输入编排 |
+| 基础业务 | [autowork_core/](../autowork_core/) | 不依赖 AI 的采集、导出、报告、执行和外部服务能力 |
+| 宿主适配 | [Bdd/](../Bdd/) | 项目原有脚本、配置和人工调用入口 |
+
+一个任务只维护一份工作流正文。`.github/prompts/` 的 `.prompt.md` 包含平台配置并
+引用这里的正文，不与 `ai/prompts/` 重复实现流程。Skill 也只保留发现与调用适配，
+不能为了接入而改变基础能力的生命周期。新增能力优先复用现有函数和入口；
+不建立额外注册中心，也不默认同时创建 Skill、Prompt、Agent 和 Hook。
+
+普通 Feature/Scenario 生成使用 [bdd-knowledge-generate 正文](prompts/bdd-knowledge-generate.md)、
+[项目来源说明](../Bdd/ai/README.md)以及按需展开的脚本/动作指南和当前 API。
+不要因为文件名含有 generation 就加载 `ai/instructions/bdd-generation.md` 或
+`ai/prompts/recorder-generate.md`；这两份工作流仅属于绑定 Job 的 Recorder 旅程。
+架构文档或 Wiki 中的 Recorder 引用不构成普通生成的后续加载指令，相关共享 API 查询不受此限制。
+
+## 当前入口索引
+
+| 能力 | 用户或宿主入口 | 唯一任务正文 | 实现归属 |
+| --- | --- | --- | --- |
+| 知识案例辅助 | [Knowledge Assist Skill](../.github/skills/knowledge-assist/SKILL.md) | [knowledge-assist.md](prompts/knowledge-assist.md) | 核心知识能力与 AI 润色辅助分开 |
+| 知识增强 BDD 生成 | [BDD Knowledge Generate Skill](../.github/skills/bdd-knowledge-generate/SKILL.md) | [bdd-knowledge-generate.md](prompts/bdd-knowledge-generate.md) | 本地 Coding Agent 的普通生成流程；P1 入口与正文已提供，工具接通、新会话发现及真实生成效果仍需验证 |
+| Recorder 生成 | [Recorder Generation Agent](../.github/agents/recorder-generation.agent.md)，内部加载 Skill | [recorder-generate.md](prompts/recorder-generate.md) | 核心 Recorder 协议与生成约束 |
+| 协作复盘 | [Review Prompt](../.github/prompts/collaboration-review.prompt.md) | [collaboration-review.md](prompts/collaboration-review.md) | 明确请求下的只读 AI 分析 |
+| 协作规则晋升 | [Promote Prompt](../.github/prompts/collaboration-promote.prompt.md) | [collaboration-promote.md](prompts/collaboration-promote.md) | 明确批准边界内的规则维护 |
+| 最终报告辅助 | [Report Merge Skill](../.github/skills/report-merge/SKILL.md)；[项目脚本](../Bdd/final_report.py) 独立保留 | [report-merge.md](prompts/report-merge.md) | [核心报告模块](../autowork_core/runtime/reporting/final_report.py)，AI 仅做意图组合及可选分析 |
+| 框架文档同步 | [Document Sync Skill](../.github/skills/document-sync/SKILL.md) | [document-sync.md](prompts/document-sync.md) | [文档同步核心](../autowork_core/knowledge/document_sync.py) 与[后台更新任务](../autowork_core/knowledge/document_update.py)；统一刷新哈希，确认后保留并标记旧版、验证新版再删指定旧 ID；任务状态可查询、恢复和取消，普通上传不删除 |
+
+## 工具分类原则
+
+`tools/knowledge/` 保存当前知识任务的真实 AI 辅助。工具根目录不放业务实现、
+聚合业务导出或临时转发层。只有确实有 AI 辅助代码时才建立子包，
+不能把已有核心函数为了 Skill 再包装成一套业务实现。历史讨论文档用于解释背景；
+当前入口以本索引、任务正文和代码为准。
+
+[manifest.json](manifest.json) 是 AI 资产包的发现与交付清单，不是运行时工作流注册中心、
+业务配置或执行状态源。新增入口时同步清单和本索引，但不为文档整理改动 Recorder 协议版本。
+
+采集导出、证据抽取、文档校验、WeKnora 传输客户端和基础 CLI 位于
+[`autowork_core/knowledge/`](../autowork_core/knowledge/)。它们不依赖 AI 或 Skill；
+采集运行时直接调用核心导出，基础命令入口是
+`python -B -m autowork_core.knowledge`，函数从对应核心模块调用。
+Skill 根据用户意图组合能力，不能把润色、
+上传和 Wiki 审阅绑定为必经流程。
 
 ## 生命周期边界
 
 | 位置 | 生命周期 | 内容 |
 | --- | --- | --- |
-| `ai/context`、`ai/prompts`、`ai/instructions` | 随代码版本化 | 人工可读且需要审阅的 AI 约定 |
+| `ai/context`、`ai/prompts`、`ai/instructions`、`ai/tools` | 随代码版本化 | 人工可读且需要审阅的 AI 约定与确定性辅助工具 |
 | `Bdd/ai/knowledge` | 跨 Run 持久化，单独备份 | 已确认 Plan、Capability、生成结果、反馈和 provisional insight |
+| `artifacts/knowledge-captures/<run_id>` | 绑定单次采集 Run，远端接受后可按整 Run 清理 | 运行观察 `observations.json`、去重 PNG 截图、AI 润色规格与生成的单文档图文案例 |
 | `artifacts/recording_sessions/<run>/ai` | 绑定单次 Run，可退役 | Request、Brief、Decision、Plan、transaction 和 forensic 工件 |
 | Copilot `/memories/repo/` | 本机缓存，可丢失 | 编辑器为了当前 workspace 提供的辅助记忆 |
 

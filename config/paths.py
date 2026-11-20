@@ -23,6 +23,8 @@ class Paths:
     ALLURE_CLI_DIR = RESOURCES_DIR / "allure_cli"
     FFMPEG_DIR = RESOURCES_DIR / "ffmpeg"
     FFMPEG_EXE = FFMPEG_DIR / "current" / "bin" / "ffmpeg.exe"
+    BROWSER_DIR = RESOURCES_DIR / "browser"
+    BROWSER_CURRENT_DIR = BROWSER_DIR / "current"
 
     FEATURES_DIR = BDD_DIR / "features"
     TEST_FEATURES_DIR = BDD_DIR / "test_features"

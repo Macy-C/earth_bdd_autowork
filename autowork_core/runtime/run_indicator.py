@@ -18,6 +18,7 @@ class AutomationRunIndicator:
     HEIGHT = 56
     _STATE_MESSAGE = win32con.WM_APP + 41
     _TIMER_ID = 1
+    _WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
     def __init__(
             self,
@@ -163,6 +164,13 @@ class AutomationRunIndicator:
                 255,
                 win32con.LWA_ALPHA,
             )
+            try:
+                ctypes.windll.user32.SetWindowDisplayAffinity(
+                    handle,
+                    self._WDA_EXCLUDEFROMCAPTURE,
+                )
+            except (AttributeError, OSError):
+                pass
             with self._lock:
                 self._handle = handle
             self._ready.set()

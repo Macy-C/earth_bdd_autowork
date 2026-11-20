@@ -34,6 +34,14 @@ WindowPage/WindowView 拥有稳定窗口与 locator，通用 actions 不承载�
 - 不确定性先用代码、测试、证据或低风险检查消除；仍影响业务、范围、安全或不可逆操作时，
   说明选项与后果后再问用户，不猜测。
 
+## AI 扩展边界
+
+- 基础能力保留函数、脚本或界面入口；Skill 是可选的自然语言入口，不能让原有能力反向依赖 AI。
+- 确定性的采集、导出、校验和外部服务客户端归核心业务模块；AI 推理、受保护叙事编辑、提示词和任务组合归 AI 层。
+- 按当前用户意图组合动作。只润色不上传，只上传不自动润色或审阅；用户明确要求优先于文件名约定。
+- 本地任务不要求远端配置。文件上传结果独立于后续标签、远端解析和 Wiki 验收；删除与清理不由上传隐含触发。
+- 本边界不改变下述 Recorder Job 的证据、权限和受控生成协议。
+
 ## Recorder 受控生成
 
 Recorder 生成是独立功能域。修改其架构或协议前，先读取 [Recorder 设计](../../docs/维护/3.Recorder设计.md)、
@@ -45,8 +53,14 @@ Recorder 生成是独立功能域。修改其架构或协议前，先读取 [Rec
 
 - `CaptureRuntime` 拥有 Hook、视频、暂停、观察、通知与 stop/abort；完整性不一致失败关闭。
 - `RecorderWorkbench` 拥有录制期间窗口最小化/恢复；`OperationCoordinator` 是 UI/application 后台边界。
-- `scenario_runtime` 只拥有通用启动、进程追踪、录屏和 Hook 顺序；宿主经 `Bdd.application` 提供准备/清理，
-  不引入产品 Page、设备或资源标签。
+- `scenario_runtime` 拥有通用启动、进程追踪和应用资源清理；普通 BDD 的执行证据、失败截图及录屏策略
+  由运行级 `RunEvidenceCollector` 统一拥有，Hook 只编排时序。宿主经 `Bdd.application` 提供准备/清理，
+  不引入产品 Page、设备或资源标签。报告和知识导出读取统一快照，不独立重采；轻量动作调试默认不采集。
+- Collector 在 runner 出口取得真实整体结果后封存；场景结果、runner_outcome、采集完整性和交付结果
+  分开记录。现有 Run Result 聚合/指纹/provenance 不变，受控 Recorder CaptureRuntime 不参与这次归集。
+- 正常 BDD 的采集日志和媒体由 Collector.start 单次装配，RunState 只引用同一能力；Hook 和消费者
+  不再另行安装或关闭。执行/交付日志在本 Run 内分离，close 释放本次资源并恢复已有日志回调，
+  不回写封存证据；无 Collector 的独立工具保留自己的装配与输出。
 - UI 只读取 Query Service DTO；投影、Request、编排和 Reconciler I/O 各有 owner，规则层不得反向调用
   application service。
 - 普通 Recorder 只让用户录制、暂停、F9 检查、忽略误录、整段补录和回答业务问题；用户技术性

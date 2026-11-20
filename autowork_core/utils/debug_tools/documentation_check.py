@@ -41,6 +41,7 @@ MARKDOWN_PATTERNS = (
     "ai/context/*.md",
     "ai/prompts/*.md",
     "ai/instructions/*.md",
+    "ai/tools/**/*.md",
     ".github/*.md",
     ".github/agents/*.md",
     ".github/prompts/*.md",
@@ -299,7 +300,7 @@ def inspect_documentation(project_root):
         "agent": ".github/agents/recorder-generation.agent.md",
         "hook_scope": "agent",
         "windows_hook_wrapper": (
-            ".github/hooks/scripts/recorder-generation.ps1"
+            ".github/hooks/messy/recorder-generation.ps1"
         ),
         "trigger": "select Recorder Generation Agent and submit <job-path>",
         "scope": "bound_generation_job",
@@ -430,7 +431,7 @@ def inspect_documentation(project_root):
         "session_start_hook": (root, root / ".github" / "hooks", True),
         "session_start_hook_windows_wrapper": (
             root,
-            root / ".github" / "hooks" / "scripts",
+            root / ".github" / "hooks" / "messy",
             True,
         ),
     }
@@ -457,7 +458,7 @@ def inspect_documentation(project_root):
             ).as_posix(),
             "session_start_hook": ".github/hooks/shadow-companion.json",
             "session_start_hook_windows_wrapper": (
-                ".github/hooks/scripts/shadow-companion.ps1"
+                ".github/hooks/messy/shadow-companion.ps1"
             ),
             "enabled": True,
             "scope": "project_engineering_work",
@@ -601,7 +602,7 @@ def inspect_documentation(project_root):
 
     retired_collaboration_hooks = (
         ".github/hooks/collaboration-review.json",
-        ".github/hooks/scripts/collaboration-review.ps1",
+        ".github/hooks/messy/collaboration-review.ps1",
     )
     for relative in retired_collaboration_hooks:
         if (root / relative).is_file():

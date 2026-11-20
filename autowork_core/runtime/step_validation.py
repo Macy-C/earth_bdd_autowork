@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
+import io
+import json
+import os
 import re
+import socket
+import subprocess
 import sys
+import time
 import tokenize
 from collections import defaultdict
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
+from unittest.mock import patch
 
 import behave
 from behave import step_registry as behave_step_registry
@@ -123,6 +132,10 @@ class StepPreflightResult:
 
 
 class StepPreflightError(ConfigError):
+    pass
+
+
+class _SelectedResourceUnavailable(RuntimeError):
     pass
 
 
@@ -536,6 +549,33 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show the resolved layered Step files for each Scenario.",
     )
+    parser.add_argument(
+        "--scenario",
+        help="Check one Scenario in --feature-path without importing Steps.",
+    )
+    parser.add_argument(
+        "--example-id",
+        help="Select one expanded Outline example by its existing row ID.",
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        help="Return a selected-Scenario report with per-check timings.",
+    )
+    parser.add_argument(
+        "--resources",
+        action="store_true",
+        help="Preflight resources through guarded loading of trusted local declarations.",
+    )
+    parser.add_argument(
+        "--prepare-generation",
+        action="store_true",
+        help=(
+            "Output a static JSON context bundle for ordinary scenario generation "
+            "without importing step/page modules or reading existing target step bodies."
+        ),
+    )
     return parser
 
 
@@ -544,6 +584,53 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     steps_dir = resolve_project_path(args.steps_dir)
     base_dir = Path.cwd()
+
+    if args.example_id and not args.scenario:
+        parser.error("--example-id requires --scenario")
+    if args.json_output and not args.scenario:
+        parser.error("--json requires --scenario and --feature-path")
+    if args.resources and not args.scenario:
+        parser.error("--resources requires --scenario and --feature-path")
+    if args.prepare_generation and (not args.scenario or not args.feature_path):
+        parser.error("--prepare-generation requires --scenario and --feature-path")
+    if args.prepare_generation:
+        bundle = prepare_generation_context(
+            steps_dir,
+            resolve_project_path(args.feature_path),
+            base_dir,
+            scenario_name=args.scenario,
+            example_id=args.example_id,
+        )
+        if args.json_output:
+            print(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")))
+        else:
+            print(format_generation_context(bundle))
+        return bundle["exit_code"]
+    if args.scenario:
+        if not args.feature_path:
+            parser.error("--scenario requires --feature-path")
+        if args.no_undefined:
+            parser.error("Selected-Scenario checks cannot disable undefined checks")
+        report = check_selected_scenario(
+            steps_dir,
+            resolve_project_path(args.feature_path),
+            base_dir,
+            scenario_name=args.scenario,
+            example_id=args.example_id,
+            cross_type=args.cross_type,
+            resources=args.resources,
+        )
+        if args.json_output:
+            print(json.dumps(report, ensure_ascii=False))
+        else:
+            for name, result in report["checks"].items():
+                print(f"{name}: {result['status']}")
+                if result.get("details"):
+                    print(result["details"])
+                for warning in result.get("warnings", ()):
+                    print(f"WARNING: {warning}")
+            print(f"duration_seconds: {report['duration_seconds']:.6f}")
+        return report["exit_code"]
 
     if not steps_dir.exists():
         print(f"Steps directory does not exist: {steps_dir}", file=sys.stderr)
@@ -579,6 +666,1087 @@ def main(argv: list[str] | None = None) -> int:
         f"in {len(scanned_files)} files."
     )
     return 0
+
+
+def check_selected_scenario(
+        steps_dir,
+        feature_path,
+        base_dir,
+        *,
+        scenario_name,
+        example_id=None,
+        cross_type=False,
+        resources=False,
+):
+    started = time.perf_counter()
+    report = {
+        "selection": {
+            "feature": display_path(Path(feature_path), Path(base_dir)),
+            "scenario": scenario_name,
+            "example_id": example_id,
+            "scope_files": [],
+        },
+        "checks": {
+            "syntax": {"status": "not_run", "duration_seconds": 0},
+            "bindings": {"status": "not_run", "duration_seconds": 0},
+            "resources": {
+                "status": "not_run" if resources else "not_requested",
+                "duration_seconds": 0,
+            },
+        },
+        "status": "failed",
+        "exit_code": 2,
+        "limitations": [
+            "Static checks do not execute Steps or validate product behavior.",
+            "Resource loading supports trusted local declarations, not arbitrary Python.",
+            "Named-reference preflight does not validate every Step-local locator or UI match.",
+        ],
+    }
+    stage_started = started
+    stage = "syntax"
+    try:
+        steps_dir = Path(steps_dir).resolve()
+        feature_path = Path(feature_path).resolve()
+        if not steps_dir.is_dir() or not feature_path.is_file():
+            raise ValueError("Selected check requires a Step directory and one Feature file")
+        feature = parse_file(str(feature_path))
+        required = {"name": scenario_name, "example_id": example_id}
+        scenarios = [
+            scenario
+            for scenario in feature.walk_scenarios()
+            if _scenario_matches_requirement(scenario, required)
+        ]
+        if len(scenarios) != 1:
+            raise ValueError(
+                "Select exactly one Scenario/Example; check its name and --example-id"
+            )
+        scope = resolved_step_scope_for_scenario(feature, scenarios[0], steps_dir)
+        report["selection"]["scope_files"] = list(scope.files)
+        for file_value in scope.files:
+            file_path = (steps_dir / file_value).resolve()
+            compile(read_python_source(file_path), str(file_path), "exec")
+        report["checks"][stage] = {
+            "status": "passed",
+            "duration_seconds": time.perf_counter() - stage_started,
+        }
+
+        stage = "bindings"
+        stage_started = time.perf_counter()
+        details = io.StringIO()
+        with redirect_stdout(details), redirect_stderr(details):
+            result = check_features(
+                steps_dir,
+                feature_path,
+                Path(base_dir),
+                cross_type=cross_type,
+                check_undefined=True,
+                required_scenario=required,
+            )
+        report["checks"][stage] = {
+            "status": "passed" if result == 0 else "failed",
+            "details": details.getvalue().strip(),
+            "duration_seconds": time.perf_counter() - stage_started,
+        }
+        report["status"] = "passed" if result == 0 else "failed"
+        report["exit_code"] = result
+        if result == 0 and resources:
+            stage = "resources"
+            stage_started = time.perf_counter()
+            details = io.StringIO()
+            with redirect_stdout(details), redirect_stderr(details):
+                warnings = _check_selected_resources(
+                    feature, scenarios[0], scope, steps_dir
+                )
+            report["checks"][stage] = {
+                "status": "passed",
+                "warnings": list(warnings),
+                "details": details.getvalue().strip(),
+                "duration_seconds": time.perf_counter() - stage_started,
+            }
+    except _SelectedResourceUnavailable as error:
+        report["checks"][stage] = {
+            "status": "unverified",
+            "details": str(error),
+            "duration_seconds": time.perf_counter() - stage_started,
+        }
+        report["status"] = "partial"
+        report["exit_code"] = 2
+    except ResourcePreflightError as error:
+        report["checks"][stage] = {
+            "status": "failed",
+            "details": str(error),
+            "duration_seconds": time.perf_counter() - stage_started,
+        }
+        report["status"] = "failed"
+        report["exit_code"] = 1
+    except Exception as error:
+        report["checks"][stage] = {
+            "status": "failed",
+            "details": f"{type(error).__name__}: {error}",
+            "duration_seconds": time.perf_counter() - stage_started,
+        }
+    finally:
+        report["duration_seconds"] = time.perf_counter() - started
+    return report
+
+
+def prepare_generation_context(
+        steps_dir,
+        feature_path,
+        base_dir,
+        *,
+        scenario_name,
+        example_id=None,
+):
+    started = time.perf_counter()
+    base_dir = Path(base_dir).resolve()
+    bundle = {
+        "selection": {
+            "feature": display_path(Path(feature_path), base_dir),
+            "scenario": scenario_name,
+            "example_id": example_id,
+        },
+        "status": "failed",
+        "exit_code": 2,
+    }
+    try:
+        steps_dir = Path(steps_dir).resolve()
+        feature_path = Path(feature_path).resolve()
+        if not steps_dir.is_dir() or not feature_path.is_file():
+            raise ValueError(
+                "Generation context preparation requires a Step directory and one Feature file"
+            )
+        project_root = (
+            steps_dir.parent.parent
+            if steps_dir.parent.name.casefold() == "bdd"
+            else steps_dir.parent
+        )
+        bdd_dir = steps_dir.parent
+        feature = parse_file(str(feature_path))
+        required = {"name": scenario_name, "example_id": example_id}
+        scenarios = [
+            item
+            for item in feature.walk_scenarios()
+            if _scenario_matches_requirement(item, required)
+        ]
+        outline_template = None
+        if not scenarios and example_id is None:
+            name_matches = [
+                item
+                for item in feature.walk_scenarios()
+                if _scenario_name_matches(item, scenario_name)
+            ]
+            parent_templates = {
+                id(getattr(item, "parent", item)): getattr(item, "parent", item)
+                for item in name_matches
+            }
+            if name_matches and len(parent_templates) == 1:
+                candidate_template = next(iter(parent_templates.values()))
+                if isinstance(candidate_template, ScenarioOutline):
+                    outline_template = candidate_template
+                    scenarios = name_matches
+        if not scenarios or (outline_template is None and len(scenarios) != 1):
+            raise ValueError(
+                "Select exactly one Scenario/Example; check its name and --example-id"
+            )
+        scenario = scenarios[0]
+        scope = resolved_step_scope_for_scenario(
+            feature,
+            scenario,
+            steps_dir,
+            require_files=False,
+        )
+        target_step_path = (steps_dir / scope.entry_file).resolve()
+        companion_md_path = target_step_path.with_suffix(".md")
+        target_step_bytes = (
+            target_step_path.stat().st_size
+            if target_step_path.is_file()
+            else 0
+        )
+        companion_md_bytes = (
+            companion_md_path.stat().st_size
+            if companion_md_path.is_file()
+            else 0
+        )
+        companion_status = _read_companion_frontmatter_status(companion_md_path)
+        missing_parent_scope_files = [
+            display_path((steps_dir / file_value).resolve(), base_dir).replace("\\", "/")
+            for file_value in scope.files
+            if file_value != scope.entry_file and not (steps_dir / file_value).is_file()
+        ]
+        validation_example_ids = [
+            str(getattr(getattr(item, "_row", None), "id", "") or "")
+            for item in scenarios
+            if getattr(getattr(item, "_row", None), "id", None)
+        ]
+        bundle["selection"].update({
+            "feature_name": str(feature.name),
+            "is_scenario_outline": outline_template is not None or bool(validation_example_ids),
+            "validation_example_ids": validation_example_ids,
+            "scope_files": list(scope.files),
+            "entry_file": scope.entry_file,
+            "scope_origin": scope.origin,
+            "file_statuses": dict(scope.file_statuses),
+            "missing_parent_scope_files": missing_parent_scope_files,
+            "target_step_file": display_path(target_step_path, base_dir).replace("\\", "/"),
+            "target_step_exists": target_step_path.is_file(),
+            "target_step_bytes": target_step_bytes,
+            "companion_md_file": display_path(companion_md_path, base_dir).replace("\\", "/"),
+            "companion_md_exists": companion_md_path.is_file(),
+            "companion_md_bytes": companion_md_bytes,
+            "companion_status": companion_status,
+            "generation_mode": (
+                "resume"
+                if companion_status in {"needs_confirmation", "blocked"} and companion_md_bytes > 0
+                else "initial"
+            ),
+        })
+        if outline_template is not None:
+            bundle["examples"] = [
+                {
+                    "name": str(ex.name or ""),
+                    "headings": [str(h) for h in ex.table.headings],
+                    "rows": [
+                        {
+                            "example_id": f"{ex_idx}.{row_idx}",
+                            "cells": [str(cell) for cell in row.cells],
+                        }
+                        for row_idx, row in enumerate(ex.table.rows, start=1)
+                    ],
+                }
+                for ex_idx, ex in enumerate(getattr(outline_template, "examples", ()), start=1)
+                if getattr(ex, "table", None) is not None
+            ]
+
+        shared_files = [
+            (steps_dir / file_value).resolve()
+            for file_value in scope.files
+            if file_value != scope.entry_file and (steps_dir / file_value).is_file()
+        ]
+        shared_layers = []
+        for shared_path in shared_files:
+            definitions, _ = collect_step_definitions(steps_dir, files=[shared_path])
+            shared_layers.append(definitions)
+        shared_definitions = _compose_layered_definitions(shared_layers)
+
+        raw_steps = (
+            [*(getattr(scenario, "background_steps", None) or ()), *outline_template.steps]
+            if outline_template is not None
+            else list(scenario.all_steps)
+        )
+        expanded_steps = list(scenario.all_steps)
+        scenario_steps = []
+        for index, step in enumerate(raw_steps, start=1):
+            expanded_step = expanded_steps[index - 1] if index - 1 < len(expanded_steps) else step
+            feature_step = FeatureStep(
+                step_type=str(expanded_step.step_type),
+                keyword=str(step.keyword).strip(),
+                text=str(expanded_step.name),
+                file_path=feature_path,
+                line=int(step.location.line),
+            )
+            matched_shared = [
+                definition
+                for definition in shared_definitions
+                if step_definition_matches(definition, feature_step)
+            ]
+            step_table = getattr(step, "table", None)
+            table_payload = (
+                {
+                    "headings": [str(heading) for heading in step_table.headings],
+                    "rows": [
+                        [str(cell) for cell in row.cells]
+                        for row in step_table.rows
+                    ],
+                }
+                if step_table is not None
+                else None
+            )
+            step_item = {
+                "index": index,
+                "step_type": feature_step.step_type,
+                "keyword": feature_step.keyword,
+                "text": str(step.name),
+                "line": feature_step.line,
+                "bound_in_shared_scope": (
+                    {
+                        "file": display_path(matched_shared[-1].file_path, base_dir).replace("\\", "/"),
+                        "line": matched_shared[-1].line,
+                        "function": matched_shared[-1].function_name,
+                    }
+                    if matched_shared
+                    else None
+                ),
+            }
+            if table_payload is not None:
+                step_item["table"] = table_payload
+            if getattr(step, "text", None):
+                step_item["text_block"] = str(step.text)
+            scenario_steps.append(step_item)
+        bundle["scenario_steps"] = scenario_steps
+
+        candidate_step_files = list(shared_files)
+        if target_step_path.parent.is_dir() and target_step_path.parent != steps_dir:
+            for sibling_path in sorted(target_step_path.parent.glob("*.py")):
+                resolved_sibling = sibling_path.resolve()
+                if (
+                    resolved_sibling == target_step_path
+                    or resolved_sibling.name == "__init__.py"
+                    or resolved_sibling in candidate_step_files
+                ):
+                    continue
+                candidate_step_files.append(resolved_sibling)
+
+        sibling_steps = []
+        referenced_page_names: set[str] = set()
+        referenced_view_attrs: dict[str, set[str]] = defaultdict(set)
+        for step_file_path in candidate_step_files[:6]:
+            definitions, _ = collect_step_definitions(steps_dir, files=[step_file_path])
+            source_text = read_python_source(step_file_path)
+            lines = source_text.splitlines()
+            try:
+                step_tree = ast.parse(source_text, filename=str(step_file_path))
+            except SyntaxError:
+                step_tree = None
+            if step_tree is not None:
+                pages_used, views_used = _extract_step_ast_usage(step_tree)
+                referenced_page_names.update(pages_used)
+                for page_name, view_names in views_used.items():
+                    referenced_view_attrs[page_name].update(view_names)
+            sibling_steps.append({
+                "file": display_path(step_file_path, base_dir).replace("\\", "/"),
+                "empty": not bool(source_text.strip()),
+                "lines": len(lines),
+                "step_definitions": [
+                    {
+                        "step_type": item.step_type,
+                        "pattern": item.pattern,
+                        "function": item.function_name,
+                        "line": item.line,
+                    }
+                    for item in definitions
+                ],
+            })
+        bundle["sibling_steps"] = sibling_steps
+
+        scenario_text_parts = [
+            str(feature.name),
+            *(str(d) for d in getattr(feature, "description", ()) or ()),
+            *(str(r.name) for r in getattr(feature, "rules", ()) or ()),
+            str(scenario_name),
+            *(item["text"] for item in scenario_steps),
+        ]
+        for item in scenario_steps:
+            if "table" in item:
+                scenario_text_parts.extend(item["table"].get("headings", ()))
+                for row in item["table"].get("rows", ()):
+                    scenario_text_parts.extend(row)
+        scenario_tokens = _tokenize_domain_terms(" ".join(scenario_text_parts))
+
+        referenced_pages, other_pages = _build_page_and_locator_catalog(
+            bdd_dir=bdd_dir,
+            project_root=project_root,
+            base_dir=base_dir,
+            steps_dir=steps_dir,
+            referenced_page_names=referenced_page_names,
+            referenced_view_attrs=referenced_view_attrs,
+            scenario_tokens=scenario_tokens,
+        )
+        bundle["referenced_pages"] = referenced_pages
+        bundle["other_pages"] = other_pages
+        bundle["status"] = "ok"
+        bundle["exit_code"] = 0
+    except Exception as error:
+        bundle["error"] = f"{type(error).__name__}: {error}"
+        bundle["status"] = "failed"
+        bundle["exit_code"] = 2
+    finally:
+        bundle["duration_seconds"] = time.perf_counter() - started
+    return bundle
+
+
+def _read_companion_frontmatter_status(md_path: Path) -> str | None:
+    if not md_path.is_file():
+        return None
+    try:
+        lines = md_path.read_text(encoding="utf-8-sig").splitlines()[:25]
+    except OSError:
+        return None
+    if not lines:
+        return None
+    if lines[0].strip() == "---":
+        for line in lines[1:]:
+            stripped = line.strip()
+            if stripped == "---":
+                break
+            if stripped.lower().startswith("status:"):
+                return stripped.split(":", 1)[1].strip().strip("`\"'") or None
+        return None
+    status_pattern = re.compile(
+        r"^(?:[-*]\s+)?(?:\*\*)?status(?:\*\*)?\s*:\s*`?([A-Za-z0-9_-]+)`?",
+        re.IGNORECASE,
+    )
+    for line in lines:
+        match = status_pattern.match(line.strip())
+        if match:
+            return match.group(1).strip() or None
+    return None
+
+
+def _extract_step_ast_usage(tree: ast.AST) -> tuple[set[str], dict[str, set[str]]]:
+    known_page_imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and "page_obj" in node.module:
+            for alias in node.names:
+                known_page_imports.add(alias.asname or alias.name)
+    used_pages: set[str] = set()
+    views_by_page: dict[str, set[str]] = defaultdict(set)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        var_to_page: dict[str, str] = {}
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Name)
+                and sub.func.id == "get_page"
+                and len(sub.args) >= 2
+                and isinstance(sub.args[1], ast.Name)
+            ):
+                used_pages.add(sub.args[1].id)
+            if isinstance(sub, ast.Assign) and len(sub.targets) == 1 and isinstance(sub.targets[0], ast.Name):
+                target_name = sub.targets[0].id
+                val = sub.value
+                if (
+                    isinstance(val, ast.Call)
+                    and isinstance(val.func, ast.Name)
+                    and val.func.id == "get_page"
+                    and len(val.args) >= 2
+                    and isinstance(val.args[1], ast.Name)
+                ):
+                    var_to_page[target_name] = val.args[1].id
+                    used_pages.add(val.args[1].id)
+                elif (
+                    isinstance(val, ast.Attribute)
+                    and isinstance(val.value, ast.Call)
+                    and isinstance(val.value.func, ast.Name)
+                    and val.value.func.id == "get_page"
+                    and len(val.value.args) >= 2
+                    and isinstance(val.value.args[1], ast.Name)
+                ):
+                    page_cls = val.value.args[1].id
+                    used_pages.add(page_cls)
+                    views_by_page[page_cls].add(val.attr)
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name):
+                page_cls = var_to_page.get(sub.value.id)
+                if page_cls:
+                    views_by_page[page_cls].add(sub.attr)
+    return (used_pages or known_page_imports), views_by_page
+
+
+def _extract_ast_strings(node: ast.AST | None) -> list[str]:
+    if node is None:
+        return []
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return [
+            elt.value
+            for elt in node.elts
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+        ]
+    return []
+
+
+def _format_method_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    params = [
+        arg.arg
+        for arg in node.args.args
+        if arg.arg not in {"self", "cls"}
+    ]
+    for kwarg in node.args.kwonlyargs:
+        params.append(f"{kwarg.arg}=...")
+    return f"{node.name}({', '.join(params)})"
+
+
+def _load_compact_locator_map(locators_dir: Path, rel_path: str) -> dict:
+    import yaml
+
+    path_str = str(rel_path)
+    if not path_str.endswith((".yaml", ".yml")):
+        path_str += ".yaml"
+    full_path = (locators_dir / path_str).resolve()
+    if not full_path.is_file():
+        return {}
+    try:
+        raw = yaml.safe_load(full_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    items = raw.get("locators") if isinstance(raw.get("locators"), dict) else raw
+    compact = {}
+    for key, val in items.items():
+        if isinstance(val, dict):
+            by_val = str(val.get("by") or "")
+            loc_val = str(val.get("value") or "")
+            if by_val == "xpath" and loc_val:
+                parts = re.split(r"/(?=(?:[^']*'[^']*')*[^']*$)", loc_val)
+                parts = [part for part in parts if part]
+                if len(parts) >= 2 and parts[-1].startswith("next::"):
+                    compact[str(key)] = f"{parts[-2]}/{parts[-1]}"
+                else:
+                    compact[str(key)] = parts[-1] if parts else loc_val
+            elif by_val and loc_val:
+                compact[str(key)] = f"{by_val}:{loc_val}"
+            else:
+                compact[str(key)] = val
+    return compact
+
+
+def format_generation_context(bundle: dict) -> str:
+    if bundle.get("status") != "ok":
+        return f"GENERATION_CONTEXT_ERROR: {bundle.get('error', 'unknown error')}"
+    sel = bundle["selection"]
+    ex_info = (
+        f"example_id={sel['example_id']} (outline_example_ids={sel.get('validation_example_ids')})"
+        if sel.get("is_scenario_outline")
+        else f"example_id={sel['example_id']}"
+    )
+    target_empty_note = (
+        ", content='' [0-byte empty file: replace directly without read_file]"
+        if sel["target_step_exists"] and sel["target_step_bytes"] == 0
+        else ""
+    )
+    companion_empty_note = (
+        ", content='' [0-byte empty file: replace directly without read_file]"
+        if sel["companion_md_exists"] and sel["companion_md_bytes"] == 0
+        else ""
+    )
+    lines = [
+        f"=== GENERATION CONTEXT ({sel['generation_mode']}) ===",
+        f"Feature: {sel['feature_name']} ({sel['feature']})",
+        f"Scenario: {sel['scenario']} | {ex_info} | scope={sel['scope_files']}",
+        (
+            f"Target Step: {sel['target_step_file']} "
+            f"(exists={sel['target_step_exists']}, bytes={sel['target_step_bytes']}{target_empty_note})"
+        ),
+        (
+            f"Companion MD: {sel['companion_md_file']} "
+            f"(exists={sel['companion_md_exists']}, bytes={sel['companion_md_bytes']}, "
+            f"status={sel['companion_status']}{companion_empty_note})"
+        ),
+    ]
+    if sel.get("missing_parent_scope_files"):
+        lines.append(
+            f"Missing Parent Scope Files (create empty placeholder if needed): "
+            f"{sel['missing_parent_scope_files']}"
+        )
+    lines.append("\n[Scenario Steps]")
+    for st in bundle["scenario_steps"]:
+        shared = (
+            f" -> bound:{st['bound_in_shared_scope']['file']}:{st['bound_in_shared_scope']['function']}"
+            if st["bound_in_shared_scope"]
+            else " -> [TO IMPLEMENT]"
+        )
+        lines.append(f"  {st['index']}. L{st['line']} [{st['step_type']}] {st['keyword']} {st['text']}{shared}")
+        if "table" in st:
+            lines.append(f"     Table: {st['table']['headings']} | rows={st['table']['rows']}")
+    if bundle.get("examples"):
+        lines.append("\n[Scenario Outline Examples]")
+        for ex in bundle["examples"]:
+            rows_str = ", ".join(f"{r['example_id']}:{r['cells']}" for r in ex["rows"])
+            lines.append(f"  Headings: {ex['headings']} | Rows: {rows_str}")
+    lines.append("\n[Sibling Steps]")
+    for sb in bundle["sibling_steps"]:
+        defs = ", ".join(
+            f"{d['step_type']}:{d['function']}@L{d['line']}"
+            for d in sb["step_definitions"]
+        ) or "none"
+        lines.append(f"  - {sb['file']} (empty={sb['empty']}, lines={sb['lines']}): {defs}")
+    lines.append("\n[Referenced Pages & Locators]")
+    total_loc_count = sum(
+        len(lmap)
+        for rp in bundle["referenced_pages"]
+        for vd in rp["expanded_views"].values()
+        for lmap in vd["locators"].values()
+    )
+    compact_large_files = total_loc_count > 75
+    for rp in bundle["referenced_pages"]:
+        aud = rp["resource_preflight_audit"]
+        aud_str = aud["status"] if aud["status"] == "passed" else f"unverified ({aud.get('reason')})"
+        lines.append(
+            f"  * {rp['class_name']} ({rp['file']}) "
+            f"root={rp['root_locator']} ({rp['root_locator_file']}) preflight={aud_str}"
+        )
+        if rp["public_methods"]:
+            lines.append(f"    methods: {', '.join(rp['public_methods'])}")
+        if rp["root_locators"]:
+            lines.append(f"    root_locators: {', '.join(rp['root_locators'].keys())}")
+        for vn, vd in rp["expanded_views"].items():
+            lines.append(f"    view .{vn} -> {vd['view_class']} ({vd['file']}):")
+            for lf, lmap in vd["locators"].items():
+                if compact_large_files and len(lmap) >= 15:
+                    pairs = ", ".join(lmap.keys())
+                else:
+                    pairs = ", ".join(f"{lk}={lv}" for lk, lv in lmap.items())
+                lines.append(f"      [{lf}] {pairs}")
+        if rp["other_views"]:
+            other_v = (
+                ", ".join(rp["other_views"].keys())
+                if isinstance(rp["other_views"], dict)
+                else ", ".join(rp["other_views"])
+            )
+            lines.append(f"    other_views: {other_v}")
+    lines.append("\n[Other Pages]")
+    for op in bundle["other_pages"]:
+        aud = op["resource_preflight_audit"]
+        aud_str = aud["status"] if aud["status"] == "passed" else f"unverified ({aud.get('reason')})"
+        v_str = (
+            ", ".join(f"{k}({','.join(v)})" for k, v in op["views"].items())
+            if isinstance(op["views"], dict)
+            else ", ".join(op["views"])
+        )
+        lines.append(
+            f"  - {op['class_name']} ({op['file']}) root={op['root_locator']} "
+            f"preflight={aud_str} views=[{v_str}] methods={op['public_methods']}"
+        )
+    return "\n".join(lines)
+
+
+_GENERIC_STRUCTURAL_TOKENS = frozenset({
+    "the", "and", "for", "with", "from", "that", "this", "when", "then",
+    "given", "should", "following", "one", "two", "are", "not", "can",
+    "use", "used", "shown", "selected", "configured", "mode", "value",
+    "values", "option", "options", "table", "examples", "page", "view",
+    "window", "button", "edit", "text", "combobox", "list", "tab", "first",
+    "item", "data", "left", "right", "screen", "root", "yaml", "yml", "bdd",
+    "locators", "obj",
+})
+
+
+def _tokenize_domain_terms(text: str) -> set[str]:
+    words: set[str] = set()
+    for part in re.findall(r"[A-Za-z]+|[\u4e00-\u9fff]{2,}", str(text)):
+        for sub in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|[\u4e00-\u9fff]{2,}", part):
+            w = sub.lower()
+            if len(w) >= 2 and w not in _GENERIC_STRUCTURAL_TOKENS:
+                words.add(w)
+    return words
+
+
+def _domain_tokens_match(scenario_tokens: set[str], target_tokens: set[str]) -> bool:
+    if not target_tokens:
+        return False
+    for st in scenario_tokens:
+        for tt in target_tokens:
+            if st == tt or (len(st) >= 5 and len(tt) >= 5 and (st.startswith(tt) or tt.startswith(st))):
+                return True
+    return False
+
+
+def _build_page_and_locator_catalog(
+        *,
+        bdd_dir: Path,
+        project_root: Path,
+        base_dir: Path,
+        steps_dir: Path,
+        referenced_page_names: set[str],
+        referenced_view_attrs: dict[str, set[str]],
+        scenario_tokens: set[str] | None = None,
+):
+    page_obj_dir = bdd_dir / "page_obj"
+    locators_dir = bdd_dir / "locators"
+    if not page_obj_dir.is_dir():
+        return [], []
+
+    view_classes: dict[str, dict] = {}
+    page_classes: list[dict] = []
+
+    for py_file in sorted(page_obj_dir.rglob("*.py")):
+        if py_file.name == "__init__.py":
+            continue
+        try:
+            tree = ast.parse(read_python_source(py_file), filename=str(py_file))
+        except SyntaxError:
+            continue
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            bases = [
+                base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+                for base in node.bases
+            ]
+            attrs: dict[str, list[str]] = {}
+            properties: dict[str, str] = {}
+            methods: list[str] = []
+            for item in node.body:
+                if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
+                    attrs[item.targets[0].id] = _extract_ast_strings(item.value)
+                elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    decs = [decorator_name(d) for d in item.decorator_list]
+                    if "property" in decs:
+                        for sub in ast.walk(item):
+                            if (
+                                isinstance(sub, ast.Call)
+                                and isinstance(sub.func, ast.Attribute)
+                                and sub.func.attr == "get_view"
+                                and sub.args
+                                and isinstance(sub.args[0], ast.Name)
+                            ):
+                                properties[item.name] = sub.args[0].id
+                    elif not item.name.startswith("_"):
+                        methods.append(_format_method_signature(item))
+            rel_file = display_path(py_file, base_dir).replace("\\", "/")
+            if "WindowView" in bases:
+                loc_files = attrs.get("locator_files", []) + attrs.get("locator_file", [])
+                view_classes[node.name] = {
+                    "view_class": node.name,
+                    "file": rel_file,
+                    "locator_files": list(dict.fromkeys(loc_files)),
+                    "public_methods": methods,
+                }
+            elif "WindowPage" in bases or "BasePage" in bases:
+                root_loc_files = attrs.get("root_locator_file", [])
+                root_locs = attrs.get("root_locator", [])
+                loc_files = attrs.get("locator_files", []) + attrs.get("locator_file", [])
+                page_classes.append({
+                    "class_name": node.name,
+                    "file": rel_file,
+                    "source_path": py_file.resolve(),
+                    "base_class": "WindowPage" if "WindowPage" in bases else "BasePage",
+                    "root_locator": root_locs[0] if root_locs else None,
+                    "root_locator_file": root_loc_files[0] if root_loc_files else None,
+                    "locator_files": list(dict.fromkeys(loc_files)),
+                    "public_methods": methods,
+                    "view_properties": properties,
+                })
+
+    if not referenced_page_names and scenario_tokens:
+        for page in page_classes:
+            cls_name = page["class_name"]
+            page_tokens = _tokenize_domain_terms(
+                f"{cls_name} {page.get('root_locator_file') or ''} {' '.join(page.get('locator_files', ()))}"
+            )
+            matched_views = set()
+            for prop_name, view_cls_name in page["view_properties"].items():
+                v_info = view_classes.get(view_cls_name, {})
+                v_tokens = _tokenize_domain_terms(
+                    f"{prop_name} {view_cls_name} {' '.join(v_info.get('locator_files', ()))}"
+                )
+                if _domain_tokens_match(scenario_tokens, v_tokens):
+                    matched_views.add(prop_name)
+            if matched_views:
+                referenced_page_names.add(cls_name)
+                referenced_view_attrs[cls_name].update(matched_views)
+            elif not page["view_properties"] and _domain_tokens_match(scenario_tokens, page_tokens):
+                referenced_page_names.add(cls_name)
+
+    referenced_pages = []
+    other_pages = []
+    for page in page_classes:
+        cls_name = page["class_name"]
+        try:
+            _audit_selected_resource_imports(
+                [page["source_path"]],
+                steps_dir,
+                project_root,
+            )
+            audit_result = {"status": "passed"}
+        except _SelectedResourceUnavailable as exc:
+            audit_result = {"status": "unverified", "reason": str(exc)}
+
+        if cls_name not in referenced_page_names:
+            other_pages.append({
+                "class_name": cls_name,
+                "file": page["file"],
+                "root_locator": page["root_locator"],
+                "root_locator_file": page["root_locator_file"],
+                "resource_preflight_audit": audit_result,
+                "public_methods": page["public_methods"],
+                "views": {
+                    prop_name: view_classes.get(view_cls_name, {}).get("locator_files", [])
+                    for prop_name, view_cls_name in page["view_properties"].items()
+                },
+            })
+            continue
+
+        root_locators = (
+            _load_compact_locator_map(locators_dir, page["root_locator_file"])
+            if page["root_locator_file"]
+            else {}
+        )
+        for lf in page["locator_files"]:
+            root_locators.update(_load_compact_locator_map(locators_dir, lf))
+
+        used_views = referenced_view_attrs.get(cls_name, set())
+        expanded_views = {}
+        other_views = {}
+        for prop_name, view_cls_name in page["view_properties"].items():
+            view_info = view_classes.get(view_cls_name, {})
+            v_loc_files = view_info.get("locator_files", [])
+            if prop_name in used_views or not used_views:
+                loc_by_file = {
+                    lf: _load_compact_locator_map(locators_dir, lf)
+                    for lf in v_loc_files
+                }
+                expanded_views[prop_name] = {
+                    "view_class": view_cls_name,
+                    "file": view_info.get("file"),
+                    "locator_files": v_loc_files,
+                    "public_methods": view_info.get("public_methods", []),
+                    "locators": loc_by_file,
+                }
+            else:
+                other_views[prop_name] = v_loc_files
+
+        referenced_pages.append({
+            "class_name": cls_name,
+            "file": page["file"],
+            "base_class": page["base_class"],
+            "root_locator": page["root_locator"],
+            "root_locator_file": page["root_locator_file"],
+            "resource_preflight_audit": audit_result,
+            "public_methods": page["public_methods"],
+            "root_locators": root_locators,
+            "expanded_views": expanded_views,
+            "other_views": other_views,
+        })
+
+    return referenced_pages, other_pages
+
+
+def _check_selected_resources(feature, scenario, scope, steps_dir):
+    project_root = (
+        steps_dir.parent.parent
+        if steps_dir.parent.name.casefold() == "bdd"
+        else steps_dir.parent
+    )
+    _audit_selected_resource_imports(scope.files, steps_dir, project_root)
+    previous_steps = {
+        step_type: list(matchers)
+        for step_type, matchers in behave_step_registry.registry.steps.items()
+    }
+    previous_state = snapshot_step_loading_state()
+    previous_path = list(sys.path)
+    previous_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "Bdd" or name.startswith("Bdd.")
+    }
+    existing_modules = set(sys.modules)
+
+    def deny_operation(*_args, **_kwargs):
+        raise _SelectedResourceUnavailable(
+            "Resource loading attempted an external operation, write, or Page construction"
+        )
+
+    def read_only_open(original):
+        def guarded_open(file, mode="r", *args, **kwargs):
+            if any(flag in str(mode) for flag in "wax+"):
+                deny_operation()
+            return original(file, mode, *args, **kwargs)
+        return guarded_open
+
+    try:
+        sys.path.insert(0, str(project_root))
+        for name in previous_modules:
+            sys.modules.pop(name, None)
+        from autowork_core.page.singleton import BasePage
+
+        with ExitStack() as guards:
+            for target in (
+                "requests.sessions.Session.request",
+                "socket.socket.connect",
+                "socket.socket.connect_ex",
+                "socket.getaddrinfo",
+                "subprocess.Popen",
+                "os.system",
+                "os.open",
+                "os.remove",
+                "os.unlink",
+                "os.rename",
+                "os.replace",
+                "os.mkdir",
+                "os.rmdir",
+            ):
+                guards.enter_context(patch(target, side_effect=deny_operation))
+            if hasattr(os, "startfile"):
+                guards.enter_context(patch("os.startfile", side_effect=deny_operation))
+            guards.enter_context(patch.object(BasePage, "__init__", deny_operation))
+            guards.enter_context(patch.object(sys, "dont_write_bytecode", True))
+            guards.enter_context(patch("builtins.open", read_only_open(builtins.open)))
+            guards.enter_context(patch("io.open", read_only_open(io.open)))
+            prepared = _prepare_step_scope_files(steps_dir, scope.files)
+            targets = []
+            for step in scenario.all_steps:
+                matches = _matching_step_definitions(prepared, step)
+                if len(matches) != 1:
+                    raise _SelectedResourceUnavailable(
+                        f"Loaded binding is not unique: {step.name}"
+                    )
+                targets.append(SelectedStepResourceTarget(
+                    feature_name=str(feature.name),
+                    scenario_name=str(scenario.name),
+                    step_text=str(step.name),
+                    function=matches[0].func,
+                    scope_key=scenario_scope_key(feature, scenario),
+                ))
+            return preflight_selected_step_resources(targets, steps_dir=steps_dir)
+    except ResourcePreflightError:
+        raise
+    except (Exception, SystemExit) as error:
+        raise _SelectedResourceUnavailable(
+            f"Resource check could not safely complete: {type(error).__name__}: {error}"
+        ) from error
+    finally:
+        reset_behave_step_state()
+        behave_step_registry.registry.steps = previous_steps
+        restore_step_loading_state(previous_state)
+        sys.path[:] = previous_path
+        for name in list(sys.modules):
+            if name == "Bdd" or name.startswith("Bdd."):
+                sys.modules.pop(name, None)
+            elif name not in existing_modules:
+                module_file = getattr(sys.modules[name], "__file__", None)
+                if module_file and Path(module_file).resolve().is_relative_to(project_root):
+                    if not name.startswith("autowork_core."):
+                        sys.modules.pop(name, None)
+        sys.modules.update(previous_modules)
+
+
+def _audit_selected_resource_imports(files, steps_dir, project_root):
+    pending = [(steps_dir / value).resolve() for value in files]
+    visited = set()
+    while pending:
+        source = pending.pop()
+        if source in visited:
+            continue
+        if not source.is_relative_to(project_root):
+            raise _SelectedResourceUnavailable(
+                f"Local resource import escapes the selected project: {source}"
+            )
+        visited.add(source)
+        tree = ast.parse(read_python_source(source), filename=str(source))
+        _validate_resource_declarations(tree.body, source)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            if isinstance(node, ast.ImportFrom) and node.level:
+                raise _SelectedResourceUnavailable(
+                    f"Relative local imports require a separately reviewed loader: {source}"
+                )
+            modules = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module or ""]
+            )
+            for module in modules:
+                if module == "autowork_core" or module.startswith("autowork_core."):
+                    continue
+                module_path = project_root.joinpath(*module.split("."))
+                candidates = [module_path.with_suffix(".py"), module_path / "__init__.py"]
+                if isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        child = module_path / alias.name
+                        candidates.extend([child.with_suffix(".py"), child / "__init__.py"])
+                candidates.extend(
+                    parent / "__init__.py"
+                    for parent in module_path.parents
+                    if parent != project_root and parent.is_relative_to(project_root)
+                )
+                pending.extend(
+                    candidate.resolve()
+                    for candidate in candidates
+                    if candidate.is_file()
+                )
+
+
+def _validate_resource_declarations(statements, source):
+    allowed_decorators = STEP_DECORATORS | LIFECYCLE_DECORATORS | {
+        "property", "staticmethod", "classmethod",
+    }
+    for statement in statements:
+        if isinstance(statement, (ast.Import, ast.ImportFrom, ast.Pass)):
+            continue
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            continue
+        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            value = statement.value
+            if isinstance(statement, ast.AnnAssign) and any(
+                    isinstance(node, ast.Call)
+                    for node in ast.walk(statement.annotation)
+            ):
+                raise _SelectedResourceUnavailable(
+                    f"Executable declaration annotation: {source}:{statement.lineno}"
+                )
+            targets = (
+                statement.targets if isinstance(statement, ast.Assign)
+                else [statement.target]
+            )
+            if not all(isinstance(target, ast.Name) for target in targets):
+                raise _SelectedResourceUnavailable(
+                    f"Unsupported declaration assignment: {source}:{statement.lineno}"
+                )
+            if value is None or not any(
+                    isinstance(node, (ast.Call, ast.Await, ast.NamedExpr, ast.comprehension))
+                    for node in ast.walk(value)
+            ):
+                continue
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            expressions = list(statement.decorator_list)
+            if isinstance(statement, ast.ClassDef):
+                if statement.keywords or statement.decorator_list or any(
+                    not isinstance(base, ast.Name)
+                    or base.id not in {"WindowPage", "WindowView", "BasePage", "object"}
+                    for base in statement.bases
+                ):
+                    raise _SelectedResourceUnavailable(
+                        f"Custom class construction needs separate review: {source}:{statement.lineno}"
+                    )
+                expressions.extend(statement.bases)
+                expressions.extend(keyword.value for keyword in statement.keywords)
+                _validate_resource_declarations(statement.body, source)
+            else:
+                if statement.name in {
+                    "__init_subclass__", "__class_getitem__", "__getattr__",
+                }:
+                    raise _SelectedResourceUnavailable(
+                        f"Dynamic declaration hook needs separate review: {source}:{statement.lineno}"
+                    )
+                expressions.extend(statement.args.defaults)
+                expressions.extend(value for value in statement.args.kw_defaults if value)
+                expressions.extend(
+                    argument.annotation
+                    for argument in (
+                        statement.args.posonlyargs + statement.args.args
+                        + statement.args.kwonlyargs
+                        + ([statement.args.vararg] if statement.args.vararg else [])
+                        + ([statement.args.kwarg] if statement.args.kwarg else [])
+                    )
+                    if argument.annotation
+                )
+                if statement.returns:
+                    expressions.append(statement.returns)
+            for expression in expressions:
+                for node in ast.walk(expression):
+                    if isinstance(node, ast.Call):
+                        if not (
+                            expression in statement.decorator_list
+                            and node is expression
+                            and isinstance(node.func, ast.Name)
+                            and node.func.id.lower() in allowed_decorators
+                            and all(isinstance(value, ast.Constant) for value in node.args)
+                            and all(isinstance(value.value, ast.Constant) for value in node.keywords)
+                        ):
+                            raise _SelectedResourceUnavailable(
+                                f"Unsupported declaration-time call: {source}:{node.lineno}"
+                            )
+            continue
+        raise _SelectedResourceUnavailable(
+            f"Unsupported module/class execution: {source}:{statement.lineno}"
+        )
 
 
 def check_features(
@@ -799,18 +1967,21 @@ def _compose_layered_definitions(layers):
     return list(definitions.values())
 
 
-def _scenario_matches_requirement(scenario, required):
-    row = getattr(scenario, "_row", None)
-    example_id = str(getattr(row, "id", "") or "") or None
+def _scenario_name_matches(scenario, required_name):
     name = re.sub(
         r"\s+--\s+@\d+\.\d+.*$",
         "",
         str(scenario.name),
     ).strip()
-    required_name = str(required.get("name") or "").strip()
+    return bool(name == str(required_name or "").strip())
+
+
+def _scenario_matches_requirement(scenario, required):
+    row = getattr(scenario, "_row", None)
+    example_id = str(getattr(row, "id", "") or "") or None
     required_example = required.get("example_id")
     return bool(
-        name == required_name
+        _scenario_name_matches(scenario, required.get("name"))
         and example_id == required_example
     )
 

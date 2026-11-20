@@ -3,19 +3,37 @@
 For architecture or Recorder maintenance, read `ai/context/project.md`; for
 asset lifecycle, migration, or host sync, read
 `docs/维护/5.资产迁移与知识维护.md`. Current code, tests, and Recorder evidence are
-the source of truth; local Copilot memory is only a cache. For normal
-Recorder Generation work uses the explicitly selected workspace Agent and its
+the source of truth; local Copilot memory is only a cache.
+Ordinary Feature/Scenario implementation uses
+`ai/prompts/bdd-knowledge-generate.md` and project source guidance in
+`Bdd/ai/README.md`. Do not load Recorder-only generation instructions for ordinary
+generation: `ai/instructions/bdd-generation.md` and
+`ai/prompts/recorder-generate.md` belong to a bound Recorder Job, not a generic
+BDD coding guide. Shared API implementation lookup remains allowed when relevant.
+Recorder Generation uses the explicitly selected workspace Agent and its
 internal `recorder-generate` Skill, which
 delegates to `ai/prompts/recorder-generate.md`,
 `ai/instructions/bdd-generation.md`, the compact Job context, and named
 evidence/code candidates.
 
+- For AI asset placement and new Skill/Prompt/Agent entry decisions, use
+  `ai/README.md` and `.github/README.md`; task workflows have one canonical body,
+  while platform entries remain thin adapters and AI tools are grouped by capability.
 - Preserve immutable raw evidence and append-only timeline edits. Keep V5
   file-based and fail-closed; never weaken Request, projection, Decision, Plan,
   transaction, PIC, scope, or Plan-to-Code validation to pass a workflow.
 - Rules provide evidence, candidates, and safety gates; AI owns implementation
   reasoning. Reuse established owners such as `CaptureRuntime`,
   `RecorderWorkbench`, and `OperationCoordinator`.
+- Reuse the user's existing execution environment. Use an interpreter explicitly
+  supplied for the task or the existing workspace selection; check its path
+  read-only and invoke that executable directly. If the choice is unresolved,
+  ask which existing interpreter to use. Missing `uv` is not evidence of a broken
+  project environment. Unless the user explicitly requests the relevant
+  environment change, do not invoke setup/configuration or installation tools,
+  install Python, uv, dependencies or extensions, create environments, or change
+  the interpreter selection, PATH or environment settings. Missing dependencies
+  require reporting and user direction, not automatic environment repair.
 - Before claiming current behavior, inspect its owner and a direct call path or
   relevant test. For material uncertainty, first use current evidence or one
   low-risk check; if unresolved, ask a concrete question with alternatives and
@@ -28,11 +46,12 @@ evidence/code candidates.
   "ok", or "try again" only performs the uniquely stated next action in the
   current work package; otherwise ask.
 - Exception: inside the explicitly selected Recorder Generation Agent for a
-  Workbench-created Job, do not output maintenance work packages, hypothesis
-  narration, recovery/control-plane commentary, or per-Step progress. That
-  journey is product generation: consume the already-claimed Job, ask at most
-  one business batch, use batch context/candidates, and return the terminal
-  Job result.
+  Workbench-created Job or inside the `bdd-knowledge-generate` product
+  generation workflow, do not output maintenance work packages, hypothesis
+  narration, recovery/control-plane commentary, or per-Step progress. Those
+  journeys are product generation: for a Recorder Job, consume the
+  already-claimed Job, ask at most one business batch, use batch
+  context/candidates, and return the terminal Job result.
 - If investigation no longer produces a falsifiable owner hypothesis, cheapest
   discriminating check, and small reversible edit, treat it as drift. Stop
   expanding searches, diagnostics, and adjacent fixes; restate the hypothesis

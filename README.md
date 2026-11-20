@@ -40,6 +40,9 @@ python -m Bdd.local_runner Bdd/test_features/test_debug.feature
 | [docs/4.定位器与配置.md](docs/4.定位器与配置.md) | locator、data、Root 和运行配置 |
 | [docs/5.故障排查.md](docs/5.故障排查.md) | 日志、Recorder、视觉定位和依赖问题 |
 | [docs/6.版本与升级说明.md](docs/6.版本与升级说明.md) | 当前版本和最近三个版本的升级影响 |
+| [docs/7.运行知识采集.md](docs/7.运行知识采集.md) | 默认关闭的运行观察、独立案例构建、REST 发布与 Wiki 验收 |
+| [docs/8.内置Skill使用指南.md](docs/8.内置Skill使用指南.md) | 内置 Skill 总览、调用示例、适用范围及注意事项 |
+| [docs/skill架构理解.md](messy/skill架构理解.md) | 基础能力独立、Skill 可选入口及 AI 增强的职责边界 |
 | [docs/维护/1.维护者指南.md](docs/维护/1.维护者指南.md) | 框架架构、协议和 AI 治理入口 |
 | [ai/README.md](ai/README.md) | **AI 资产**：Context、Prompt、Knowledge 与协作复盘 |
 

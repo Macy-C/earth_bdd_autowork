@@ -9,25 +9,25 @@ hooks:
   UserPromptSubmit:
     - type: command
       command: "python3 -B -m autowork_core.utils.debug_tools.recorder.copilot_hook_router --event UserPromptSubmit --project-root ."
-      windows: "& .github/hooks/scripts/recorder-generation.ps1 UserPromptSubmit"
+      windows: "& .github/hooks/messy/recorder-generation.ps1 UserPromptSubmit"
       cwd: "."
       timeout: 10
   PreToolUse:
     - type: command
       command: "python3 -B -m autowork_core.utils.debug_tools.recorder.copilot_hook_router --event PreToolUse --project-root ."
-      windows: "& .github/hooks/scripts/recorder-generation.ps1 PreToolUse"
+      windows: "& .github/hooks/messy/recorder-generation.ps1 PreToolUse"
       cwd: "."
       timeout: 10
   PostToolUse:
     - type: command
       command: "python3 -B -m autowork_core.utils.debug_tools.recorder.copilot_hook_router --event PostToolUse --project-root ."
-      windows: "& .github/hooks/scripts/recorder-generation.ps1 PostToolUse"
+      windows: "& .github/hooks/messy/recorder-generation.ps1 PostToolUse"
       cwd: "."
       timeout: 10
   Stop:
     - type: command
       command: "python3 -B -m autowork_core.utils.debug_tools.recorder.copilot_hook_router --event Stop --project-root ."
-      windows: "& .github/hooks/scripts/recorder-generation.ps1 Stop"
+      windows: "& .github/hooks/messy/recorder-generation.ps1 Stop"
       cwd: "."
       timeout: 10
 ---

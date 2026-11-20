@@ -1,5 +1,5 @@
 {
-  "ai_asset_pack_version": "1.19",
+  "ai_asset_pack_version": "1.21",
   "project_assets_root": "Bdd/ai",
   "context": [
     "context/project.md",
@@ -11,7 +11,11 @@
   "prompts": [
     "prompts/recorder-generate.md",
     "prompts/collaboration-review.md",
-    "prompts/collaboration-promote.md"
+    "prompts/collaboration-promote.md",
+    "prompts/knowledge-assist.md",
+    "prompts/bdd-knowledge-generate.md",
+    "prompts/report-merge.md",
+    "prompts/document-sync.md"
   ],
   "instructions": [
     "instructions/bdd-generation.md"
@@ -43,6 +47,10 @@
   "discovery_adapters": [
     ".github/copilot-instructions.md",
     ".github/skills/recorder-generate/SKILL.md",
+    ".github/skills/knowledge-assist/SKILL.md",
+    ".github/skills/bdd-knowledge-generate/SKILL.md",
+    ".github/skills/report-merge/SKILL.md",
+    ".github/skills/document-sync/SKILL.md",
     ".github/agents/recorder-generation.agent.md",
     ".github/prompts/collaboration-review.prompt.md",
     ".github/prompts/collaboration-promote.prompt.md",

@@ -31,6 +31,8 @@ from autowork_core.utils.debug_tools.common import (
 from autowork_core.utils.overlay import OverlayManager
 from autowork_core.utils.debug_tools.locator_tools import LocatorToolMixin
 from autowork_core.utils.debug_tools.action_runner_window import ActionRunnerWindow
+from autowork_core.utils.debug_tools.feature_runner_web import FeatureRunnerWindow
+from autowork_core.utils.debug_tools.locator_workbench_web import LocatorWorkbenchWebHost
 from autowork_core.utils.debug_tools.recorder.panel import RecorderToolMixin
 from autowork_core.utils.debug_tools.visual_tools import VisualToolMixin
 
@@ -107,7 +109,10 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.locator_workspace_initialized = False
         self.action_runner_button = None
         self.action_runner_window = None
+        self.feature_runner_button = None
+        self.feature_runner_window = None
         self.recorder_button = None
+        self.web_host: LocatorWorkbenchWebHost | None = None
 
         # 点选控件模式
         self.pick_mode = False
@@ -164,10 +169,16 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.recorder_button.pack(side="right")
         self.action_runner_button = ttk.Button(
             header,
-            text="运行调试器",
+            text="动作调试器",
             command=self.open_action_runner,
         )
         self.action_runner_button.pack(side="right", padx=(0, 6))
+        self.feature_runner_button = ttk.Button(
+            header,
+            text="用例运行器",
+            command=self.open_feature_runner,
+        )
+        self.feature_runner_button.pack(side="right", padx=(0, 6))
 
         target = ttk.LabelFrame(self.app, text="目标窗口")
         target.pack(fill="x", padx=12, pady=(0, 8))
@@ -435,6 +446,9 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
 
     def poll_hotkeys(self):
         self.hotkey_poll_after_id = None
+        if self.web_host is not None and self.web_host.is_browser_window_closed():
+            self.close()
+            return
         try:
             self._handle_hotkey_edge(VK_F2, self.on_f2_refresh_tree)
             self._handle_hotkey_edge(VK_F4, self.capture_pos_hotkey)
@@ -937,6 +951,10 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             else:
                 self.set_status(f"控件树加载完成：{root_obj.window_text()}")
 
+            web_host = getattr(self, "web_host", None)
+            if web_host is not None:
+                web_host.notify_state_changed(include_tree=True)
+
         except Exception as e:
             self.set_status(f"控件树加载失败: {type(e).__name__}: {e}")
 
@@ -1321,6 +1339,9 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             return
 
         self.overlay_manager.clear()
+        web_host = getattr(self, "web_host", None)
+        if web_host is not None:
+            web_host.minimize_for_pick()
 
         self.pick_overlay = tk.Toplevel(self.app)
         self.pick_overlay.overrideredirect(True)
@@ -1365,6 +1386,9 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                 pass
 
         self.pick_overlay = None
+        web_host = getattr(self, "web_host", None)
+        if web_host is not None:
+            web_host.restore_after_pick()
 
         self.set_status("点选模式已关闭。")
 
@@ -1624,19 +1648,31 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
 
     def set_status(self, text):
         self.status_label.config(text=text)
+        web_host = getattr(self, "web_host", None)
+        if web_host is not None:
+            web_host.notify_state_changed(include_tree=False)
 
-    def open_action_runner(self):
+    def open_action_runner(self, *, open_browser: bool | None = None):
         if self.action_runner_window is not None:
             try:
                 if self.action_runner_window.window.winfo_exists():
-                    self.action_runner_window.window.lift()
-                    self.action_runner_window.window.focus_force()
+                    if hasattr(self.action_runner_window, "focus"):
+                        self.action_runner_window.focus()
+                    else:
+                        self.action_runner_window.window.lift()
+                        self.action_runner_window.window.focus_force()
                     return self.action_runner_window
             except Exception:
                 pass
+        use_browser = (
+            bool(getattr(self, "web_host", None) is not None)
+            if open_browser is None
+            else bool(open_browser)
+        )
         self.action_runner_window = ActionRunnerWindow(
             self.app,
             on_close=lambda: setattr(self, "action_runner_window", None),
+            open_browser=use_browser,
         )
         return self.action_runner_window
 
@@ -1648,6 +1684,52 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
                 pass
         self.action_runner_window = None
 
+    def _debug_windows_for_minimize(self):
+        windows = [self.app]
+        if self.action_runner_window is not None:
+            windows.append(getattr(self.action_runner_window, "window", None))
+        recorder_wb = getattr(self, "recorder_workbench", None)
+        if recorder_wb is not None:
+            windows.append(getattr(recorder_wb, "window", None))
+        for attr in ("child_window", "pos_window", "ocr_window", "pic_window"):
+            win = getattr(self, attr, None)
+            if win is not None:
+                windows.append(win)
+        return tuple(w for w in windows if w is not None)
+
+    def open_feature_runner(self):
+        if self.feature_runner_window is not None:
+            try:
+                if self.feature_runner_window.window.winfo_exists():
+                    self.feature_runner_window.window.deiconify()
+                    self.feature_runner_window.window.lift()
+                    self.feature_runner_window.window.focus_force()
+                    return self.feature_runner_window
+            except Exception:
+                pass
+        self.feature_runner_window = FeatureRunnerWindow(
+            self.app,
+            on_close=lambda: setattr(self, "feature_runner_window", None),
+            minimize_targets_provider=self._debug_windows_for_minimize,
+        )
+        return self.feature_runner_window
+
+    def close_feature_runner(self):
+        if self.feature_runner_window is not None:
+            try:
+                self.feature_runner_window.close(force=True)
+            except Exception:
+                pass
+        self.feature_runner_window = None
+
+    def close_web_host(self):
+        if self.web_host is not None:
+            try:
+                self.web_host.close()
+            except Exception:
+                pass
+        self.web_host = None
+
     def close(self):
         if self.hotkey_poll_after_id is not None:
             try:
@@ -1657,6 +1739,8 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             self.hotkey_poll_after_id = None
         self.stop_recorder_on_close()
         self.stop_pick_mode()
+        self.close_web_host()
+        self.close_feature_runner()
         self.close_action_runner()
         self.close_recorder_tool(force=True)
         self.close_locator_tools()
@@ -1665,8 +1749,11 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.overlay_manager.clear()
         self.app.destroy()
 
-    def run(self):
+    def run(self, *, use_web_ui: bool = True):
         self.app.protocol("WM_DELETE_WINDOW", self.close)
+        if use_web_ui:
+            self.app.withdraw()
+            self.web_host = LocatorWorkbenchWebHost(self, open_browser=True)
         self.app.mainloop()
 
 

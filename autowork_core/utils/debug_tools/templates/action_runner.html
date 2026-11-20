@@ -1,0 +1,1056 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BDD Autowork 动作调试器</title>
+  <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAb0lEQVR42mNgQAOqya//0xIz4AK0thivQ+htOYYjBtQBA2U53BGjDhh1ACmKYWDAHUBNR5DtAGo5hGIHUOoIqjiAEodQ1QHkOILqDiDVIcPPASMzEY7MgmhkVkaj7YFRBwy7vsHg6ZoNeOd0ILvnAFHtAccRWJQCAAAAAElFTkSuQmCC" />
+  <style>
+    :root, [data-theme="dark"] {
+      --bg: #0f1117;
+      --panel: #161922;
+      --panel-elevated: #1c202b;
+      --panel-hover: #232836;
+      --border: #272c3a;
+      --border-subtle: #1f2430;
+      --text: #e2e8f0;
+      --text-strong: #f8fafc;
+      --muted: #8b95a7;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --accent-soft: rgba(59, 130, 246, 0.14);
+      --accent-border: rgba(59, 130, 246, 0.42);
+      --pass: #10b981;
+      --pass-soft: rgba(16, 185, 129, 0.14);
+      --fail: #ef4444;
+      --fail-soft: rgba(239, 68, 68, 0.14);
+      --warn: #f59e0b;
+      --warn-soft: rgba(245, 158, 11, 0.14);
+      --terminal-bg: #0b0d12;
+      --shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    }
+
+    [data-theme="light"] {
+      --bg: #f1f4f9;
+      --panel: #ffffff;
+      --panel-elevated: #f8fafc;
+      --panel-hover: #eef2f7;
+      --border: #d8e0ea;
+      --border-subtle: #e8eef5;
+      --text: #1e293b;
+      --text-strong: #0f172a;
+      --muted: #64748b;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --accent-soft: rgba(37, 99, 235, 0.1);
+      --accent-border: rgba(37, 99, 235, 0.35);
+      --pass: #059669;
+      --pass-soft: rgba(5, 150, 105, 0.1);
+      --fail: #dc2626;
+      --fail-soft: rgba(220, 38, 38, 0.1);
+      --warn: #d97706;
+      --warn-soft: rgba(217, 119, 6, 0.12);
+      --terminal-bg: #0b0d12;
+      --shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+      font-size: 12px;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, input, select, textarea {
+      font: inherit;
+      color: inherit;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      width: 100%;
+      height: 100%;
+      height: 100vh;
+      --left-pane-width: 285px;
+    }
+
+    /* Top Header */
+    .top-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 7px 12px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+
+    .brand-cluster {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: none;
+    }
+
+    .brand-logo {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, var(--accent), #1d4ed8);
+      color: #fff;
+      box-shadow: 0 1px 5px rgba(59, 130, 246, 0.35);
+    }
+    .brand-logo svg { width: 15px; height: 15px; }
+
+    .brand-title {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text-strong);
+      margin-right: 2px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      height: 27px;
+      padding: 0 10px;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: var(--panel-elevated);
+      color: var(--text);
+      font-weight: 500;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.14s ease;
+      white-space: nowrap;
+    }
+    .btn svg { width: 13px; height: 13px; flex: none; }
+    .btn:hover:not(:disabled) {
+      background: var(--panel-hover);
+      border-color: var(--muted);
+    }
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+      font-weight: 600;
+      box-shadow: 0 1px 4px rgba(59, 130, 246, 0.28);
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+    .btn-sm {
+      height: 25px;
+      padding: 0 8px;
+      font-size: 11.5px;
+      border-radius: 4px;
+    }
+    .btn-icon {
+      width: 27px;
+      padding: 0;
+    }
+    .btn.active-pin {
+      background: var(--accent-soft);
+      border-color: var(--accent-border);
+      color: var(--accent);
+    }
+
+    .target-card {
+      flex: 1;
+      min-width: 220px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: var(--panel-elevated);
+      border: 1px solid var(--border);
+    }
+    .target-info {
+      min-width: 0;
+      flex: 1;
+    }
+    .target-kicker {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10.5px;
+      color: var(--muted);
+      margin-bottom: 1px;
+    }
+    .target-path-text {
+      font-weight: 600;
+      color: var(--text-strong);
+      font-size: 11.5px;
+      font-family: Consolas, monospace;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: none;
+    }
+
+    /* Main Split Workspace */
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: var(--left-pane-width) 5px minmax(260px, 1fr);
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .pane-resizer {
+      background: var(--border);
+      cursor: col-resize;
+      transition: background 0.15s;
+      z-index: 10;
+    }
+    .pane-resizer:hover, .pane-resizer.dragging {
+      background: var(--accent);
+    }
+
+    /* Left Selector Pane */
+    .selector-pane {
+      display: flex;
+      flex-direction: column;
+      min-width: 210px;
+      min-height: 0;
+      background: var(--panel);
+      padding: 8px 10px;
+      gap: 8px;
+      overflow-y: auto;
+    }
+
+    .section-card {
+      background: var(--panel-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .section-label {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-strong);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .select-input, .text-input {
+      width: 100%;
+      height: 26px;
+      padding: 0 8px;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text-strong);
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.14s;
+    }
+    .select-input:focus, .text-input:focus {
+      border-color: var(--accent);
+    }
+
+    .action-list {
+      flex: 1;
+      min-height: 120px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding-right: 2px;
+    }
+
+    .action-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 5px 8px;
+      border-radius: 5px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+    .action-item:hover {
+      background: var(--panel-hover);
+    }
+    .action-item.selected {
+      background: var(--accent-soft);
+      border-color: var(--accent-border);
+      color: var(--text-strong);
+      font-weight: 600;
+    }
+    .action-item-name {
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      color: var(--text-strong);
+    }
+    .action-item-sig {
+      font-family: Consolas, monospace;
+      font-size: 10.5px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 155px;
+    }
+
+    .warning-banner {
+      padding: 7px 9px;
+      border-radius: 5px;
+      background: var(--warn-soft);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      color: var(--warn);
+      font-size: 11.5px;
+      line-height: 1.4;
+      display: none;
+    }
+    .warning-banner.visible { display: block; }
+
+    /* Right Editor & Output Pane */
+    .main-pane {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      padding: 8px 10px;
+      gap: 8px;
+      overflow: hidden;
+    }
+
+    .call-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      flex: none;
+    }
+
+    .card-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 10px;
+      background: var(--panel-elevated);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .call-summary-text {
+      flex: 1;
+      min-width: 0;
+      font-family: Consolas, monospace;
+      font-size: 11.5px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-align: right;
+    }
+
+    .code-editor {
+      width: 100%;
+      height: 196px;
+      min-height: 110px;
+      max-height: 380px;
+      padding: 8px 10px;
+      border: 0;
+      outline: none;
+      background: var(--terminal-bg);
+      color: #e2e8f0;
+      font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      resize: vertical;
+      user-select: text;
+    }
+
+    .output-card {
+      flex: 1;
+      min-height: 0;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .segmented-tabs {
+      display: inline-flex;
+      padding: 2px;
+      border-radius: 6px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+    }
+    .segmented-tabs button {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: 23px;
+      padding: 0 9px;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 11.5px;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+    .segmented-tabs button.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .output-viewport {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 8px 12px;
+      background: var(--terminal-bg);
+      color: #e2e8f0;
+      font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+      font-size: 11.5px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      user-select: text;
+    }
+
+    /* Footer */
+    .bottom-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 5px 12px;
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+      font-size: 11.5px;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 11.5px;
+    }
+    .status-badge i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .status-badge.idle { background: var(--panel-elevated); color: var(--muted); }
+    .status-badge.running { background: var(--accent-soft); color: var(--accent); }
+    .status-badge.running i {
+      animation: statusPulse 1.4s infinite cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .status-badge.passed { background: var(--pass-soft); color: var(--pass); }
+    .status-badge.failed { background: var(--fail-soft); color: var(--fail); }
+
+    .footer-message {
+      flex: 1;
+      min-width: 0;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Functional Micro-interactions & Animations */
+    body, .top-header, .selector-pane, .main-pane, .section-card, .call-card, .output-card, .target-card, .bottom-footer {
+      transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+    }
+    .btn:hover:not(:disabled) {
+      transform: translateY(-0.5px);
+    }
+    .btn:active:not(:disabled) {
+      transform: translateY(0.5px) scale(0.97);
+    }
+    .spotlight-flash {
+      animation: spotlightPulse 1.15s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .top-progress-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      z-index: 200;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s ease;
+    }
+    .top-progress-bar.active {
+      opacity: 1;
+      background: linear-gradient(90deg, transparent, var(--accent), #38bdf8, var(--accent), transparent);
+      background-size: 200% 100%;
+      animation: shimmerBar 1.1s infinite linear;
+    }
+    .toast-stack {
+      position: fixed;
+      top: 42px;
+      right: 12px;
+      z-index: 220;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      pointer-events: none;
+    }
+    .toast-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 11px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--accent-border);
+      color: var(--text-strong);
+      box-shadow: var(--shadow);
+      font-size: 11.5px;
+      font-weight: 600;
+      animation: toastIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    .toast-pill.pass { border-color: var(--pass); color: var(--pass); }
+    .toast-pill.warn { border-color: var(--warn); color: var(--warn); }
+    .toast-pill.out {
+      animation: toastOut 0.16s ease forwards;
+    }
+
+    @keyframes spotlightPulse {
+      0% {
+        background-color: #192b4d;
+        box-shadow: inset 0 0 0 1.5px #3b82f6;
+      }
+      100% {
+        background-color: var(--terminal-bg);
+        box-shadow: inset 0 0 0 0 rgba(59, 130, 246, 0);
+      }
+    }
+    @keyframes statusPulse {
+      0% { box-shadow: 0 0 0 0 currentColor; }
+      70% { box-shadow: 0 0 0 5px transparent; }
+      100% { box-shadow: 0 0 0 0 transparent; }
+    }
+    @keyframes shimmerBar {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateY(-6px) scale(0.95); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes toastOut {
+      from { opacity: 1; transform: translateY(0) scale(1); }
+      to { opacity: 0; transform: translateY(-4px) scale(0.95); }
+    }
+  </style>
+</head>
+<body>
+  <div id="topProgressBar" class="top-progress-bar"></div>
+  <div id="toastStack" class="toast-stack"></div>
+  <div id="actionShell" class="app-shell">
+    <!-- Top Header -->
+    <header class="top-header">
+      <div class="brand-cluster">
+        <div class="brand-logo" title="BDD Autowork 动作调试器">
+          <i data-lucide="zap"></i>
+        </div>
+        <span class="brand-title">动作调试器</span>
+        <button id="btnRunAction" class="btn btn-primary" onclick="runSelectedAction()">
+          <i data-lucide="play"></i>
+          <span>运行</span>
+        </button>
+        <button class="btn" onclick="resetDefaultCall()" title="根据当前 Action 签名重置默认调用代码">
+          <i data-lucide="rotate-ccw"></i>
+          <span>重置调用</span>
+        </button>
+        <button class="btn" disabled title="多 action 编排预留，当前仅运行一个 action。">
+          <i data-lucide="plus"></i>
+          <span>添加下一步</span>
+        </button>
+      </div>
+
+      <div class="target-card">
+        <div class="target-info">
+          <div class="target-kicker">
+            <i data-lucide="code-2" style="width:11px;height:11px;"></i>
+            <span id="selectedTargetKind">当前 Action 方法签名</span>
+          </div>
+          <div id="signatureText" class="target-path-text">请选择 Page/View 与 Action</div>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <label style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--muted);cursor:pointer;" title="执行动作期间自动最小化调试器窗口，避免遮挡被测界面">
+          <input id="minOnRunCheck" type="checkbox" checked />
+          <span>运行时最小化</span>
+        </label>
+        <button id="btnTopmostToggle" class="btn btn-icon" onclick="toggleTopmost()" title="窗口置顶 (Always on Top)">
+          <i data-lucide="pin"></i>
+        </button>
+        <button class="btn btn-icon" onclick="toggleTheme()" title="切换深色 / 浅色外观">
+          <i data-lucide="sun"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="workspace-grid">
+      <!-- Left: Target & Action Selector -->
+      <aside class="selector-pane">
+        <div class="section-card">
+          <div class="section-label">
+            <span>目标 Page / View</span>
+            <span id="targetCountLabel" style="font-size:11px;color:var(--muted);">0 项</span>
+          </div>
+          <input id="targetFilterInput" class="text-input" type="text" placeholder="搜索 Page 或 View 名称..." oninput="filterTargets()" />
+          <select id="targetSelect" class="select-input" onchange="onTargetChanged()"></select>
+        </div>
+
+        <div id="catalogWarningBanner" class="warning-banner"></div>
+
+        <div class="section-card" style="flex:1;min-height:0;">
+          <div class="section-label">
+            <span>Action 动作列表</span>
+            <span id="actionCountLabel" style="font-size:11px;color:var(--muted);">0 项</span>
+          </div>
+          <input id="actionFilterInput" class="text-input" type="text" placeholder="筛选 Action (如 click, input, ocr)..." oninput="renderActionList()" />
+          <div id="actionListContainer" class="action-list"></div>
+        </div>
+      </aside>
+
+      <div id="actionResizer" class="pane-resizer" title="左右拖拽调节左侧列表与右侧编辑区宽度"></div>
+
+      <!-- Right: Call Code & Output -->
+      <section class="main-pane">
+        <div class="call-card">
+          <div class="card-toolbar">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <button id="btnToggleCall" class="btn btn-sm" onclick="toggleCallExpanded()">收起</button>
+              <strong id="callTitleLabel" style="font-size:12.5px;color:var(--text-strong);">步骤 1 · 调用代码</strong>
+            </div>
+            <div id="callSummaryText" class="call-summary-text"></div>
+            <button class="btn btn-sm" onclick="copyText(document.getElementById('callEditor').value, '调用代码')">
+              <i data-lucide="copy"></i>
+              <span>复制</span>
+            </button>
+          </div>
+          <div id="callBodyWrap">
+            <textarea id="callEditor" class="code-editor" spellcheck="false" oninput="onCallSourceEdited()"></textarea>
+          </div>
+        </div>
+
+        <div class="output-card">
+          <div class="card-toolbar">
+            <div style="display:flex;align-items:center;gap:12px;">
+              <strong style="font-size:12.5px;display:inline-flex;align-items:center;gap:6px;">
+                <i data-lucide="terminal" style="width:15px;height:15px;color:var(--accent);"></i>
+                <span>运行结果</span>
+              </strong>
+              <div class="segmented-tabs">
+                <button id="tabBtnResult" class="active" onclick="switchOutputTab('result')">摘要</button>
+                <button id="tabBtnDiagnostic" onclick="switchOutputTab('diagnostic')">诊断</button>
+                <button id="tabBtnSnippet" onclick="switchOutputTab('snippet')">Step 代码片段</button>
+              </div>
+            </div>
+            <button class="btn btn-sm" onclick="copyActiveOutput()">
+              <i data-lucide="copy"></i>
+              <span>复制当前内容</span>
+            </button>
+          </div>
+          <div id="outputViewport" class="output-viewport">请选择目标 Page/View 与 Action，确认被测应用界面已就绪后点击“运行”。</div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Status Footer -->
+    <footer class="bottom-footer">
+      <div id="statusBadge" class="status-badge idle">
+        <i></i>
+        <span id="statusBadgeText">就绪</span>
+      </div>
+      <div id="statusText" class="footer-message">准备就绪。请确认应用界面已由用户准备好后运行。</div>
+      <div id="sequenceStatusText" style="color:var(--muted);font-size:11.5px;">多 action 编排预留，当前仅运行一个 action。</div>
+    </footer>
+  </div>
+
+  <!-- runner-resource:lucide.min.js -->
+  <script>
+    const state = {
+      targets: [],
+      actions: [],
+      selectedTarget: "",
+      selectedAction: "",
+      callExpanded: true,
+      activeTab: "result",
+      resultText: "",
+      diagnosticText: "",
+      snippetText: "",
+      theme: "light",
+      alwaysOnTop: true
+    };
+
+    function refreshIcons() {
+      if (window.lucide && typeof window.lucide.createIcons === "function") {
+        window.lucide.createIcons();
+      }
+    }
+
+    async function apiCall(path, options = {}) {
+      const resp = await fetch(path, {
+        headers: { "Content-Type": "application/json" },
+        ...options
+      });
+      return await resp.json();
+    }
+
+    async function initializeApp() {
+      setupPaneResizer();
+      const data = await apiCall("/api/init");
+      state.theme = data.theme_mode || "light";
+      state.alwaysOnTop = Boolean(data.always_on_top);
+      document.documentElement.setAttribute("data-theme", state.theme);
+      syncTopmostButton();
+
+      state.targets = data.targets || [];
+      state.actions = data.actions || [];
+      state.selectedTarget = data.selected_target || "";
+      state.selectedAction = data.selected_action || "";
+      state.resultText = data.result_text || "";
+      state.diagnosticText = data.diagnostic_text || "";
+      state.snippetText = data.snippet_text || "";
+
+      document.getElementById("targetCountLabel").textContent = `${state.targets.length} 项`;
+      document.getElementById("actionCountLabel").textContent = `${state.actions.length} 项`;
+
+      if (data.catalog_status) {
+        const warnEl = document.getElementById("catalogWarningBanner");
+        warnEl.textContent = data.catalog_status;
+        warnEl.classList.add("visible");
+      }
+
+      filterTargets();
+      renderActionList();
+      applyServerState(data);
+      refreshIcons();
+    }
+
+    function setupPaneResizer() {
+      const resizer = document.getElementById("actionResizer");
+      const shell = document.getElementById("actionShell");
+      if (!resizer || !shell) return;
+      let dragging = false;
+      resizer.addEventListener("mousedown", (e) => {
+        dragging = true;
+        resizer.classList.add("dragging");
+        e.preventDefault();
+      });
+      window.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        const w = Math.min(Math.max(210, e.clientX), Math.max(340, window.innerWidth - 280));
+        shell.style.setProperty("--left-pane-width", `${w}px`);
+      });
+      window.addEventListener("mouseup", () => {
+        if (dragging) {
+          dragging = false;
+          resizer.classList.remove("dragging");
+        }
+      });
+    }
+
+    function applyServerState(data) {
+      if (data.signature !== undefined) {
+        document.getElementById("signatureText").textContent = data.signature || "请选择 Page/View 与 Action";
+      }
+      if (data.call_title !== undefined) {
+        document.getElementById("callTitleLabel").textContent = `步骤 1 · ${data.call_title}`;
+      }
+      if (data.call_source !== undefined) {
+        document.getElementById("callEditor").value = data.call_source;
+      }
+      if (data.call_summary !== undefined) {
+        document.getElementById("callSummaryText").textContent = data.call_summary;
+      }
+      if (data.result_text !== undefined) state.resultText = data.result_text;
+      if (data.diagnostic_text !== undefined) state.diagnosticText = data.diagnostic_text;
+      if (data.snippet_text !== undefined) state.snippetText = data.snippet_text;
+      if (data.status_text !== undefined) {
+        document.getElementById("statusText").textContent = data.status_text;
+      }
+      if (data.sequence_status !== undefined) {
+        document.getElementById("sequenceStatusText").textContent = data.sequence_status;
+      }
+      renderOutputViewport();
+    }
+
+    function filterTargets() {
+      const q = document.getElementById("targetFilterInput").value.trim().toLowerCase();
+      const sel = document.getElementById("targetSelect");
+      const filtered = state.targets.filter(t => !q || t.label.toLowerCase().includes(q));
+      sel.innerHTML = filtered.map(t =>
+        `<option value="${escapeHtml(t.label)}">${escapeHtml(t.label)}</option>`
+      ).join("");
+      if (filtered.some(t => t.label === state.selectedTarget)) {
+        sel.value = state.selectedTarget;
+      } else if (filtered.length) {
+        state.selectedTarget = filtered[0].label;
+        sel.value = state.selectedTarget;
+        onTargetChanged();
+      }
+    }
+
+    function renderActionList() {
+      const q = document.getElementById("actionFilterInput").value.trim().toLowerCase();
+      const box = document.getElementById("actionListContainer");
+      const filtered = state.actions.filter(a => !q || a.name.toLowerCase().includes(q) || a.signature.toLowerCase().includes(q));
+      box.innerHTML = filtered.map(a => `
+        <div class="action-item ${a.name === state.selectedAction ? 'selected' : ''}"
+             onclick="selectAction('${escapeJs(a.name)}')"
+             title="${escapeHtml(a.name + a.signature)}">
+          <span class="action-item-name">${escapeHtml(a.name)}</span>
+          <span class="action-item-sig">${escapeHtml(a.signature)}</span>
+        </div>
+      `).join("");
+    }
+
+    async function onTargetChanged() {
+      state.selectedTarget = document.getElementById("targetSelect").value;
+      const res = await apiCall("/api/select", {
+        method: "POST",
+        body: JSON.stringify({
+          target: state.selectedTarget,
+          action: state.selectedAction,
+          rebuild_call: false
+        })
+      });
+      applyServerState(res);
+    }
+
+    function triggerSpotlight(el) {
+      if (!el) return;
+      el.classList.remove("spotlight-flash");
+      void el.offsetWidth;
+      el.classList.add("spotlight-flash");
+    }
+
+    function setBusyProgress(busy) {
+      const bar = document.getElementById("topProgressBar");
+      if (bar) bar.classList.toggle("active", Boolean(busy));
+    }
+
+    function showToast(text, kind = "pass") {
+      const stack = document.getElementById("toastStack");
+      if (!stack) return;
+      const pill = document.createElement("div");
+      pill.className = `toast-pill ${kind}`;
+      pill.textContent = text;
+      stack.appendChild(pill);
+      setTimeout(() => {
+        pill.classList.add("out");
+        setTimeout(() => pill.remove(), 180);
+      }, 1650);
+    }
+
+    async function selectAction(actionName) {
+      state.selectedAction = actionName;
+      renderActionList();
+      const res = await apiCall("/api/select", {
+        method: "POST",
+        body: JSON.stringify({
+          target: state.selectedTarget,
+          action: state.selectedAction,
+          rebuild_call: true
+        })
+      });
+      applyServerState(res);
+      triggerSpotlight(document.getElementById("callEditor"));
+    }
+
+    async function resetDefaultCall() {
+      const res = await apiCall("/api/select", {
+        method: "POST",
+        body: JSON.stringify({
+          target: state.selectedTarget,
+          action: state.selectedAction,
+          rebuild_call: true
+        })
+      });
+      applyServerState(res);
+      triggerSpotlight(document.getElementById("callEditor"));
+      showToast("✓ 已重置默认调用代码", "pass");
+    }
+
+    let editTimer = null;
+    function onCallSourceEdited() {
+      clearTimeout(editTimer);
+      editTimer = setTimeout(async () => {
+        const code = document.getElementById("callEditor").value;
+        const res = await apiCall("/api/call-source", {
+          method: "POST",
+          body: JSON.stringify({ call_source: code })
+        });
+        if (res.snippet_text !== undefined) state.snippetText = res.snippet_text;
+        if (res.call_summary !== undefined) {
+          document.getElementById("callSummaryText").textContent = res.call_summary;
+        }
+        if (res.status_text !== undefined) {
+          document.getElementById("statusText").textContent = res.status_text;
+        }
+        if (state.activeTab === "snippet") renderOutputViewport();
+      }, 150);
+    }
+
+    async function toggleCallExpanded() {
+      const res = await apiCall("/api/toggle-call", { method: "POST", body: "{}" });
+      state.callExpanded = Boolean(res.expanded);
+      document.getElementById("callBodyWrap").style.display = state.callExpanded ? "block" : "none";
+      document.getElementById("btnToggleCall").textContent = state.callExpanded ? "收起" : "展开";
+      document.getElementById("callSummaryText").textContent = res.call_summary || "";
+    }
+
+    async function runSelectedAction() {
+      const btn = document.getElementById("btnRunAction");
+      const badge = document.getElementById("statusBadge");
+      const badgeText = document.getElementById("statusBadgeText");
+      btn.disabled = true;
+      setBusyProgress(true);
+      badge.className = "status-badge running";
+      badgeText.textContent = "运行中...";
+      document.getElementById("statusText").textContent = "正在运行 action...";
+
+      try {
+        const callSource = document.getElementById("callEditor").value;
+        const minOnRun = document.getElementById("minOnRunCheck").checked;
+        const res = await apiCall("/api/run", {
+          method: "POST",
+          body: JSON.stringify({
+            target: state.selectedTarget,
+            action: state.selectedAction,
+            call_source: callSource,
+            minimize_on_run: minOnRun
+          })
+        });
+        applyServerState(res);
+        triggerSpotlight(document.getElementById("outputViewport"));
+        if (res.success) {
+          badge.className = "status-badge passed";
+          badgeText.textContent = "成功";
+          showToast("✓ Action 执行成功", "pass");
+        } else {
+          badge.className = "status-badge failed";
+          badgeText.textContent = "失败";
+          showToast("Action 执行未通过，请查看诊断", "warn");
+        }
+      } finally {
+        btn.disabled = false;
+        setBusyProgress(false);
+      }
+    }
+
+    function switchOutputTab(tab) {
+      state.activeTab = tab;
+      document.getElementById("tabBtnResult").classList.toggle("active", tab === "result");
+      document.getElementById("tabBtnDiagnostic").classList.toggle("active", tab === "diagnostic");
+      document.getElementById("tabBtnSnippet").classList.toggle("active", tab === "snippet");
+      renderOutputViewport();
+    }
+
+    function renderOutputViewport() {
+      const vp = document.getElementById("outputViewport");
+      if (state.activeTab === "result") {
+        vp.textContent = state.resultText || "尚无运行摘要，点击左上角“运行”执行当前 Action。";
+      } else if (state.activeTab === "diagnostic") {
+        vp.textContent = state.diagnosticText || "尚无诊断信息。";
+      } else {
+        vp.textContent = state.snippetText || "# 尚无 Step 代码片段";
+      }
+    }
+
+    async function copyActiveOutput() {
+      const text = document.getElementById("outputViewport").textContent || "";
+      await copyText(text, "当前面板内容");
+    }
+
+    async function copyText(text, label) {
+      if (!text) return;
+      await navigator.clipboard.writeText(text);
+      document.getElementById("statusText").textContent = `已复制${label}到剪贴板。`;
+      showToast(`✓ 已复制${label}`, "pass");
+    }
+
+    function syncTopmostButton() {
+      const btn = document.getElementById("btnTopmostToggle");
+      if (!btn) return;
+      btn.classList.toggle("active-pin", Boolean(state.alwaysOnTop));
+    }
+
+    async function toggleTopmost() {
+      const res = await apiCall("/api/window/topmost", {
+        method: "POST",
+        body: JSON.stringify({ always_on_top: !state.alwaysOnTop })
+      });
+      state.alwaysOnTop = Boolean(res.always_on_top);
+      syncTopmostButton();
+    }
+
+    async function toggleTheme() {
+      state.theme = state.theme === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", state.theme);
+      await apiCall("/api/theme", {
+        method: "POST",
+        body: JSON.stringify({ theme_mode: state.theme })
+      });
+    }
+
+    function escapeHtml(str) {
+      return String(str ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function escapeJs(str) {
+      return String(str ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    }
+
+    initializeApp();
+  </script>
+</body>
+</html>

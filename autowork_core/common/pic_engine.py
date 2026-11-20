@@ -503,7 +503,9 @@ def save_pic_debug_image(image=None, monitor=None, candidates=None, criteria=Non
         image, monitor, candidates = scan_pic(criteria, monitor=monitor)
 
     debug_image = _draw_candidates(image, candidates)
-    Paths.SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    from autowork_core.runtime.evidence.context import debug_image_directory, register_debug_image
+    output_dir = debug_image_directory(Paths.SCREENSHOTS_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
     file_text = "pic"
     try:
         file_text = normalize_pic_criteria(criteria).get("file", "pic")
@@ -511,8 +513,9 @@ def save_pic_debug_image(image=None, monitor=None, candidates=None, criteria=Non
         pass
     unique_suffix = time.perf_counter_ns() % 1000000
     file_name = f"{safe_name(reason)}_{safe_name(str(file_text))}_{timestamp()}_{unique_suffix}.png"
-    file_path = Paths.SCREENSHOTS_DIR / file_name
+    file_path = output_dir / file_name
     cv2.imwrite(str(file_path), debug_image)
+    register_debug_image(file_path, "PIC 调试图")
     logger.error("Pic debug image saved: {}", file_path)
     return str(file_path)
 

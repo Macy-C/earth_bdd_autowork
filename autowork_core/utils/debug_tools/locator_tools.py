@@ -191,18 +191,21 @@ class LocatorToolMixin:
 
     def _child_locator_from_form(self):
         locator = {"by": "child"}
+        extra_text = ""
         if self.child_extra_text is not None:
             extra_text = self.child_extra_text.get("1.0", "end").strip()
-            if extra_text:
-                extra = yaml.safe_load(extra_text)
-                if extra is not None and not isinstance(extra, dict):
-                    raise ValueError("其他 Child 条件必须是 YAML mapping")
-                if extra:
-                    extra = data_map({"criteria": extra})["criteria"]
-                    unknown = sorted(set(extra) - CHILD_FILTER_KEYS)
-                    if unknown:
-                        raise ValueError(f"不支持的 Child 条件: {', '.join(unknown)}")
-                    locator.update(extra)
+        elif hasattr(self, "_web_child_extra_yaml"):
+            extra_text = str(getattr(self, "_web_child_extra_yaml") or "").strip()
+        if extra_text:
+            extra = yaml.safe_load(extra_text)
+            if extra is not None and not isinstance(extra, dict):
+                raise ValueError("其他 Child 条件必须是 YAML mapping")
+            if extra:
+                extra = data_map({"criteria": extra})["criteria"]
+                unknown = sorted(set(extra) - CHILD_FILTER_KEYS)
+                if unknown:
+                    raise ValueError(f"不支持的 Child 条件: {', '.join(unknown)}")
+                locator.update(extra)
 
         values = (
             ("control_type", self.child_control_type_var.get()),
@@ -410,8 +413,15 @@ class LocatorToolMixin:
         self.pos_x_var.set(str(x))
         self.pos_y_var.set(str(y))
         self.pos_result_var.set(f"已读取当前鼠标坐标: ({x}, {y})")
+        web_host = getattr(self, "web_host", None)
+        if web_host is not None:
+            web_host.notify_state_changed(include_tree=False)
 
     def capture_pos_hotkey(self):
+        web_host = getattr(self, "web_host", None)
+        if web_host is not None:
+            self.capture_pos_from_cursor()
+            return
         if self.pos_window is None:
             return
         try:

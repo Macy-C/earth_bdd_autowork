@@ -1,5 +1,11 @@
 from typing import TypeVar, cast
 
+from autowork_core.runtime.knowledge_observation import (
+    observe_page_actions,
+    observe_subclass_actions,
+    remember_page_sources,
+)
+
 from autowork_core.actions.base import (
     click, double_click, right_click,
     input_text, send_text_keys, remove_text, clear_text, focus)
@@ -92,12 +98,16 @@ def get_page(
         page_dic = context.autowork_feature.pages
 
     if not cache:
-        return page_cls(context)
+        page = page_cls(context)
+        remember_page_sources(context, page)
+        return page
 
     key = f"{page_cls.__module__}.{page_cls.__qualname__}"
     if refresh or key not in page_dic:
         page_dic[key] = page_cls(context)
-    return cast(TPage, page_dic[key])
+    page = cast(TPage, page_dic[key])
+    remember_page_sources(context, page)
+    return page
 
 class Singleton(object):
     def __init__(self, cls):
@@ -111,11 +121,16 @@ class Singleton(object):
             self.uniqueInstance = self._cls(*args,**kwargs)
         return self.uniqueInstance
 
+@observe_page_actions
 class BasePage:
     locator_file = None
     locator_files = None
     data_file = None
     data_files = None
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        observe_subclass_actions(cls)
 
     def __init__(self, context):
         self.ctx = context

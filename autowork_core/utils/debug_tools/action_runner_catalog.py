@@ -1,23 +1,37 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib
 import inspect
 import json
 import sys
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any, get_type_hints
 
+import yaml
+
+from autowork_core.common.compile import (
+    CompiledLocator,
+    _is_top_level_locator,
+    compile_locator,
+    data_map,
+)
 from autowork_core.page import BasePage, WindowPage, WindowView
+from autowork_core.utils.bus import normalize
 from autowork_core.utils.debug_tools.recorder.ai_capability_registry import (
     AI_CAPABILITIES,
     base_page_public_api_names,
     validate_base_page_action_classification,
 )
 from config.paths import Paths
+
+
+UNIVERSAL_PAGE_ID = "page:universal_debug_page"
+UNIVERSAL_PAGE_LABEL = "公共调试 Page (全量 Locator / Data)"
 
 
 @dataclass(frozen=True)
@@ -67,7 +81,10 @@ def discover_page_view_catalog(
         *,
         page_obj_dir: Path | None = None,
         package: str = "Bdd.page_obj",
+        include_universal: bool | None = None,
 ) -> PageViewCatalog:
+    if include_universal is None:
+        include_universal = page_obj_dir is None and package == "Bdd.page_obj"
     page_obj_dir = Path(page_obj_dir or Paths.PAGE_OBJ_DIR).resolve()
     modules, import_errors = _import_page_modules(page_obj_dir, package)
     page_classes: list[tuple[type[WindowPage], Path | None]] = []
@@ -118,14 +135,175 @@ def discover_page_view_catalog(
         if view_class not in bound_view_classes
     ]
 
-    targets = tuple(sorted(
+    discovered_targets = tuple(sorted(
         [*pages, *bound_views],
         key=lambda item: (item.kind != "page", item.label.casefold()),
     ))
+    if include_universal:
+        targets = (universal_debug_page_descriptor(), *discovered_targets)
+    else:
+        targets = discovered_targets
     return PageViewCatalog(
         targets=targets,
         import_errors=tuple(import_errors),
         warnings=tuple(warnings),
+    )
+
+
+@dataclass(frozen=True)
+class _UniversalLocatorEntry:
+    rel_path: str
+    raw_key: str
+    locator: CompiledLocator | None
+    target_labels: tuple[str, ...] = ()
+    targets: tuple[PageViewDescriptor, ...] = ()
+    error: Exception | None = None
+
+
+@dataclass(frozen=True)
+class _UniversalDataEntry:
+    rel_path: str
+    raw_key: str
+    value: Any
+    target_labels: tuple[str, ...] = ()
+    targets: tuple[PageViewDescriptor, ...] = ()
+
+
+@dataclass(frozen=True)
+class _UniversalResourceIndex:
+    top_roots: dict[str, CompiledLocator]
+    locator_entries: dict[str, tuple[_UniversalLocatorEntry, ...]]
+    data_entries: dict[str, tuple[_UniversalDataEntry, ...]]
+
+
+class UniversalDebugPage(BasePage):
+    """调试器专属公共 Page：加载全量 locator/data，唯一 key 直接解析，重名 key 明确报错并提示可选 Page/View。"""
+
+    def __init__(self, context):
+        self.ctx = context
+        self._index = _build_universal_resource_index()
+
+    def _require_locator(self, key, source=None):
+        norm_key = normalize(str(key))
+        entries = self._index.locator_entries.get(norm_key, ())
+        if len(entries) > 1:
+            raise KeyError(
+                _format_duplicate_key_error("locator", str(key), source, entries)
+            )
+        if len(entries) == 1:
+            entry = entries[0]
+            if entry.error is not None:
+                raise entry.error
+            if entry.locator is not None:
+                return entry.locator
+        fallback = self.ctx.autowork_feature.locators[key]
+        if fallback is not None:
+            return fallback
+        raise KeyError(
+            f"公共 Page 下 locator key 不存在: {key} (引用: {source or key})"
+        )
+
+    def _require_data(self, key, source=None):
+        norm_key = normalize(str(key))
+        entries = self._index.data_entries.get(norm_key, ())
+        if len(entries) > 1:
+            raise KeyError(
+                _format_duplicate_key_error("data", str(key), source, entries)
+            )
+        if len(entries) == 1:
+            return entries[0].value
+        fallback = self.ctx.autowork_feature.data[key]
+        if fallback is not None:
+            return fallback
+        raise KeyError(
+            f"公共 Page 下 data key 不存在: {key} (引用: {source or key})"
+        )
+
+    def get_locator(self, locator_or_name):
+        locator = super().get_locator(locator_or_name)
+        if (
+            isinstance(locator, CompiledLocator)
+            or self._parse_strict_ref(locator_or_name)
+            or not isinstance(locator, (dict, str))
+        ):
+            return locator
+        compiled = compile_locator(locator)
+        if not (compiled.root_name or compiled.region_name):
+            return locator
+        root_locator = compiled.root_locator
+        root_cache_name = compiled.root_cache_name
+        region_locator = compiled.region_locator
+        if compiled.root_name:
+            root_locator = self._index.top_roots.get(compiled.root_name)
+            if root_locator is None:
+                root_locator = self._require_locator(
+                    compiled.root_name,
+                    source=f"root:{compiled.root_name}",
+                )
+            if not _is_top_level_locator(root_locator):
+                raise ValueError(
+                    f"locator root 必须是顶层窗口: {compiled.root_name}"
+                )
+            root_cache_name = root_locator.root_cache_name
+        if compiled.region_name:
+            region_locator = self._index.top_roots.get(compiled.region_name)
+            if region_locator is None:
+                region_locator = self._require_locator(
+                    compiled.region_name,
+                    source=f"region:{compiled.region_name}",
+                )
+            if region_locator.prefix not in {"child", "xpath"}:
+                raise ValueError(
+                    f"locator region 必须是 Child/XPath: {compiled.region_name}"
+                )
+        return replace(
+            compiled,
+            root_locator=root_locator,
+            root_cache_name=root_cache_name,
+            region_locator=region_locator,
+        )
+
+    def get_visual_value(self, value):
+        ref = self._parse_strict_ref(value)
+        if not ref or ref["kind"] == "literal":
+            return super().get_visual_value(value)
+        if ref["kind"] == "loc":
+            return self._require_locator(ref["key"], ref.get("source"))
+        if ref["kind"] == "data":
+            return self._require_data(ref["key"], ref.get("source"))
+
+        norm_key = normalize(str(ref["key"]))
+        has_loc = bool(self._index.locator_entries.get(norm_key)) or (
+            self.ctx.autowork_feature.locators[ref["key"]] is not None
+        )
+        has_data = bool(self._index.data_entries.get(norm_key)) or (
+            self.ctx.autowork_feature.data[ref["key"]] is not None
+        )
+        if has_loc and has_data:
+            raise KeyError(
+                f"严格引用同时命中公共 Page locator 和 data: "
+                f"{ref.get('source')}，请改用 $loc:{ref['key']} "
+                f"或 $data:{ref['key']}"
+            )
+        if has_loc:
+            return self._require_locator(ref["key"], ref.get("source"))
+        if has_data:
+            return self._require_data(ref["key"], ref.get("source"))
+        raise KeyError(
+            f"严格引用不存在: {ref['key']} "
+            f"(引用: {ref.get('source')})"
+        )
+
+
+def universal_debug_page_descriptor() -> PageViewDescriptor:
+    return PageViewDescriptor(
+        id=UNIVERSAL_PAGE_ID,
+        kind="universal",
+        label=UNIVERSAL_PAGE_LABEL,
+        module_name=UniversalDebugPage.__module__,
+        class_name=UniversalDebugPage.__name__,
+        class_object=UniversalDebugPage,
+        source_path=_source_path(UniversalDebugPage),
     )
 
 
@@ -165,14 +343,19 @@ def render_action_snippet(
         values: dict[str, str],
 ) -> str:
     call = _render_action_call(action, values)
-    if target.kind == "view":
+    resolved_target = (
+        _infer_owner_target_from_strings(values.values())
+        if target.kind == "universal"
+        else None
+    ) or target
+    if resolved_target.kind == "view":
         return "\n".join((
-            f"page = get_page(context, {target.parent_class_name})",
-            f"view = page.{target.view_property}",
+            f"page = get_page(context, {resolved_target.parent_class_name})",
+            f"view = page.{resolved_target.view_property}",
             f"view.{call}",
         ))
     return "\n".join((
-        f"page = get_page(context, {target.class_name})",
+        f"page = get_page(context, {resolved_target.class_name})",
         f"page.{call}",
     ))
 
@@ -182,14 +365,23 @@ def render_call_source_snippet(
         call_source: str,
 ) -> str:
     call = call_source.strip()
-    if target.kind == "view":
+    resolved_target = (
+        _infer_owner_target_from_call_source(call)
+        if target.kind == "universal"
+        else None
+    ) or target
+    if resolved_target.kind == "view":
+        if call.startswith("page."):
+            call = "view." + call[len("page."):]
         return "\n".join((
-            f"page = get_page(context, {target.parent_class_name})",
-            f"view = page.{target.view_property}",
+            f"page = get_page(context, {resolved_target.parent_class_name})",
+            f"view = page.{resolved_target.view_property}",
             call,
         ))
+    if call.startswith("view."):
+        call = "page." + call[len("view."):]
     return "\n".join((
-        f"page = get_page(context, {target.class_name})",
+        f"page = get_page(context, {resolved_target.class_name})",
         call,
     ))
 
@@ -483,6 +675,309 @@ def _display_source(path: Path | None):
         return path.resolve().relative_to(Paths.BASE_DIR.resolve()).as_posix()
     except ValueError:
         return path.name
+
+
+def _normalize_yaml_rel_path(file_name: str) -> str:
+    text = str(file_name).strip().replace("\\", "/")
+    if not text.endswith((".yaml", ".yml")):
+        text += ".yaml"
+    return text
+
+
+def _iter_yaml_files(root_dir: Path) -> list[tuple[str, Path]]:
+    if not root_dir.is_dir():
+        return []
+    found: dict[str, Path] = {}
+    for pattern in ("*.yaml", "*.yml"):
+        for path in root_dir.rglob(pattern):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root_dir).as_posix()
+            found[rel] = path
+    return [(rel, found[rel]) for rel in sorted(found)]
+
+
+def _build_resource_file_target_maps(
+        targets: tuple[PageViewDescriptor, ...],
+) -> tuple[dict[str, tuple[PageViewDescriptor, ...]], dict[str, tuple[PageViewDescriptor, ...]]]:
+    loc_map: dict[str, list[PageViewDescriptor]] = {}
+    data_map_by_file: dict[str, list[PageViewDescriptor]] = {}
+    for target in targets:
+        if target.kind == "universal":
+            continue
+        cls = target.class_object
+        loc_files = list(BasePage._iter_resource_files(
+            getattr(cls, "locator_files", None),
+            getattr(cls, "locator_file", None),
+        ))
+        if target.kind == "page":
+            loc_files.extend(BasePage._iter_resource_files(
+                getattr(cls, "view_locator_files", None),
+                getattr(cls, "root_locator_file", None),
+            ))
+        for file_name in loc_files:
+            rel = _normalize_yaml_rel_path(file_name)
+            bucket = loc_map.setdefault(rel, [])
+            if target not in bucket:
+                bucket.append(target)
+
+        data_files = list(BasePage._iter_resource_files(
+            getattr(cls, "data_files", None),
+            getattr(cls, "data_file", None),
+        ))
+        for file_name in data_files:
+            rel = _normalize_yaml_rel_path(file_name)
+            bucket = data_map_by_file.setdefault(rel, [])
+            if target not in bucket:
+                bucket.append(target)
+
+    return (
+        {k: tuple(v) for k, v in loc_map.items()},
+        {k: tuple(v) for k, v in data_map_by_file.items()},
+    )
+
+
+def _bind_universal_locator_entry(
+        locator: CompiledLocator,
+        same_file_locators: dict[str, CompiledLocator],
+        top_roots: dict[str, CompiledLocator],
+        global_non_region_locators: dict[str, CompiledLocator],
+) -> CompiledLocator:
+    if _is_top_level_locator(locator):
+        return locator
+    if locator.prefix in {"default", "child", "xpath"} and not locator.root_name:
+        raise ValueError(f"窗口包结构 locator[{locator.name}] 缺少窗口 root")
+    if locator.prefix in {"ocr", "pic"} and not locator.region_name:
+        raise ValueError(f"窗口包视觉 locator[{locator.name}] 缺少本地 region")
+
+    root_locator = locator.root_locator
+    root_cache_name = locator.root_cache_name
+    region_locator = locator.region_locator
+
+    if locator.root_name:
+        root_locator = (
+            top_roots.get(locator.root_name)
+            or same_file_locators.get(locator.root_name)
+        )
+        if root_locator is None:
+            raise KeyError(f"窗口包 root 不存在: {locator.root_name}")
+        if not _is_top_level_locator(root_locator):
+            raise ValueError(f"locator root 必须是顶层窗口: {locator.root_name}")
+        root_cache_name = root_locator.root_cache_name
+
+    if locator.region_name:
+        region_locator = (
+            same_file_locators.get(locator.region_name)
+            or top_roots.get(locator.region_name)
+            or global_non_region_locators.get(locator.region_name)
+        )
+        if region_locator is None:
+            raise KeyError(f"窗口包 region 不存在: {locator.region_name}")
+        if region_locator.prefix not in {"child", "xpath"}:
+            raise ValueError(f"locator region 必须是 Child/XPath: {locator.region_name}")
+
+    return replace(
+        locator,
+        root_locator=root_locator,
+        root_cache_name=root_cache_name,
+        region_locator=region_locator,
+    )
+
+
+def _build_universal_resource_index(
+        targets: tuple[PageViewDescriptor, ...] | None = None,
+) -> _UniversalResourceIndex:
+    if targets is None:
+        try:
+            targets = discover_page_view_catalog(include_universal=False).targets
+        except Exception:
+            targets = ()
+    locator_file_targets, data_file_targets = _build_resource_file_target_maps(targets)
+
+    raw_files: list[tuple[str, list[tuple[str, str, CompiledLocator | None, Exception | None]]]] = []
+    top_roots_by_key: dict[str, list[CompiledLocator]] = {}
+
+    for rel_path, path in _iter_yaml_files(Path(Paths.LOCATORS_DIR)):
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        mapped = data_map(loaded)
+        items: list[tuple[str, str, CompiledLocator | None, Exception | None]] = []
+        for raw_key in loaded:
+            norm_key = normalize(str(raw_key))
+            try:
+                compiled = compile_locator(mapped[raw_key], name=norm_key)
+                if _is_top_level_locator(compiled):
+                    digest = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:12]
+                    compiled = replace(compiled, root_cache_name=f"{norm_key}:{digest}")
+                    top_roots_by_key.setdefault(norm_key, []).append(compiled)
+                items.append((str(raw_key), norm_key, compiled, None))
+            except Exception as error:
+                items.append((str(raw_key), norm_key, None, error))
+        raw_files.append((rel_path, items))
+
+    top_roots = {
+        key: candidates[0]
+        for key, candidates in top_roots_by_key.items()
+        if len(candidates) == 1
+    }
+
+    file_compiled: dict[str, dict[str, CompiledLocator]] = {}
+    file_bound: dict[str, dict[str, CompiledLocator]] = {}
+    non_region_by_key: dict[str, list[CompiledLocator]] = {}
+
+    for rel_path, items in raw_files:
+        comp_map: dict[str, CompiledLocator] = {}
+        for _raw_key, norm_key, compiled, error in items:
+            if compiled is not None and error is None:
+                comp_map[norm_key] = compiled
+        file_compiled[rel_path] = comp_map
+        bound_map: dict[str, CompiledLocator] = {}
+        for _raw_key, norm_key, compiled, error in items:
+            if compiled is None or error is not None:
+                continue
+            if _is_top_level_locator(compiled):
+                bound_map[norm_key] = compiled
+                continue
+            if compiled.region_name:
+                continue
+            try:
+                bound = _bind_universal_locator_entry(
+                    compiled,
+                    comp_map,
+                    top_roots,
+                    {},
+                )
+            except Exception:
+                continue
+            bound_map[norm_key] = bound
+            non_region_by_key.setdefault(norm_key, []).append(bound)
+        file_bound[rel_path] = bound_map
+
+    unique_non_region = {
+        key: candidates[0]
+        for key, candidates in non_region_by_key.items()
+        if len(candidates) == 1
+    }
+
+    locator_entries: dict[str, list[_UniversalLocatorEntry]] = {}
+    for rel_path, items in raw_files:
+        matched_targets = locator_file_targets.get(rel_path, ())
+        target_labels = tuple(t.label for t in matched_targets)
+        bound_map = file_bound.get(rel_path, {})
+        comp_map = file_compiled.get(rel_path, {})
+        for raw_key, norm_key, compiled, error in items:
+            bound_locator = None
+            entry_error = error
+            if compiled is not None and entry_error is None:
+                if norm_key in bound_map:
+                    bound_locator = bound_map[norm_key]
+                else:
+                    try:
+                        bound_locator = _bind_universal_locator_entry(
+                            compiled,
+                            {**comp_map, **bound_map},
+                            top_roots,
+                            unique_non_region,
+                        )
+                    except Exception as bind_err:
+                        entry_error = bind_err
+            locator_entries.setdefault(norm_key, []).append(
+                _UniversalLocatorEntry(
+                    rel_path=rel_path,
+                    raw_key=raw_key,
+                    locator=bound_locator,
+                    target_labels=target_labels,
+                    targets=matched_targets,
+                    error=entry_error,
+                )
+            )
+
+    data_entries: dict[str, list[_UniversalDataEntry]] = {}
+    for rel_path, path in _iter_yaml_files(Path(Paths.DATA_DIR)):
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        matched_targets = data_file_targets.get(rel_path, ())
+        target_labels = tuple(t.label for t in matched_targets)
+        for raw_key, value in loaded.items():
+            norm_key = normalize(str(raw_key))
+            data_entries.setdefault(norm_key, []).append(
+                _UniversalDataEntry(
+                    rel_path=rel_path,
+                    raw_key=str(raw_key),
+                    value=value,
+                    target_labels=target_labels,
+                    targets=matched_targets,
+                )
+            )
+
+    return _UniversalResourceIndex(
+        top_roots=top_roots,
+        locator_entries={k: tuple(v) for k, v in locator_entries.items()},
+        data_entries={k: tuple(v) for k, v in data_entries.items()},
+    )
+
+
+def _format_duplicate_key_error(
+        kind: str,
+        key: str,
+        source: str | None,
+        entries: tuple[_UniversalLocatorEntry, ...] | tuple[_UniversalDataEntry, ...],
+) -> str:
+    lines = [
+        f"公共 Page 下 {kind} key 存在多处重名定义: {key} (引用: {source or key})，"
+        "请在顶部切换至具体 Page/View：",
+    ]
+    for entry in entries:
+        if entry.target_labels:
+            targets_text = " / ".join(entry.target_labels)
+            lines.append(
+                f"  - {entry.rel_path} (键名: {entry.raw_key}) -> 可选 Page/View: {targets_text}"
+            )
+        else:
+            lines.append(f"  - {entry.rel_path} (键名: {entry.raw_key})")
+    return "\n".join(lines)
+
+
+def _infer_owner_target_from_strings(values) -> PageViewDescriptor | None:
+    refs: list[str] = []
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        try:
+            ref = BasePage._parse_strict_ref(raw.strip())
+        except ValueError:
+            continue
+        if ref and ref["kind"] in {"loc", "auto"} and ref.get("key"):
+            refs.append(ref["key"])
+    if not refs:
+        return None
+    index = _build_universal_resource_index()
+    for key in refs:
+        entries = index.locator_entries.get(normalize(str(key)), ())
+        if len(entries) == 1 and len(entries[0].targets) == 1:
+            return entries[0].targets[0]
+    return None
+
+
+def _infer_owner_target_from_call_source(call_source: str) -> PageViewDescriptor | None:
+    try:
+        tree = ast.parse(call_source.strip(), mode="eval")
+    except SyntaxError:
+        return None
+    strings = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+    return _infer_owner_target_from_strings(strings)
 
 
 def unload_modules(package: str):

@@ -244,8 +244,12 @@ def _get_relative_position(context, criteria, prefix, source, direction="right",
     )
     direction, offset = _relative_options(direction, offset)
     result = _relative_from_target(target, source, direction, offset)
-    if settings.draw_outline:
-        mark_visual_target(result)
+    if settings.draw_outline and not getattr(settings, "knowledge_capture_enabled", False):
+        from autowork_core.runtime.evidence.context import ACTIVE_ACTION
+
+        active = ACTIVE_ACTION.get()
+        if active is None or not getattr(active[0], "detailed", False):
+            mark_visual_target(result)
     return result
 
 

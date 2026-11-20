@@ -63,6 +63,12 @@ def append_to_sequence(
 
 
 def run_action(request: ActionRunRequest) -> ActionRunResult:
+    from autowork_core.runtime.evidence.context import collector_scope
+    with collector_scope(None):
+        return _run_action(request)
+
+
+def _run_action(request: ActionRunRequest) -> ActionRunResult:
     snippet = _request_snippet(request)
     call_source = _request_call_source(request)
     try:

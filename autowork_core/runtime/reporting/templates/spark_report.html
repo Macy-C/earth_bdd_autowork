@@ -5,6 +5,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>BDD Autowork Report</title>
+  <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAb0lEQVR42mNgQAOqya//0xIz4AK0thivQ+htOYYjBtQBA2U53BGjDhh1ACmKYWDAHUBNR5DtAGo5hGIHUOoIqjiAEodQ1QHkOILqDiDVIcPPASMzEY7MgmhkVkaj7YFRBwy7vsHg6ZoNeOd0ILvnAFHtAccRWJQCAAAAAElFTkSuQmCC" />
   <style>
     :root {
       --bg: #f6f7f9;
@@ -24,6 +25,7 @@
     }
 
     * { box-sizing: border-box; }
+    #runEvidenceSummary:empty { display: none; }
 
     html,
     body {
@@ -1226,7 +1228,20 @@
       .step-duration { grid-column: 2; grid-row: 3; text-align: left; }
       .step-main .status-pill { grid-column: 3; grid-row: 1; width: fit-content; }
     }
+    .ai-diagnosis { margin: 14px 0; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+    .ai-diagnosis h3 { margin: 0 0 8px; font-size: 14px; }
+    .ai-diagnosis h4 { margin: 12px 0 5px; font-size: 12px; }
+    .ai-diagnosis p, .ai-diagnosis li { font-size: 12px; line-height: 1.6; }
+    .ai-diagnosis ul { margin: 5px 0; padding-left: 20px; }
+    .diagnosis-state, .diagnosis-note { color: var(--muted); font-size: 11px; }
+    .diagnosis-preview { display: block; font-size: 11px; font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .diagnosis-references { display: flex; flex-wrap: wrap; gap: 5px 10px; font-size: 11px; }
+    .diagnosis-fact { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .diagnosis-fact pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; max-height: 220px; overflow: auto; }
+    .ai-diagnosis .error-detail { background: transparent; border-color: var(--border); color: inherit; }
+    .ai-diagnosis .error-detail summary, .ai-diagnosis .error-detail pre { color: inherit; }
   </style>
+  <!-- report-resource:workspace.css -->
 </head>
 <body>
   <div class="shell">
@@ -1248,6 +1263,7 @@
     </aside>
 
     <main class="content">
+      <section id="runEvidenceSummary" style="padding-bottom:12px;overflow-wrap:anywhere" aria-label="运行证据摘要"></section>
       <section class="report-view active" id="overviewView" data-view="overview">
         <div class="topbar overview-topbar">
           <div>
@@ -1531,7 +1547,12 @@
 
     function firstError(steps) {
       const failed = (steps || []).find(step => normalizeStatus(step.status) === "failed" && step.error);
-      return failed ? failed.error : "";
+      return failed ? conciseText((failed.diagnostic || {}).summary || failed.error, 220) : "";
+    }
+
+    function conciseText(value, limit = 180) {
+      const text = String(value || "").split(/\r?\n/, 1)[0].replace(/^ASSERT FAILED:\s*/, "").trim();
+      return text.length > limit ? text.slice(0, limit - 1) + "…" : text;
     }
 
     function outlineFirstError(outline) {
@@ -1939,7 +1960,8 @@
       const status = normalizeStatus(item.status);
       const type = item.rowType === "example" ? "Example" : item.rowType === "feature-skip" ? "Feature" : "Scenario";
       const failedSteps = item.rowType === "feature-skip" ? "—" : item.failedSteps ? `<strong>${item.failedSteps}</strong> 个` : "—";
-      return `<button class="scenario-execution-row ${item.id === state.selectedId ? "active" : ""}" data-execution-row-id="${escapeAttr(item.id)}" data-execution-feature-id="${featureIndex}" data-execution-name="${escapeAttr(item.executionName)}" data-execution-status="${escapeAttr(status)}" data-execution-duration="${escapeAttr(item.duration || "-")}" style="--execution-color:${executionColor(status)}" aria-label="${escapeAttr(`${item.executionName}，${statusLabel(status)}，${item.duration || "-"}`)}"><span class="scenario-status-mark"></span><span class="scenario-execution-code">${escapeHtml(executionCode(item))}<small class="scenario-execution-type">${type}</small></span><span class="scenario-execution-name" title="${escapeAttr(item.executionName)}">${escapeHtml(item.executionName)}</span><span class="scenario-result-label">${statusLabel(status)}</span><span class="scenario-duration">${escapeHtml(item.duration || "-")}</span><span class="scenario-failed-steps">${failedSteps}</span><span class="execution-row-arrow">›</span></button>`;
+      const diagnosis = item.diagnosis ? `<small class="diagnosis-preview" title="${escapeAttr(item.diagnosis.summary || item.diagnosis.reason || "")}">AI · ${escapeHtml(diagnosisStatus(item.diagnosis.status))}${item.diagnosis.summary ? ` · ${escapeHtml(item.diagnosis.summary)}` : ""}</small>` : "";
+      return `<button class="scenario-execution-row ${item.id === state.selectedId ? "active" : ""}" data-execution-row-id="${escapeAttr(item.id)}" data-execution-feature-id="${featureIndex}" data-execution-name="${escapeAttr(item.executionName)}" data-execution-status="${escapeAttr(status)}" data-execution-duration="${escapeAttr(item.duration || "-")}" style="--execution-color:${executionColor(status)}" aria-label="${escapeAttr(`${item.executionName}，${statusLabel(status)}，${item.duration || "-"}`)}"><span class="scenario-status-mark"></span><span class="scenario-execution-code">${escapeHtml(executionCode(item))}<small class="scenario-execution-type">${type}</small></span><span class="scenario-execution-name" title="${escapeAttr(item.executionName)}">${escapeHtml(item.executionName)}${diagnosis}</span><span class="scenario-result-label">${statusLabel(status)}</span><span class="scenario-duration">${escapeHtml(item.duration || "-")}</span><span class="scenario-failed-steps">${failedSteps}</span><span class="execution-row-arrow">›</span></button>`;
     }
 
     function renderGroupedExecution(rows, summary) {
@@ -2212,11 +2234,21 @@
           </div>
           <div class="scenario-tags">${(row.tags || []).map(tag => `<span class="tag">@${escapeHtml(tag)}</span>`).join("")}</div>
         </section>
-        ${row.error ? `<div class="scenario-evidence-summary"><strong>失败摘要</strong><br>${escapeHtml(row.error)}</div>` : ""}
+        ${renderFailureFocus(row)}
+        ${renderLifecycleErrors(row.lifecycleErrors || [])}
+        ${renderAIDiagnosis(row.diagnosis)}
         ${renderScenarioAttachments(collectAttachments(row))}
         <div class="step-section-title">Step 时间线</div>
         <div class="step-list">${renderSteps(row.steps || [])}</div>
       `;
+    }
+
+    function renderFailureFocus(row) {
+      const index = (row.steps || []).findIndex(step => normalizeStatus(step.status) === "failed");
+      if (index < 0) return "";
+      const step = row.steps[index];
+      const summary = conciseText((step.diagnostic || {}).summary || step.error || "请展开步骤查看错误", 220);
+      return `<div class="scenario-evidence-summary"><strong>失败位置</strong> · Step ${index + 1} · ${escapeHtml(step.name || "")}<br><strong>关键差异</strong> · ${escapeHtml(summary)}</div>`;
     }
 
     function collectAttachments(row) {
@@ -2310,9 +2342,9 @@
         const attachments = step.attachments || [];
         const actions = step.actions || [];
         const failedActions = actions.filter(action => normalizeStatus(action.status) === "failed");
-        const hasExtra = step.error || step.diagnostic || failedActions.length || step.locator || step.root || step.action;
+        const hasExtra = step.error || step.diagnostic || actions.length || (step.logs || []).length || step.locator || step.root || step.action;
         return `
-          <div class="step ${normalized} ${hasExtra ? "has-extra open" : ""}">
+          <div id="${escapeAttr(`step-${step.evidenceId || index}`)}" class="step ${normalized} ${hasExtra ? "has-extra open" : ""}">
             <div class="step-main">
               <div class="step-index">${index + 1}</div>
               <div class="bdd-keyword">${escapeHtml(step.keyword || "Step")}</div>
@@ -2328,7 +2360,8 @@
                 <div class="fact"><div class="fact-label">关键字</div><div class="fact-value">${escapeHtml(step.keyword || "-")}</div></div>
                 <div class="fact"><div class="fact-label">状态</div><div class="fact-value">${statusLabel(step.status)}</div></div>
               </div>
-              ${renderActions(failedActions)}
+              ${renderEvidenceActions(actions)}
+              ${renderEvidenceLogs(step.logs || [])}
               ${renderFailure(step)}
             </div>` : ""}
           </div>
@@ -2348,6 +2381,88 @@
       }).join("")}</div>`;
     }
 
+    function diagnosisStatus(status) {
+      return ({completed: "已完成", insufficient_evidence: "证据不足", failed: "分析失败", timeout: "分析超时", not_analyzed: "未分析", unavailable: "证据不可用", partial: "部分完成"})[status] || status || "未分析";
+    }
+
+    function renderAIDiagnosis(item) {
+      if (!item) return "";
+      const anchor = id => `diagnosis-${item.scopeId}-${id}`;
+      const facts = item.evidence || [];
+      const label = id => {
+        const fact = facts.find(value => value.id === id);
+        if (!fact) return "证据";
+        let detail = {};
+        try { detail = JSON.parse(fact.text); } catch (_) {}
+        const position = String(fact.scopeId || "").match(/\/step-(\d+)/);
+        const step = position ? `Step ${position[1]}` : "";
+        const names = {execution: "执行信息", exception: "生命周期异常", step: "步骤", action: "动作记录", traceback: "异常堆栈", log: "相关日志", image: "证据图片"};
+        const name = fact.kind === "step" ? detail.name : fact.kind === "action" ? detail.operation : fact.kind === "log" ? (detail.source || {}).function : "";
+        return [names[fact.kind] || "证据", step, conciseText(name, 28)].filter(Boolean).join(" · ");
+      };
+      const refs = ids => `<span class="diagnosis-references">${[...new Set(ids || [])].map(id => `<a href="#${encodeURIComponent(anchor(id))}" title="${escapeAttr(id)}" data-diagnosis-ref="${escapeAttr(anchor(id))}">${escapeHtml(label(id))}</a>`).join("")}</span>`;
+      const sourceRef = fact => {
+        const scope = String(fact.scopeId || "").split("/action-")[0];
+        return scope.includes("/step-") ? `<a href="#${encodeURIComponent(`step-${scope}`)}" data-diagnosis-ref="${escapeAttr(`step-${scope}`)}">定位来源</a>` : "";
+      };
+      const budget = item.budget || {};
+      const causes = item.causes || [];
+      const primary = causes.find(value => !/^(?:[（(]排除项[)）]|需排除的替代假设)/.test(value.reason || ""));
+      const recommendations = item.recommendations || [];
+      const immediate = recommendations[0];
+      const image = item.imageSelection;
+      const imageBudgetMissing = (item.missing || []).some(value => String(value).startsWith("image:input_budget"));
+      let imageNote = "";
+      if (image && image.enabled === false) imageNote = "图片未发送：本次未启用图片分析";
+      else if (Number(budget.imageCount || 0) > 0) imageNote = `已发送 ${Number(budget.imageCount)} 张证据图片`;
+      else if (imageBudgetMissing) imageNote = "图片未发送：输入预算限制，不代表没有采集截图";
+      else if (image && image.available > 0) imageNote = "已有截图，本次未发送；请在分析详情查看原因";
+      else if (image) imageNote = "本次没有可用的图片证据";
+      const missingDetails = [...(item.missing || []), ...(item.missing_evidence || [])];
+      const supplemental = causes.filter(value => value !== primary);
+      return `<section class="ai-diagnosis" aria-label="AI 辅助诊断"><h3>AI 辅助诊断 <span class="diagnosis-state">${escapeHtml(diagnosisStatus(item.status))}</span></h3>
+        <p><strong>主要判断</strong> · ${escapeHtml(conciseText((primary || {}).reason || item.summary || item.reason || "暂无诊断结果", 180))}</p>
+        ${primary ? refs(primary.evidence_ids) : ""}
+        ${immediate ? `<p><strong>下一步</strong> · ${escapeHtml(conciseText(immediate.action, 160))}</p>${refs(immediate.evidence_ids)}` : ""}
+        <div class="diagnosis-note">AI 推断，不改变测试结果。${escapeHtml(item.model || "")}${item.durationSeconds != null ? ` · ${Number(item.durationSeconds).toFixed(2)} 秒` : ""}${imageNote ? ` · ${escapeHtml(imageNote)}` : ""}</div>
+        <details class="error-detail"><summary>分析详情与补充判断</summary>
+          ${item.summary ? `<h4>模型摘要</h4><p>${escapeHtml(item.summary)}</p>` : ""}
+          ${primary ? `<h4>主要判断依据与不确定性</h4><p>${escapeHtml(primary.reason)}</p><p>${escapeHtml(primary.uncertainty)}</p>` : ""}
+          ${supplemental.length ? `<h4>补充判断 / 排除项</h4><ul>${supplemental.map(value => `<li>${escapeHtml(value.reason)}<div class="diagnosis-note">${escapeHtml(value.uncertainty)}</div>${refs(value.evidence_ids)}</li>`).join("")}</ul>` : ""}
+          ${recommendations.length ? `<h4>完整建议</h4><ul>${recommendations.map(value => `<li>${escapeHtml(value.action)}${refs(value.evidence_ids)}</li>`).join("")}</ul>` : ""}
+          ${missingDetails.length ? `<h4>材料范围与补充建议</h4><p class="diagnosis-note">省略、未发送与未采集不同；模型建议补充不代表这些材料是必需项。</p><ul>${missingDetails.map(value => `<li>${escapeHtml(value)}</li>`).join("")}</ul>` : ""}
+          ${item.budget ? `<p>输入估算 ${Number(budget.estimatedInputTokens || 0)} / ${Number(budget.inputLimit || 0)}，输出预留 ${Number(budget.reservedOutputTokens || 0)}，图片 ${Number(budget.imageCount || 0)}。</p><p class="diagnosis-note">UTF-8 保守估算与图片预留，不是模型 tokenizer 的精确计数。</p>` : ""}
+        </details>
+        ${facts.length ? `<details class="error-detail"><summary>原始证据 (${facts.length})</summary>${facts.map(fact => `<div class="diagnosis-fact" id="${escapeAttr(anchor(fact.id))}"><strong>${escapeHtml(label(fact.id))}</strong> ${sourceRef(fact)}<pre>${escapeHtml(fact.text)}</pre><small class="diagnosis-note">${escapeHtml(fact.id)}</small></div>`).join("")}</details>` : ""}
+      </section>`;
+    }
+
+    document.addEventListener("click", event => {
+      const link = event.target.closest("[data-diagnosis-ref]");
+      if (!link) return;
+      const target = document.getElementById(link.dataset.diagnosisRef);
+      if (!target) return;
+      event.preventDefault();
+      const detail = target.closest("details");
+      if (detail) detail.open = true;
+      target.scrollIntoView({block: "center", behavior: "smooth"});
+    });
+
+    function renderLifecycleErrors(errors) {
+      if (!errors.length) return "";
+      return `<details class="error-detail" open><summary>生命周期异常 (${errors.length})</summary><pre>${escapeHtml(errors.map(error => `${error.stage || ""} ${error.type || ""}: ${error.message || ""}`).join("\n"))}</pre></details>`;
+    }
+
+    function renderEvidenceActions(actions) {
+      if (!actions.length) return "";
+      return `<details class="error-detail"><summary>动作记录 (${actions.length})</summary><pre>${escapeHtml(actions.map(action => `${action.operation || action.name || "action"} | ${action.outcome || action.status || "unknown"} | ${(action.owner || {}).view || ""}${action.exception ? " | " + action.exception.message : ""}`).join("\n"))}</pre></details>`;
+    }
+
+    function renderEvidenceLogs(logs) {
+      if (!logs.length) return "";
+      return `<details class="error-detail"><summary>关联日志 (${logs.length})</summary><pre>${escapeHtml(logs.map(item => `${item.observed_at || ""} ${item.level || ""} ${item.message || ""}`).join("\n"))}</pre></details>`;
+    }
+
     function renderFailure(step) {
       return step.diagnostic
         ? renderDiagnostic(step.diagnostic, step)
@@ -2356,7 +2471,7 @@
 
     function renderError(step) {
       if (!step.error && !step.errorDetail) return "";
-      const summary = step.error || "查看错误详情";
+      const summary = conciseText(step.error || "查看错误详情", 220);
       const detail = step.errorDetail || step.error || "";
       return `
         <div class="error-box">${escapeHtml(summary)}</div>
@@ -2410,6 +2525,15 @@
       document.getElementById("reportMeta").textContent = `${reportData.title || "测试执行报告"} · ${reportData.project || ""} · ${reportData.startedAt || ""} · ${reportData.duration || ""}`;
       document.getElementById("sidebarProject").textContent = reportData.project || "BDD Autowork";
       document.getElementById("sidebarRunMeta").textContent = `${reportData.startedAt || ""} · ${reportData.duration || ""}`;
+      const evidence = reportData.executionSummary;
+      document.getElementById("runEvidenceSummary").innerHTML = evidence
+        ? `<strong>运行结果：</strong>${escapeHtml(evidence.outcome || "unknown")} · <strong>证据：</strong>${escapeHtml(evidence.captureStatus || "unknown")} · ${escapeHtml(evidence.executionId || "多来源/不适用")}${renderLifecycleErrors(evidence.exceptions || [])}${renderLifecycleErrors(evidence.errors || [])}`
+        : "";
+      const diagnosis = reportData.diagnosis;
+      if (diagnosis && diagnosis.enabled) {
+        const runItems = (diagnosis.items || []).filter(item => item.kind === "run");
+        document.getElementById("runEvidenceSummary").innerHTML += `<div class="diagnosis-note">AI 诊断：${escapeHtml(diagnosisStatus(diagnosis.status))} · ${(diagnosis.items || []).filter(item => item.status === "completed").length}/${(diagnosis.items || []).length}</div>${runItems.map(item => `<details class="error-detail"><summary>运行级 AI 诊断 · ${escapeHtml(diagnosisStatus(item.status))}</summary>${renderAIDiagnosis(item)}</details>`).join("")}${diagnosis.reason ? `<p>${escapeHtml(diagnosis.reason)}</p>` : ""}`;
+      }
       if (state.view === "overview") {
         renderOverview(rows, summary);
       } else {
@@ -2570,5 +2694,7 @@
 
     render();
   </script>
+  <!-- report-resource:lucide.min.js -->
+  <!-- report-resource:workspace.js -->
 </body>
 </html>

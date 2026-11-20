@@ -896,6 +896,26 @@ def _resolve_screen_filtered_top_root(
     if not include_hidden and (not screen_selector or _screen_selector_is_all(screen_selector)):
         return None
 
+    root, _ = _match_screen_top_window(
+        backend, criteria, screen_selector, root_name=root_name, include_hidden=include_hidden,
+    )
+    return root
+
+
+def find_window_for_observation(criteria, screen_selector=None, *, root_name=None):
+    criteria = dict(criteria)
+    if "predicate_func" in criteria:
+        raise ValueError("Window observation does not execute predicate callbacks")
+    backend = criteria.pop("backend", "uia")
+    _, window = _match_screen_top_window(
+        backend, criteria, screen_selector, root_name=root_name,
+    )
+    return window
+
+
+def _match_screen_top_window(
+        backend, criteria, screen_selector, *, root_name=None, include_hidden=False,
+):
     enumeration_criteria = dict(criteria)
     identity_criteria = dict(criteria)
     if include_hidden:
@@ -937,7 +957,7 @@ def _resolve_screen_filtered_top_root(
             f"顶层 root 在指定 screen 上匹配到多个窗口: "
             f"root={root_name}, screen={screen_selector}, count={len(matches)}"
         )
-    return matches[0][0]
+    return matches[0]
 
 def _root_spec_from_handle(entry):
     if entry and entry.handle:
@@ -1583,14 +1603,18 @@ def _find(
     if dlg:
         _finalize_successful_find(windows, compiled, self_top_root=self_top_root, confirmed=confirmed)
 
-        if settings.draw_outline:
-            if isinstance(dlg, tuple):
-                mark_visual_target(dlg)
-            else:
-                try:
-                    _draw_outline(dlg, first_only=first_only)
-                except Exception as e:
-                    logger.debug(f"^^^^^^ draw_outline 失败，已忽略: {e}")
+        if settings.draw_outline and not getattr(settings, "knowledge_capture_enabled", False):
+            from autowork_core.runtime.evidence.context import ACTIVE_ACTION
+
+            active = ACTIVE_ACTION.get()
+            if active is None or not getattr(active[0], "detailed", False):
+                if isinstance(dlg, tuple):
+                    mark_visual_target(dlg)
+                else:
+                    try:
+                        _draw_outline(dlg, first_only=first_only)
+                    except Exception as e:
+                        logger.debug(f"^^^^^^ draw_outline 失败，已忽略: {e}")
 
     return dlg
 

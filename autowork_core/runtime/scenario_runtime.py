@@ -121,44 +121,23 @@ def prepare_project_scenario(context, scenario):
         hook(context, scenario)
 
 def _start_scenario_recording(context, scenario, state):
-    if not settings.record_enabled:
-        return
-    state.record_path = context.autowork_run.recorder.start(
-        context.feature.name,
-        scenario.name,
-        mode=settings.effective_record_mode,
-    )
-    state.record_started = bool(
-        getattr(context.autowork_run.recorder, "_running", False)
+    collector = getattr(context.autowork_run, "collector", None)
+    if collector is not None:
+        return collector.start_recording(context, scenario, state)
+    from autowork_core.runtime.evidence import RunEvidenceCollector
+    return RunEvidenceCollector.start_recording(
+        None, context, scenario, state,
     )
 
 def finish_scenario_recording(context, scenario):
     state = get_scenario_state(context)
-    recorder = context.autowork_run.recorder
-    if not settings.record_enabled or not state.record_started:
-        return None
-
-    record_path = None
-    if settings.record_all:
-        record_path = recorder.stop()
-        if should_keep_artifacts(scenario.status):
-            if record_path:
-                logger.error(f"[场景失败，录屏已保存] {record_path}")
-            else:
-                logger.warning("[场景失败，但未生成录屏]")
-        else:
-            recorder.delete()
-            logger.debug(f"[录屏已删除] {record_path}")
-    elif settings.record_failed:
-        recorder.stop()
-        if should_keep_artifacts(scenario.status):
-            record_path = recorder.save_buffered_video()
-            if record_path:
-                logger.error(f"[场景失败，最近录屏已保存] {record_path}")
-        else:
-            recorder.clear()
-            logger.debug("[场景通过，录屏缓存已清空]")
-    return record_path
+    collector = getattr(context.autowork_run, "collector", None)
+    if collector is not None:
+        return collector.finish_recording(context, scenario, state)
+    from autowork_core.runtime.evidence import RunEvidenceCollector
+    return RunEvidenceCollector.finish_recording(
+        None, context, scenario, state,
+    )
 
 def log_scenario_runtime_state(context):
     run = context.autowork_run

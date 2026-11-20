@@ -52,11 +52,10 @@ class ScreenRecorder:
     """
 
     def __init__(self, fps=5, monitor_index=1, buffer_seconds=8, segment_seconds=2, max_width=1280,
-                 ffmpeg_path="", ffmpeg_preset="ultrafast", ffmpeg_crf=28, ffmpeg_draw_mouse=True):
-        self.output_dir = Paths.RECORDINGS_DIR
-        os.makedirs(self.output_dir, exist_ok=True)
-        self.screenshot_dir = Paths.SCREENSHOTS_DIR
-        os.makedirs(self.screenshot_dir, exist_ok=True)
+                 ffmpeg_path="", ffmpeg_preset="ultrafast", ffmpeg_crf=28, ffmpeg_draw_mouse=True,
+                 output_dir=None, screenshot_dir=None):
+        self.output_dir = Path(output_dir) if output_dir is not None else Paths.RECORDINGS_DIR
+        self.screenshot_dir = Path(screenshot_dir) if screenshot_dir is not None else Paths.SCREENSHOTS_DIR
         self.fps = max(1, int(float(fps or 1)))
         self.monitor_index = max(1, int(float(monitor_index or 1)))
         self.buffer_seconds = max(1.0, float(buffer_seconds or 1))

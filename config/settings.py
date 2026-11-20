@@ -201,7 +201,24 @@ class Settings:
         self.record_ffmpeg_draw_mouse = True
         self.run_indicator_enabled = True
         self.run_indicator_max_scenario_chars = 28
+        self.knowledge_capture_enabled = False
+        self.weknora_api_url = ""
+        self.weknora_api_key = ""
+        self.weknora_framework_docs_kb = ""
+        self.weknora_engineering_cases_kb = ""
+        self.weknora_product_docs_kb = ""
+        self.llm_base_url = ""
+        self.llm_api_key = ""
+        self.llm_model = ""
+        self.llm_connect_timeout_seconds = 5.0
+        self.llm_read_timeout_seconds = 30.0
+        self.llm_allow_insecure_http = False
         self.spark_report = True
+        self.report_diagnosis_enabled = False
+        self.report_diagnosis_include_images = False
+        self.report_diagnosis_max_items = 3
+        self.report_diagnosis_max_input_tokens = 60000
+        self.report_diagnosis_max_output_tokens = 4096
         self.desktop_size = get_screen_size()
 
         # ocr
@@ -294,7 +311,59 @@ class Settings:
                 self.run_indicator_max_scenario_chars,
             ),
         )
-        self.spark_report = _as_bool(data.get("SPARK_REPORT", self.spark_report), self.spark_report)
+        knowledge_capture_conf = _normalize_config_keys(
+            data.get("KNOWLEDGE_CAPTURE_SETTING", {}) or {}
+        )
+        self.knowledge_capture_enabled = _as_bool(
+            knowledge_capture_conf.get("ENABLED", False), False,
+        )
+        weknora_conf = _normalize_config_keys(data.get("WEKNORA_SETTING", {}) or {})
+        self.weknora_api_url = str(weknora_conf.get("API_URL", "") or "").strip().rstrip("/")
+        self.weknora_api_key = str(weknora_conf.get("API_KEY", "") or "").strip()
+        kb_conf = weknora_conf.get("KNOWLEDGE_BASES", {}) or {}
+        if not isinstance(kb_conf, dict):
+            raise ValueError("WEKNORA_SETTING.KNOWLEDGE_BASES must be a mapping")
+        kb_conf = _normalize_config_keys(kb_conf)
+        self.weknora_framework_docs_kb = str(kb_conf.get("FRAMEWORK_DOCS", "") or "").strip()
+        self.weknora_engineering_cases_kb = str(kb_conf.get("ENGINEERING_CASES", "") or "").strip()
+        self.weknora_product_docs_kb = str(kb_conf.get("PRODUCT_DOCS", "") or "").strip()
+        configured_kbs = [
+            val for val in (
+                self.weknora_framework_docs_kb,
+                self.weknora_engineering_cases_kb,
+                self.weknora_product_docs_kb,
+            )
+            if val
+        ]
+        if len(configured_kbs) != len(set(configured_kbs)):
+            raise ValueError("WEKNORA_SETTING.KNOWLEDGE_BASES roles must not point to the same knowledge base")
+        llm_conf = _normalize_config_keys(data.get("LLM_SETTING", {}) or {})
+        self.llm_base_url = str(llm_conf.get("BASE_URL", "") or "").strip().rstrip("/")
+        self.llm_api_key = str(llm_conf.get("API_KEY", "") or "").strip()
+        self.llm_model = str(llm_conf.get("MODEL", "") or "").strip()
+        self.llm_connect_timeout_seconds = _as_float(
+            llm_conf.get("CONNECT_TIMEOUT_SECONDS", 5.0), 5.0,
+        )
+        self.llm_read_timeout_seconds = _as_float(
+            llm_conf.get("READ_TIMEOUT_SECONDS", 30.0), 30.0,
+        )
+        self.llm_allow_insecure_http = _as_bool(
+            llm_conf.get("ALLOW_INSECURE_HTTP", False), False,
+        )
+        report_conf = data.get("SPARK_REPORT", True)
+        if isinstance(report_conf, dict):
+            report_conf = _normalize_config_keys(report_conf)
+            self.spark_report = _as_bool(report_conf.get("ENABLED", True), True)
+            diagnosis_conf = report_conf.get("DIAGNOSIS", {}) or {}
+            diagnosis_conf = _normalize_config_keys(diagnosis_conf) if isinstance(diagnosis_conf, dict) else {}
+        else:
+            self.spark_report = _as_bool(report_conf, True)
+            diagnosis_conf = {}
+        self.report_diagnosis_enabled = _as_bool(diagnosis_conf.get("ENABLED", False), False)
+        self.report_diagnosis_include_images = _as_bool(diagnosis_conf.get("INCLUDE_IMAGES", False), False)
+        self.report_diagnosis_max_items = max(0, _as_int(diagnosis_conf.get("MAX_ITEMS", 3), 3))
+        self.report_diagnosis_max_input_tokens = max(1, _as_int(diagnosis_conf.get("MAX_INPUT_TOKENS", 60000), 60000))
+        self.report_diagnosis_max_output_tokens = max(1, _as_int(diagnosis_conf.get("MAX_OUTPUT_TOKENS", 4096), 4096))
 
         # ===================== ocr =====================
         ocr_conf = _apply_mode_defaults(data.get("OCR_SETTING", {}) or {}, OCR_MODE_PRESETS)
@@ -464,6 +533,14 @@ class Settings:
     def record_failed(self):
         return self.record_enabled and self.effective_record_mode == "failed"
 
+    @property
+    def weknora_knowledge_bases(self):
+        return {
+            "FRAMEWORK_DOCS": self.weknora_framework_docs_kb,
+            "ENGINEERING_CASES": self.weknora_engineering_cases_kb,
+            "PRODUCT_DOCS": self.weknora_product_docs_kb,
+        }
+
     def as_dict(self):
         return {
             "log_file": self.log_file,
@@ -486,7 +563,23 @@ class Settings:
             "run_indicator_max_scenario_chars": (
                 self.run_indicator_max_scenario_chars
             ),
+            "knowledge_capture_enabled": self.knowledge_capture_enabled,
+            "weknora_api_url": self.weknora_api_url,
+            "weknora_framework_docs_kb": self.weknora_framework_docs_kb,
+            "weknora_engineering_cases_kb": self.weknora_engineering_cases_kb,
+            "weknora_product_docs_kb": self.weknora_product_docs_kb,
+            "weknora_knowledge_bases": self.weknora_knowledge_bases,
+            "llm_base_url": self.llm_base_url,
+            "llm_model": self.llm_model,
+            "llm_connect_timeout_seconds": self.llm_connect_timeout_seconds,
+            "llm_read_timeout_seconds": self.llm_read_timeout_seconds,
+            "llm_allow_insecure_http": self.llm_allow_insecure_http,
             "spark_report": self.spark_report,
+            "report_diagnosis_enabled": self.report_diagnosis_enabled,
+            "report_diagnosis_include_images": self.report_diagnosis_include_images,
+            "report_diagnosis_max_items": self.report_diagnosis_max_items,
+            "report_diagnosis_max_input_tokens": self.report_diagnosis_max_input_tokens,
+            "report_diagnosis_max_output_tokens": self.report_diagnosis_max_output_tokens,
             "desktop_size": self.desktop_size,
             "ocr_mode": self.ocr_mode,
             "ocr_warmup": self.ocr_warmup,

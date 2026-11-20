@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from autowork_core.runtime.status import status_category
+from autowork_core.runtime.reporting.template import render_html
 from config.paths import Paths
 
 
@@ -71,6 +72,37 @@ def merge_report(
         target.setdefault("features", []).append(target_feature)
     _merge_scenario(target_feature, source_item, allow_add=allow_add)
     return _normalize_report(target)
+
+
+def preview_merge_report(
+        source_report,
+        target_report,
+        *,
+        feature_file=None,
+        feature_name=None,
+        scenario_name=None,
+        example_id=None,
+        allow_add=True,
+        preserve_unmentioned=False,
+):
+    """Apply the same scopes as merge in memory without touching report files or assets."""
+    scopes = _operation_scopes(
+        source_report,
+        feature_file=feature_file,
+        feature_name=feature_name,
+        scenario_name=scenario_name,
+        example_id=example_id,
+        preserve_unmentioned=preserve_unmentioned,
+    )
+    result = _public_copy(target_report)
+    for scope in scopes:
+        if preserve_unmentioned:
+            source_feature = _select_feature(source_report, feature_file=scope.get("feature_file"), feature_name=scope.get("feature_name"))
+            target_feature = _find_feature_like(result, source_feature)
+            if target_feature is not None and source_feature.get("file") and not _same_path(target_feature.get("file"), source_feature["file"]):
+                raise FinalReportMergeError("源与目标 Feature 文件身份不一致，不能仅按同名回填")
+        result = merge_report(source_report, result, allow_add=allow_add, **scope)
+    return result
 
 
 def delete_result(
@@ -292,6 +324,7 @@ def merge(
         scenario_name=None,
         example_id=None,
         allow_add=True,
+        preserve_unmentioned=False,
         target_report=None,
         html_report=None,
         merge_log=None,
@@ -306,12 +339,7 @@ def merge(
         log_path=merge_log,
         project_root=project_root,
     )
-    source = snapshot_report_assets(
-        _load_report(source_path),
-        source_report_path=source_path,
-        final_report_path=html_path,
-        project_root=project_root,
-    )
+    source = _load_report(source_path)
     target = _load_report(target_path)
     scopes = _operation_scopes(
         source,
@@ -319,6 +347,19 @@ def merge(
         feature_name=feature_name,
         scenario_name=scenario_name,
         example_id=example_id,
+        preserve_unmentioned=preserve_unmentioned,
+    )
+    preview_merge_report(
+        source, target,
+        feature_file=feature_file, feature_name=feature_name,
+        scenario_name=scenario_name, example_id=example_id,
+        allow_add=allow_add, preserve_unmentioned=preserve_unmentioned,
+    )
+    source = snapshot_report_assets(
+        source,
+        source_report_path=source_path,
+        final_report_path=html_path,
+        project_root=project_root,
     )
     for scope in scopes:
         target = merge_report(source, target, allow_add=allow_add, **scope)
@@ -557,15 +598,7 @@ def _with_default_report_paths(config, action, input_report, final_report):
 
 
 def render_report_html(report_data):
-    template_path = Path(__file__).with_name("templates") / "spark_report.html"
-    template = template_path.read_text(encoding="utf-8")
-    report_json = _script_safe_json(_public_copy(report_data))
-    pattern = r"const reportData = [\s\S]*?\n\n    const state ="
-    replacement = "const reportData = " + report_json + ";\n\n    const state ="
-    html, count = re.subn(pattern, lambda _match: replacement, template, count=1)
-    if count != 1:
-        raise RuntimeError("未能在报告模板中替换 reportData")
-    return html
+    return render_html(_script_safe_json(_public_copy(report_data)))
 
 
 def snapshot_report_assets(
@@ -743,7 +776,40 @@ def _operation_scopes(
         feature_name=None,
         scenario_name=None,
         example_id=None,
+        preserve_unmentioned=False,
 ):
+    if preserve_unmentioned and example_id is None:
+        features = [_select_feature(report, feature_file=feature_file, feature_name=feature_name)] if feature_file is not None or feature_name is not None or scenario_name is not None else report.get("features", [])
+        scopes = []
+        identities = set()
+        for feature in features:
+            if feature.get("skipScope") == "feature":
+                continue
+            selected = _select_feature(report, feature_file=feature.get("file"), feature_name=feature.get("name"))
+            feature_scope = {"feature_file": selected["file"]} if selected.get("file") else {"feature_name": selected.get("name")}
+            selected_items = [_select_scenario(selected, scenario_name=scenario_name)] if scenario_name is not None else selected.get("scenarios", [])
+            for item in selected_items:
+                if item.get("skipScope"):
+                    continue
+                if item.get("type") == "outline":
+                    items = [
+                        {"scenario_name": item.get("name"), "example_id": example.get("exampleId")}
+                        for example in item.get("examples", []) if not example.get("skipScope")
+                    ]
+                    if any(not scope["example_id"] for scope in items):
+                        raise FinalReportMergeError("按结果回填时 Example 必须有 exampleId")
+                else:
+                    items = [{"scenario_name": item.get("name")}]
+                for item_scope in items:
+                    scope = {**feature_scope, **item_scope}
+                    identity = tuple(scope.items())
+                    if not item_scope["scenario_name"] or identity in identities:
+                        raise FinalReportMergeError("源报告中没有唯一可识别的 Scenario/Example")
+                    identities.add(identity)
+                    scopes.append(scope)
+        if not scopes:
+            raise FinalReportMergeError("源报告中没有可回填的执行结果")
+        return scopes
     feature = _select_feature(
         report,
         feature_file=feature_file,
@@ -859,6 +925,17 @@ def _normalize_report(report):
         _normalize_feature(feature)
         for feature in result.get("features") or []
     ]
+    if result.get("executionSummary"):
+        executions = {
+            item.get("executionId")
+            for feature in result["features"]
+            for scenario in feature.get("scenarios", [])
+            for item in (scenario.get("examples", []) if scenario.get("type") == "outline" else [scenario])
+        }
+        summary = result["executionSummary"]
+        if executions != {summary.get("executionId")}:
+            result["executionSummary"] = {"outcome": "mixed_sources", "captureStatus": "not_applicable"}
+            result.pop("diagnosis", None)
     return result
 
 
@@ -1141,6 +1218,94 @@ def _file_sha256(path):
     return digest.hexdigest()
 
 
+def _report_outline(report):
+    return {
+        "features": [
+            {
+                "name": feature.get("name"), "file": feature.get("file"),
+                "scenarios": [
+                    {
+                        "name": item.get("name"), "type": item.get("type", "scenario"),
+                        "status": item.get("status"),
+                        **({"examples": [{"id": row.get("exampleId"), "name": row.get("name"), "status": row.get("status")} for row in item.get("examples", [])]} if item.get("type") == "outline" else {}),
+                    }
+                    for item in feature.get("scenarios", [])
+                ],
+            }
+            for feature in report.get("features", [])
+        ],
+    }
+
+
+def run_report_operation(
+        action,
+        *,
+        final_report_json=None,
+        feature_file=None,
+        feature_name=None,
+        scenario_name=None,
+        example_id=None,
+        preview=False,
+        expected_target_sha256=None,
+        html_report=None,
+        merge_log=None,
+        project_root=None,
+):
+    """Execute a fixed report command and return a compact verified result."""
+    root = Path(project_root or Paths.BASE_DIR).resolve()
+    target, html, log = final_report_paths(final_report_json=final_report_json, html_path=html_report, log_path=merge_log, project_root=root)
+    scope = _scope_payload(feature_file=feature_file, feature_name=feature_name, scenario_name=scenario_name, example_id=example_id)
+    response = {"action": action, "final_report_json": str(target), "final_report_html": str(html), "operation_log": str(log), "scope": scope}
+    current = None
+    try:
+        before = target.read_bytes() if target.is_file() else None
+        digest = hashlib.sha256(before).hexdigest() if before is not None else None
+        response["target_sha256"] = digest
+        if action not in {"inspect", "delete", "render"}:
+            raise FinalReportMergeError("该快速入口尚不支持此操作")
+        current = _load_report(target)
+        if expected_target_sha256 is not None and digest != expected_target_sha256:
+            raise FinalReportMergeError("最终报告在确认后发生变化，未执行操作")
+        if action == "inspect":
+            return {**response, "status": "inspected", "summary": _report_outline(current)}
+        if len({target, html, log}) != 3:
+            raise FinalReportMergeError("JSON、HTML 和日志路径必须不同")
+        if action == "delete" and not scope:
+            raise FinalReportMergeError("删除必须明确指定 Feature、Scenario 或 Example 范围")
+        if action == "delete":
+            selected = _select_feature(current, feature_file=feature_file, feature_name=feature_name)
+            if scenario_name is not None or example_id is not None:
+                _select_scenario(selected, scenario_name=scenario_name, example_id=example_id)
+        expected = delete_result(current, **scope) if action == "delete" else current
+        if preview:
+            return {**response, "status": "preview", "summary": _report_outline(expected)}
+        if target.read_bytes() != before:
+            raise FinalReportMergeError("最终报告在预演后发生变化，未执行操作")
+    except (OSError, ValueError) as error:
+        candidates = _report_outline(current) if current is not None else None
+        return {**response, "status": "blocked", "stage": "preflight", "message": str(error), "candidates": candidates}
+    try:
+        previous_log = log.read_bytes() if log.is_file() else None
+        if action == "delete":
+            delete(final_report_json=target, html_report=html, merge_log=log, project_root=root, **scope)
+        else:
+            render(final_report_json=target, html_report=html, project_root=root)
+        actual = _load_report(target)
+        if actual != expected:
+            raise FinalReportMergeError("操作结果与预演不一致")
+        if not html.is_file():
+            raise FinalReportMergeError("HTML 未生成")
+        if action == "delete":
+            operations = json.loads(log.read_text(encoding="utf-8")).get("operations", [])
+            if not operations or operations[-1].get("op") != "delete" or operations[-1].get("scope", {}) != scope:
+                raise FinalReportMergeError("删除日志与本次范围不一致")
+        elif target.read_bytes() != before or (log.read_bytes() if log.is_file() else None) != previous_log:
+            raise FinalReportMergeError("单独渲染时 JSON 或日志发生变化")
+        return {**response, "status": "completed", "target_sha256": _file_sha256(target), "verified": True, "summary": _report_outline(actual)}
+    except (OSError, ValueError, RuntimeError) as error:
+        return {**response, "status": "failed", "stage": "execute_or_verify", "message": str(error), "report_changed": target.is_file() and target.read_bytes() != before, "html_exists": html.is_file(), "log_exists": log.is_file()}
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Create, merge, delete, and render final Spark reports.",
@@ -1149,6 +1314,9 @@ def build_arg_parser():
     parser.add_argument("--target", default=None)
     parser.add_argument("--html", default=None)
     parser.add_argument("--log", default=None)
+    parser.add_argument("--json", dest="json_output", action="store_true", help="Return compact verified results for inspect, delete and render")
+    parser.add_argument("--preview", action="store_true", help="Preview without writing report files")
+    parser.add_argument("--expected-target-sha256", default=None, help="Refuse an operation if the confirmed final report changed")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create = subparsers.add_parser("create")
@@ -1158,15 +1326,18 @@ def build_arg_parser():
     merge.add_argument("source", nargs="?", default=None)
     _add_scope_args(merge)
     merge.add_argument("--no-add", action="store_true")
+    merge.add_argument("--preserve-unmentioned", action="store_true", help="Update individual source results while retaining unmentioned target results")
 
     merge_latest = subparsers.add_parser("merge-latest")
     _add_scope_args(merge_latest)
     merge_latest.add_argument("--no-add", action="store_true")
+    merge_latest.add_argument("--preserve-unmentioned", action="store_true", help="Update individual source results while retaining unmentioned target results")
 
     delete = subparsers.add_parser("delete")
     _add_scope_args(delete)
 
     subparsers.add_parser("render")
+    subparsers.add_parser("inspect")
     return parser
 
 
@@ -1177,10 +1348,23 @@ def _add_scope_args(parser):
     parser.add_argument("--example-id", default=None)
 
 
-def main(argv=None):
+def main(argv=None, *, default_target=None):
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     project_root = Path(args.project_root).resolve()
+    if args.json_output:
+        result = run_report_operation(
+            args.command,
+            final_report_json=args.target if args.target is not None else default_target,
+            feature_file=getattr(args, "feature_file", None), feature_name=getattr(args, "feature_name", None),
+            scenario_name=getattr(args, "scenario_name", None), example_id=getattr(args, "example_id", None),
+            preview=args.preview, expected_target_sha256=args.expected_target_sha256,
+            html_report=args.html, merge_log=args.log, project_root=project_root,
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result["status"] in {"completed", "preview", "inspected"} else 2
+    if args.preview or args.expected_target_sha256 or args.command == "inspect":
+        parser.error("这些调用选项需要 --json")
     try:
         if args.command == "create":
             target, html = create_final_report(
@@ -1201,6 +1385,7 @@ def main(argv=None):
                 scenario_name=args.scenario_name,
                 example_id=args.example_id,
                 allow_add=not args.no_add,
+                preserve_unmentioned=args.preserve_unmentioned,
                 project_root=project_root,
             )
         elif args.command == "delete":

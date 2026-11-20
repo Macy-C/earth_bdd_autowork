@@ -25,6 +25,4 @@ framework_validation/output/
 .copilot/recorder-routing/
 .copilot/recorder-runtime/
 
-# Framework-generated local-debug Features
-.*.rerun.*.feature
-.*.single-step.*.feature
+messy/
