@@ -6,12 +6,10 @@ log:
 
 #+++++++++++++++++++++++ local debug ++++++++++++++++++++++
 draw_outline_location: false # true / false  #元素高亮
-#更详细日志
-#失败截图
+#采集器的更详细日志
 #保留现场
 #慢执行
 #OCR 中间结果输出
-#可选录屏
 #打印窗口树 / root 信息
 #----------------------- local debug ----------------------
 
@@ -30,6 +28,25 @@ RECORD_SETTING:
 RUN_INDICATOR_SETTING:
   ENABLED: true             # UI Scenario 运行时显示紧凑、鼠标穿透的状态提示
   MAX_SCENARIO_CHARS: 28    # 第二行场景名称的最大字符数，超出时显示省略号
+
+KNOWLEDGE_CAPTURE_SETTING:
+  ENABLED: false
+
+WEKNORA_SETTING:
+  API_URL: "http://130.147.129.74:1101"
+  API_KEY: "sk-50sXDdN1sM4TbuGnTBaGXA-DzA9Hm4jhzgcXb-4MD_0"
+  KNOWLEDGE_BASES:
+    FRAMEWORK_DOCS: "BDD框架知识库_demo"
+    ENGINEERING_CASES: "Earth工程案例库_demo"
+    PRODUCT_DOCS: "Earth正式资料库_demo"
+
+LLM_SETTING:
+  BASE_URL: "http://161.92.92.153:4000/v1"                  # OpenAI-compatible API base URL, usually ending in /v1
+  API_KEY: "sk-aJBOPAL_8TnXWyNOJ213Mg"                   # Keep credentials out of version control
+  MODEL: "qwen3"                     # Model identifier required by the endpoint
+  CONNECT_TIMEOUT_SECONDS: 5
+  READ_TIMEOUT_SECONDS: 45
+  ALLOW_INSECURE_HTTP: true     # Enable only for an explicitly trusted internal endpoint
 
 OCR_SETTING:
   MODE: "accurate"             # fast / balanced / accurate；只给未显式配置的字段提供预设默认值
@@ -57,7 +74,14 @@ PIC_SETTING:
   SCALE_MAX: 1000              # 多尺度匹配最大缩放范围，仅 mstpl/gmstpl 等多尺度策略明显相关
   SCALE_STEP: 0.005            # 多尺度匹配步长，越小越细但更慢
 
-SPARK_REPORT: true # true / false  # 自定义 Spark 风格报告
+SPARK_REPORT:
+  ENABLED: true
+  DIAGNOSIS:
+    ENABLED: true
+    INCLUDE_IMAGES: true
+    MAX_ITEMS: 3
+    MAX_INPUT_TOKENS: 60000
+    MAX_OUTPUT_TOKENS: 4096
 
 APP_LAUNCH_MODE: "attach"   # auto / attach  #启动方式
 APP_SETTING:   ### 应用配置
@@ -72,6 +96,8 @@ SUB_APP_SETTING: {} # 可选；按 Scenario/Feature tag 选择子项目应用，
 #   TAG: "sub_app_a"
 #   APP_PATH: "C:/SubProjectA/AppA.exe"
 #   PROCESS_TRACK_MODE: "snapshot"
+
+
 
 
 
