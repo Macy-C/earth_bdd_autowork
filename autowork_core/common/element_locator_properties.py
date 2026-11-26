@@ -4,7 +4,12 @@ from autowork_core.common.element_properties import (
     ElementPropertyReadError,
     read_accessible_name,
 )
-from pywinauto.uia_defines import NoPatternInterfaceError
+
+try:
+    from pywinauto.uia_defines import NoPatternInterfaceError
+except ImportError:
+    class NoPatternInterfaceError(Exception):  # type: ignore[no-redef]
+        """Fallback placeholder when static tools run on headless CI agents without pywinauto."""
 
 
 @dataclass(frozen=True)

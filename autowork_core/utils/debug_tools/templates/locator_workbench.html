@@ -77,11 +77,14 @@
 
     .app-shell {
       display: grid;
+      grid-template-columns: minmax(0, 1fr);
       grid-template-rows: auto auto minmax(0, 1fr) auto;
       width: 100%;
+      max-width: 100vw;
       height: 100%;
       height: 100vh;
-       --left-pane-width: 53%;
+      overflow: hidden;
+      --left-pane-width: 50%;
     }
 
     /* Row 1: Top Header */
@@ -94,6 +97,8 @@
       background: var(--panel);
       border-bottom: 1px solid var(--border-subtle);
       flex-wrap: wrap;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .brand-cluster {
@@ -124,6 +129,9 @@
     /* Row 2: Dedicated Target Window Bar */
     .target-window-bar {
       display: flex;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
       align-items: center;
       gap: 6px;
       padding: 5px 12px;
@@ -211,7 +219,9 @@
     /* Main Split Workspace with Resizer */
     .workspace-grid {
       display: grid;
-      grid-template-columns: var(--left-pane-width) 5px minmax(260px, 1fr);
+      grid-template-columns: var(--left-pane-width) 5px minmax(240px, 1fr);
+      min-width: 0;
+      max-width: 100%;
       min-height: 0;
       overflow: hidden;
     }
@@ -230,8 +240,9 @@
     .left-pane {
       display: flex;
       flex-direction: column;
-      min-width: 260px;
+      min-width: 0;
       min-height: 0;
+      overflow: hidden;
       background: var(--panel);
     }
 
@@ -365,8 +376,9 @@
     .right-pane {
       display: flex;
       flex-direction: column;
-      min-width: 260px;
+      min-width: 0;
       min-height: 0;
+      overflow: hidden;
       background: var(--bg);
     }
 
@@ -374,16 +386,17 @@
       display: flex;
       align-items: center;
       gap: 2px;
-      padding: 4px 10px 0;
+      padding: 4px 8px 0;
       background: var(--panel);
       border-bottom: 1px solid var(--border);
       overflow-x: auto;
+      min-width: 0;
     }
     .right-tab-btn {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
-      padding: 6px 9px;
+      gap: 4px;
+      padding: 6px 7px;
       border: 0;
       border-bottom: 2px solid transparent;
       background: transparent;
@@ -392,6 +405,7 @@
       font-weight: 500;
       cursor: pointer;
       white-space: nowrap;
+      flex: none;
     }
     .right-tab-btn svg { width: 13px; height: 13px; }
     .right-tab-btn:hover { color: var(--text); }
@@ -508,6 +522,9 @@
       background: var(--panel);
       border-top: 1px solid var(--border);
       font-size: 11.5px;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
     }
     .status-badge {
       display: inline-flex;
@@ -662,10 +679,6 @@
           <i data-lucide="zap"></i>
           <span>动作调试器</span>
         </button>
-        <button class="btn" onclick="openSubTool('recorder')" title="打开 Recorder 工作台（传统窗口）">
-          <i data-lucide="video"></i>
-          <span>Recorder 工作台</span>
-        </button>
         <button id="btnTopmostToggle" class="btn btn-icon" onclick="toggleTopmost()" title="窗口置顶 (Always on Top)">
           <i data-lucide="pin"></i>
         </button>
@@ -678,7 +691,7 @@
     <!-- Row 2: Dedicated Full-Width Target Window Bar -->
     <div class="target-window-bar">
       <span style="font-size:11.5px;color:var(--muted);font-weight:600;white-space:nowrap;">目标窗口:</span>
-      <select id="windowSelect" class="select-input" style="flex:1;min-width:160px;"></select>
+      <select id="windowSelect" class="select-input" style="flex:1 1 0%;width:0;min-width:120px;max-width:100%;"></select>
       <button class="btn btn-sm" onclick="refreshWindows()">
         <i data-lucide="refresh-cw"></i>
         <span>刷新列表</span>
@@ -790,9 +803,9 @@
         <!-- Tab 1: Property Inspector -->
         <div id="tab_properties" class="right-tab-content active">
           <div class="card" style="padding:10px 12px;">
-            <div style="display:flex;align-items:center;gap:8px;">
+            <div style="display:flex;align-items:center;gap:8px;min-width:0;">
               <span style="font-size:12px;color:var(--muted);white-space:nowrap;">选中属性:</span>
-              <input id="selectedCellInput" class="text-input" style="flex:1;font-family:Consolas,monospace;font-size:12px;" type="text" readonly />
+              <input id="selectedCellInput" class="text-input" style="flex:1 1 0%;width:0;min-width:60px;font-family:Consolas,monospace;font-size:12px;" type="text" readonly />
               <button class="btn btn-sm btn-primary" onclick="copySelectedCell()">
                 <i data-lucide="copy"></i>
                 <span>复制属性</span>

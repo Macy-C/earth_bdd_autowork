@@ -12,8 +12,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from autowork_core.common.winauto_xpath import find_by_xpath
-from autowork_core.utils.debug_tools.recorder.inspector import _wrapper_from_point
 from autowork_core.utils.debug_tools.common import (
+    _wrapper_from_point,
     get_all_element_properties,
     get_element_rect,
     get_open_windows,
@@ -33,7 +33,6 @@ from autowork_core.utils.debug_tools.locator_tools import LocatorToolMixin
 from autowork_core.utils.debug_tools.action_runner_window import ActionRunnerWindow
 from autowork_core.utils.debug_tools.feature_runner_web import FeatureRunnerWindow
 from autowork_core.utils.debug_tools.locator_workbench_web import LocatorWorkbenchWebHost
-from autowork_core.utils.debug_tools.recorder.panel import RecorderToolMixin
 from autowork_core.utils.debug_tools.visual_tools import VisualToolMixin
 
 
@@ -59,7 +58,7 @@ def captured_xpath_status(xpath, *, point=None, tree_matched=False):
     return (
         f"已捕获鼠标点控件{point_text}，{scope_text}；"
         f"已复制待验证 XPath 建议: {xpath}。"
-        "该建议不等于可生成定位器，需在 Recorder 中完成唯一目标验证。"
+        "该建议不等于可生成定位器，需在定位器验证中完成唯一目标验证。"
     )
 
 
@@ -72,7 +71,7 @@ user32 = ctypes.windll.user32
 # =========================================================
 # 主程序
 # =========================================================
-class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
+class XPathDebuggerApp(LocatorToolMixin, VisualToolMixin):
     def __init__(self):
         self.backend = BACKEND
 
@@ -111,7 +110,6 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         self.action_runner_window = None
         self.feature_runner_button = None
         self.feature_runner_window = None
-        self.recorder_button = None
         self.web_host: LocatorWorkbenchWebHost | None = None
 
         # 点选控件模式
@@ -142,8 +140,6 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
 
         self.init_visual_tool_state()
 
-        self.init_recorder_tool_state()
-
         self.init_locator_tool_state()
 
         self.build_ui()
@@ -161,12 +157,6 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             text="Locator 工作台",
             font=("Microsoft YaHei UI", 14, "bold"),
         ).pack(side="left")
-        self.recorder_button = ttk.Button(
-            header,
-            text="Recorder 工作台",
-            command=self.open_recorder_workbench,
-        )
-        self.recorder_button.pack(side="right")
         self.action_runner_button = ttk.Button(
             header,
             text="动作调试器",
@@ -453,8 +443,7 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             self._handle_hotkey_edge(VK_F2, self.on_f2_refresh_tree)
             self._handle_hotkey_edge(VK_F4, self.capture_pos_hotkey)
             self._handle_hotkey_edge(VK_F8, self.toggle_hotkey_capture_mode)
-            if not self._recorder_is_active():
-                self._handle_hotkey_edge(VK_F9, self.capture_current_mouse_element)
+            self._handle_hotkey_edge(VK_F9, self.capture_current_mouse_element)
             self._handle_hotkey_edge(VK_ESCAPE, self.exit_hotkey_capture_mode)
         finally:
             try:
@@ -1688,9 +1677,6 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
         windows = [self.app]
         if self.action_runner_window is not None:
             windows.append(getattr(self.action_runner_window, "window", None))
-        recorder_wb = getattr(self, "recorder_workbench", None)
-        if recorder_wb is not None:
-            windows.append(getattr(recorder_wb, "window", None))
         for attr in ("child_window", "pos_window", "ocr_window", "pic_window"):
             win = getattr(self, attr, None)
             if win is not None:
@@ -1737,12 +1723,10 @@ class XPathDebuggerApp(LocatorToolMixin, RecorderToolMixin, VisualToolMixin):
             except Exception:
                 pass
             self.hotkey_poll_after_id = None
-        self.stop_recorder_on_close()
         self.stop_pick_mode()
         self.close_web_host()
         self.close_feature_runner()
         self.close_action_runner()
-        self.close_recorder_tool(force=True)
         self.close_locator_tools()
         self.close_ocr_tool()
         self.close_pic_tool()

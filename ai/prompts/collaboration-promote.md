@@ -13,7 +13,7 @@ framework-maintainer authorization is an external governance responsibility.
 
 Require both:
 
-1. one `Bdd/ai/knowledge/collaboration-reviews/*.json` path; and
+1. one `artifacts/ai/knowledge/collaboration-reviews/*.json` path; and
 2. an explicit list of candidate IDs approved by the user in the current
    request.
 
@@ -23,7 +23,7 @@ targets. Do not edit files, user memory, or Git state. “Apply the review”,
 
 ## Validate The Review
 
-1. Resolve the report inside `Bdd/ai/knowledge/collaboration-reviews/`; reject path
+1. Resolve the report inside `artifacts/ai/knowledge/collaboration-reviews/`; reject path
    traversal and reports outside that directory.
 2. Validate it against `ai/context/collaboration-review.schema.json` when a
    JSON Schema validator is available; otherwise enforce all required fields,
@@ -76,7 +76,7 @@ and risk-appropriate tests in a separate explicit task.
    precedence and do not weaken existing safety requirements.
 3. Validate changed frontmatter/JSON/Markdown and run the narrow executable
    check appropriate to any changed behavior. Prose-only promotion does not
-   require the full Recorder suite unless it changes a generation contract or
+   require the full test suite unless it changes an
    architecture workflow.
 4. Review the diff for unrelated changes. Never stage, commit, push, or modify
    unrelated working-tree files unless the user explicitly requests it.
@@ -94,7 +94,7 @@ After all approved edits and validations succeed, create exactly one receipt
 conforming to `ai/context/collaboration-promotion.schema.json` at:
 
 ```text
-Bdd/ai/knowledge/collaboration-promotions/<promotion-id>.json
+artifacts/ai/knowledge/collaboration-promotions/<promotion-id>.json
 ```
 
 Build `promotion_id` as

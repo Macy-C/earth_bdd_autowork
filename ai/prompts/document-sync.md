@@ -103,7 +103,7 @@ python -B -m autowork_core.knowledge.document_sync compare-many --kb "已明确�
 6. 用户明确确认后，传入刚展示的本地哈希和远端哈希，不以新计算值替换过期确认：
 
    ```powershell
-   python -B -m autowork_core.knowledge.document_sync update "docs/3.动作参考.md" --kb "已确认的库名或ID" --document-id "已确认的旧文档ID" --remote-hash "已确认的远端64位哈希" --expected-local-hash "已确认的本地64位哈希" --confirm
+   python -B -m autowork_core.knowledge.document_sync update "docs/说明文档/3.动作参考.md" --kb "已确认的库名或ID" --document-id "已确认的旧文档ID" --remote-hash "已确认的远端64位哈希" --expected-local-hash "已确认的本地64位哈希" --confirm
    ```
 
    远端头部确实缺字段时省略 `--remote-hash`；不得用它掩盖读取失败。核心重新校验
@@ -197,7 +197,7 @@ API_URL 是服务根地址，API_KEY 是 REST Key，不是 MCP Token；不读取
 固定调用卡，替换占位的文件、库和 ID 后执行：
 
 ```powershell
-python -B -m autowork_core.knowledge.document_sync upload "docs/3.动作参考.md" --kb "用户指定的库名或ID"
+python -B -m autowork_core.knowledge.document_sync upload "docs/说明文档/3.动作参考.md" --kb "用户指定的库名或ID"
 python -B -m autowork_core.knowledge.document_sync status "已返回的文档ID" --kb "用户指定的库名或ID"
 ```
 

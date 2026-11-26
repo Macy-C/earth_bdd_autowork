@@ -850,9 +850,6 @@ class LocatorWorkbenchWebHost:
                         if target_tool == "action_runner":
                             owner.open_action_runner(open_browser=True)
                             return {"ok": True, "message": "已打开动作调试器。"}
-                        if target_tool == "recorder":
-                            owner.open_recorder_workbench()
-                            return {"ok": True, "message": "已打开 Recorder 工作台。"}
                         return {"ok": False, "message": f"未知工具: {target_tool}"}
 
                     self._send_json(host._run_on_tk_thread(_open_tool))

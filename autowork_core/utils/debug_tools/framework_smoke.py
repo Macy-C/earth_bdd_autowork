@@ -13,7 +13,7 @@ SMOKE_VERSION = "1.0"
 REQUIRED_PATHS = (
     "autowork_core/__init__.py",
     "ai/manifest.json",
-    "docs/1.快速开始.md",
+    "docs/说明文档/1.快速开始.md",
     ".github/copilot-instructions.md",
     "resources/ffmpeg",
     "resources/models",
@@ -33,7 +33,6 @@ IMPORT_MODULES = (
     "autowork_core.common",
     "autowork_core.page",
     "autowork_core.runtime.behave_runner",
-    "autowork_core.utils.debug_tools.recorder.generation_workflow",
     "Bdd.environment",
     "Bdd.runner",
 )

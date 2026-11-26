@@ -22,16 +22,107 @@ from autowork_core.common.compile import (
 )
 from autowork_core.page import BasePage, WindowPage, WindowView
 from autowork_core.utils.bus import normalize
-from autowork_core.utils.debug_tools.recorder.ai_capability_registry import (
-    AI_CAPABILITIES,
-    base_page_public_api_names,
-    validate_base_page_action_classification,
-)
 from config.paths import Paths
 
 
 UNIVERSAL_PAGE_ID = "page:universal_debug_page"
 UNIVERSAL_PAGE_LABEL = "公共调试 Page (全量 Locator / Data)"
+
+BASE_PAGE_ACTION_CATEGORIES: dict[str, str] = {
+    "click": "interaction",
+    "double_click": "interaction",
+    "right_click": "interaction",
+    "focus": "interaction",
+    "input_text": "interaction",
+    "send_text_keys": "interaction",
+    "remove_text": "interaction",
+    "clear_text": "interaction",
+    "expand_dropdown": "interaction",
+    "select_dropdown_option": "interaction",
+    "set_checked": "interaction",
+    "select_radio": "interaction",
+    "select_tab": "interaction",
+    "select_list_item": "interaction",
+    "select_tree_item": "interaction",
+    "set_tree_expanded": "interaction",
+    "set_slider_value": "interaction",
+    "scroll_to": "interaction",
+    "drag_by_offset": "interaction",
+    "wait_exists": "wait",
+    "wait_not_exists": "wait",
+    "wait_visible": "wait",
+    "wait_enabled": "wait",
+    "wait_exposed": "wait",
+    "wait_ready": "wait",
+    "get_text": "read",
+    "get_attr": "read",
+    "get_collection_items": "read",
+    "get_ocr_text": "read",
+    "extract_ocr_regex": "read",
+    "set_variable": "scenario_state",
+    "get_variable": "scenario_state",
+    "save_text": "scenario_state",
+    "save_attr": "scenario_state",
+    "assert_exists": "assertion",
+    "assert_not_exists": "assertion",
+    "assert_visible": "assertion",
+    "assert_not_visible": "assertion",
+    "assert_enabled": "assertion",
+    "assert_disabled": "assertion",
+    "assert_text_equal": "assertion",
+    "assert_text_contains": "assertion",
+    "assert_text_not_contains": "assertion",
+    "assert_text_empty": "assertion",
+    "assert_attr_equal": "assertion",
+    "assert_attr_contains": "assertion",
+    "assert_collection_equal": "assertion",
+    "assert_ocr_contains": "assertion",
+    "assert_ocr_not_contains": "assertion",
+    "wait_ocr_text_present": "visual_ocr",
+    "wait_ocr_text_absent": "visual_ocr",
+    "get_ocr_relative_position": "visual_ocr",
+    "click_ocr_relative": "visual_ocr",
+    "save_ocr_debug_image": "debug",
+    "wait_pic_present": "visual_pic",
+    "wait_pic_absent": "visual_pic",
+    "assert_pic_exists": "visual_pic",
+    "assert_pic_not_exists": "visual_pic",
+    "get_pic_region": "visual_pic",
+    "get_pic_relative_position": "visual_pic",
+    "click_pic_relative": "visual_pic",
+    "save_pic_debug_image": "visual_pic",
+    "bring_to_front": "window",
+    "minimize_window": "window",
+    "set_window_topmost": "window",
+    "unset_window_topmost": "window",
+    "send_to_back": "window",
+    "load_resources": "framework_support",
+    "get_locator": "framework_support",
+    "get_visual_value": "framework_support",
+    "get_data": "framework_support",
+    "set_root": "debug",
+}
+
+
+def base_page_public_api_names(base_page_cls: type[BasePage] = BasePage) -> frozenset[str]:
+    return frozenset(
+        name
+        for name in dir(base_page_cls)
+        if not name.startswith("_")
+        and callable(getattr(base_page_cls, name, None))
+    )
+
+
+def validate_base_page_action_classification(base_page_cls: type[BasePage] = BasePage) -> None:
+    action_names = base_page_public_api_names(base_page_cls)
+    registered_names = set(BASE_PAGE_ACTION_CATEGORIES)
+    missing = sorted(action_names - registered_names)
+    stale = sorted(registered_names - action_names)
+    if missing or stale:
+        raise RuntimeError(
+            "BasePage动作必须在BASE_PAGE_ACTION_CATEGORIES中显式分类: "
+            f"missing={missing}, stale={stale}"
+        )
 
 
 @dataclass(frozen=True)
@@ -309,21 +400,17 @@ def universal_debug_page_descriptor() -> PageViewDescriptor:
 
 def action_descriptors(base_page_cls: type[BasePage] = BasePage):
     validate_base_page_action_classification(base_page_cls)
-    capabilities = {
-        capability.api_name: capability
-        for capability in AI_CAPABILITIES
-    }
     descriptors = []
     for name in sorted(base_page_public_api_names(base_page_cls)):
-        capability = capabilities.get(name)
-        if capability and capability.ai_exclusion == _FRAMEWORK_SUPPORT_POLICY:
+        category = BASE_PAGE_ACTION_CATEGORIES.get(name, "action")
+        if category == _FRAMEWORK_SUPPORT_POLICY:
             continue
         method = getattr(base_page_cls, name)
         signature = inspect.signature(method)
         reference_kinds = _parameter_reference_kinds(method)
         descriptors.append(ActionDescriptor(
             name=name,
-            category=(capability.category if capability else "action"),
+            category=category,
             signature=str(signature),
             parameters=tuple(
                 _parameter_descriptor(

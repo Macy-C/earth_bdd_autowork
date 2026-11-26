@@ -1,52 +1,44 @@
 # BDD Autowork 框架 AI 资产
 
 顶层`ai/`只保存BDD Autowork框架拥有的AI契约。项目更新框架时可随框架版本完整替换
-该目录；当前项目的身份和知识位于`Bdd/ai/`，不得由框架更新覆盖。
+该目录；当前项目的知识库绑定位于[`Bdd/config.yaml`](../Bdd/config.yaml)（`WEKNORA_SETTING.KNOWLEDGE_BASES`），本地运行期与维护期知识位于`artifacts/ai/`。
 
 ```text
 ai/
   manifest.json             # 资产包版本和路径清单
-  context/                  # 长期架构共识、维护与迁移约定
-  prompts/                  # Copilot 工作流的权威正文
-  instructions/             # Recorder 生成规则的权威正文
+  context/                  # 协作复盘 Schema 与 Shadow Policy
+  prompts/                  # 工作流的唯一正文
   tools/
     README.md               # 实现归属和工具清单
     knowledge/              # 知识任务的实际 AI 辅助实现
     __init__.py             # 包定义，不聚合业务 API
 ```
 
-项目资产入口见[`Bdd/ai/README.md`](../Bdd/ai/README.md)。
-
 ## 目录分工与唯一正文
 
 | 层次 | 位置 | 职责 |
 | --- | --- | --- |
-| 平台接入 | [`.github/`](../.github/README.md) | Copilot 的发现、命令、Agent 和事件适配 |
+| 平台接入 | [`.github/`](../.github/COPILOT.md) | 仓库总规则与 Copilot 的发现、命令和事件适配 |
 | 任务正文 | [prompts/](prompts/) | 意图判断、能力组合、停止条件和任务级边界 |
-| Recorder 领域规则 | [instructions/](instructions/) | 绑定 Recorder Job 的生成约束，不是普通 BDD 脚本的通用生成指南 |
-| 项目背景 | [context/](context/) | 架构共识、Schema 和 Policy，不保存运行事实 |
+| 策略与契约 | [context/](context/) | 协作复盘 Schema 与 Shadow Policy，不保存运行事实 |
 | AI 辅助 | [工具索引](tools/README.md) | 按能力归类的 AI 专属内容编辑、上下文提取和输入编排 |
 | 基础业务 | [autowork_core/](../autowork_core/) | 不依赖 AI 的采集、导出、报告、执行和外部服务能力 |
 | 宿主适配 | [Bdd/](../Bdd/) | 项目原有脚本、配置和人工调用入口 |
 
-一个任务只维护一份工作流正文。`.github/prompts/` 的 `.prompt.md` 包含平台配置并
-引用这里的正文，不与 `ai/prompts/` 重复实现流程。Skill 也只保留发现与调用适配，
-不能为了接入而改变基础能力的生命周期。新增能力优先复用现有函数和入口；
-不建立额外注册中心，也不默认同时创建 Skill、Prompt、Agent 和 Hook。
+一个任务只维护一份工作流正文。`ai/prompts/` 保存平台中立的任务规则，基础业务能力保留独立函数和 CLI；
+`.github/` 仅提供 Copilot 的发现元数据与轻量调用适配（如高频固定 CLI 调用卡），不在入口复制业务细则。
+后续若接入其他 IDE 或 AI 助手，复用同一份 `ai/prompts/` 正文和底层 CLI，按目标宿主实际能力单独新增薄适配并验证，不提前宣称未验证的平台兼容。
+新增能力优先复用现有函数和入口；不建立额外注册中心，也不默认同时创建 Skill、Prompt、Agent 和 Hook。
 
 普通 Feature/Scenario 生成使用 [bdd-knowledge-generate 正文](prompts/bdd-knowledge-generate.md)、
-[项目来源说明](../Bdd/ai/README.md)以及按需展开的脚本/动作指南和当前 API。
-不要因为文件名含有 generation 就加载 `ai/instructions/bdd-generation.md` 或
-`ai/prompts/recorder-generate.md`；这两份工作流仅属于绑定 Job 的 Recorder 旅程。
-架构文档或 Wiki 中的 Recorder 引用不构成普通生成的后续加载指令，相关共享 API 查询不受此限制。
+[`Bdd/config.yaml`](../Bdd/config.yaml) 中的知识库角色配置以及按需展开的脚本/动作指南和当前 API。
 
 ## 当前入口索引
 
 | 能力 | 用户或宿主入口 | 唯一任务正文 | 实现归属 |
 | --- | --- | --- | --- |
 | 知识案例辅助 | [Knowledge Assist Skill](../.github/skills/knowledge-assist/SKILL.md) | [knowledge-assist.md](prompts/knowledge-assist.md) | 核心知识能力与 AI 润色辅助分开 |
-| 知识增强 BDD 生成 | [BDD Knowledge Generate Skill](../.github/skills/bdd-knowledge-generate/SKILL.md) | [bdd-knowledge-generate.md](prompts/bdd-knowledge-generate.md) | 本地 Coding Agent 的普通生成流程；P1 入口与正文已提供，工具接通、新会话发现及真实生成效果仍需验证 |
-| Recorder 生成 | [Recorder Generation Agent](../.github/agents/recorder-generation.agent.md)，内部加载 Skill | [recorder-generate.md](prompts/recorder-generate.md) | 核心 Recorder 协议与生成约束 |
+| 知识增强 BDD 生成 | [BDD Knowledge Generate Skill](../.github/skills/bdd-knowledge-generate/SKILL.md) | [bdd-knowledge-generate.md](prompts/bdd-knowledge-generate.md) | 本地 Coding Agent 的普通生成流程 |
 | 协作复盘 | [Review Prompt](../.github/prompts/collaboration-review.prompt.md) | [collaboration-review.md](prompts/collaboration-review.md) | 明确请求下的只读 AI 分析 |
 | 协作规则晋升 | [Promote Prompt](../.github/prompts/collaboration-promote.prompt.md) | [collaboration-promote.md](prompts/collaboration-promote.md) | 明确批准边界内的规则维护 |
 | 最终报告辅助 | [Report Merge Skill](../.github/skills/report-merge/SKILL.md)；[项目脚本](../Bdd/final_report.py) 独立保留 | [report-merge.md](prompts/report-merge.md) | [核心报告模块](../autowork_core/runtime/reporting/final_report.py)，AI 仅做意图组合及可选分析 |
@@ -60,7 +52,7 @@ ai/
 当前入口以本索引、任务正文和代码为准。
 
 [manifest.json](manifest.json) 是 AI 资产包的发现与交付清单，不是运行时工作流注册中心、
-业务配置或执行状态源。新增入口时同步清单和本索引，但不为文档整理改动 Recorder 协议版本。
+业务配置或执行状态源。新增入口时同步清单和本索引。
 
 采集导出、证据抽取、文档校验、WeKnora 传输客户端和基础 CLI 位于
 [`autowork_core/knowledge/`](../autowork_core/knowledge/)。它们不依赖 AI 或 Skill；
@@ -73,29 +65,10 @@ Skill 根据用户意图组合能力，不能把润色、
 
 | 位置 | 生命周期 | 内容 |
 | --- | --- | --- |
-| `ai/context`、`ai/prompts`、`ai/instructions`、`ai/tools` | 随代码版本化 | 人工可读且需要审阅的 AI 约定与确定性辅助工具 |
-| `Bdd/ai/knowledge` | 跨 Run 持久化，单独备份 | 已确认 Plan、Capability、生成结果、反馈和 provisional insight |
+| `ai/context`、`ai/prompts`、`ai/tools` | 随代码版本化 | 人工可读且需要审阅的 AI 约定与确定性辅助工具 |
 | `artifacts/knowledge-captures/<run_id>` | 绑定单次采集 Run，远端接受后可按整 Run 清理 | 运行观察 `observations.json`、去重 PNG 截图、AI 润色规格与生成的单文档图文案例 |
-| `artifacts/recording_sessions/<run>/ai` | 绑定单次 Run，可退役 | Request、Brief、Decision、Plan、transaction 和 forensic 工件 |
+| `artifacts/ai/knowledge` | 本地维护期缓存 | Collaboration Review/Promotion 与 Shadow Companion 恢复状态 |
 | Copilot `/memories/repo/` | 本机缓存，可丢失 | 编辑器为了当前 workspace 提供的辅助记忆 |
-
-`Bdd/ai/knowledge`不保存视频、截图、UI tree、按键事件或PIC模板，也不能作为当前
-runtime evidence。它只提供 advisory knowledge；当前用户要求、当前代码和当前
-Recorder evidence 始终优先。
-
-`Bdd/ai/portable-knowledge/records`保存内容寻址、不可变的项目知识记录。首版只从
-production 且用户确认的 Capability 白名单化生成，不保存字面输入、Examples 值、
-Session/Request/Run、媒体、绝对路径或任意 payload。同步先生成无写入计划并要求明确
-确认；不会自动stage、commit或push，也不进入默认AI上下文。查询最多返回6条、
-8 KB，并始终要求核对当前代码和证据。
-所有查询结果均标记为 untrusted advisory data，不能形成指令权威。记录文件由
-`.gitattributes` 固定为 LF；Store 限 5000 条/64 MiB，单条限 16 KiB。
-
-迁移前应运行只读 Knowledge Audit。Audit 会检查 Capability、memory、Collaboration、
-Shadow Companion、旧 Work Package 残留、隔离资产和隐私边界，不会写入或修复文件。若 invalid 记录需要处理，
-先使用 `knowledge_maintenance plan-quarantine` 生成无写入计划；隔离、catalog 重建和
-恢复都要求显式用户确认。`Bdd/ai/knowledge/quarantine`保存原始字节与恢复回执，但默认不
-属于可移植 Knowledge。
 
 ## Copilot 发现与控制入口
 
@@ -104,21 +77,12 @@ VS Code 与 Copilot CLI 从固定位置发现 workspace 资产，因此以下文
 ```text
 .github/copilot-instructions.md
 .github/skills/*/SKILL.md
-.github/agents/*.agent.md
 .github/prompts/*.prompt.md
 .github/hooks/*.json
 .github/hooks/scripts/*
 ```
 
-用户显式选择 `Recorder Generation` Agent 并粘贴 Workbench 复制的 Job 路径。该 Agent
-加载内部 `recorder-generate` Skill；Workbench 已在复制前 claim Job，Agent-scoped Hook
-只是在宿主执行它时限制该会话只能推进同一Job；
-Workflow State仍是唯一运行状态源，Python协议校验Job、Transaction、Manifest和写入范围，
-当前Chat使用原生编辑工具应用候选，使VS Code提供修改文件、保留和撤销。
-
-该控制层不需要 MCP、端口、云服务器或数据库。`.github/hooks`只承载独立的Shadow
-Companion恢复检查，不参与Recorder生成。其他宿主只有在能提供等价原生编辑归属时，
-才能完成同一代码交付。
+`.github/hooks`承载独立的Shadow Companion恢复检查。
 
 ## 协作复盘
 
@@ -126,11 +90,11 @@ Companion恢复检查，不参与Recorder生成。其他宿主只有在能提供
 
 ```text
 /collaboration-review [30 days or session IDs]
-  -> Bdd/ai/knowledge/collaboration-reviews/<review-id>.json
+  -> artifacts/ai/knowledge/collaboration-reviews/<review-id>.json
 
 /collaboration-promote <review-path> <approved candidate IDs>
   -> user memory / .github instructions / ai context
-  -> Bdd/ai/knowledge/collaboration-promotions/<promotion-id>.json
+  -> artifacts/ai/knowledge/collaboration-promotions/<promotion-id>.json
 ```
 
 Collaboration Review 和 Promotion 只由框架负责人明确手动调用。项目不提供到期提醒、
@@ -140,34 +104,26 @@ context、用户 memory 或 Git。Promotion 必须在当前请求中收到精确
 规则”等模糊表达不算批准。
 
 Review 和 Promotion 回执属于可能包含个人工作习惯的本地知识，受
-`Bdd/ai/knowledge/.gitignore`保护，不进入普通代码提交。版本化schema位于
+`.gitignore`（`artifacts/`）保护，不进入普通代码提交。版本化schema位于
 `ai/context/collaboration-*.schema.json`。自动提醒、自动读取会话、自动 Review 和自动
 规则晋升均未启用，以保留隐私、审阅、撤销和作用域判断。
 
 ## 项目级上下文卫生
 
-实质性的项目实现、调试、Review 和架构分析默认使用
-[Project Context Hygiene](context/project.md)。Agent 只在验证切片完成、Review 收敛、
+实质性的项目实现、调试、Review 和架构分析遵循
+[仓库规则](../.github/copilot-instructions.md)与[架构设计](../docs/维护文档/2.架构设计.md)中的
+Project Context Hygiene 约定。Agent 只在验证切片完成、Review 收敛、
 目标改变或准备交接时内部识别语义里程碑，不按固定 turn/token/tool 数量截断，也不
 自动压缩、丢弃上下文或切换会话。独立 Epic 只在当前任务完成后建议新会话。
 
 大段工具输出在默认上下文中保留结构化摘要和原始输出路径，原文不删除并可按需展开。
 该层不创建状态，不拥有测试或工具选择权，也不限制 AI 能力和完整 fallback。
 
-## Recorder 默认维护工作循环
-
-Recorder 维护默认遵循 [Adaptive Work Loop](context/project.md)：先确定行为 owner、
-不变量和判别检查，再按垂直切片实现；编辑期间使用 fresh 聚焦验证，findings 收敛后
-再做最终审查和风险适配的完整回归。里程碑由验证通过、Review 收敛、目标变化或真实
-交接决定，不按固定 turn、token 或工具数量截断。
-
-Recorder Profile 不限制搜索/读取/审查，不跳测试，也不复用相关改动后的陈旧验证。
-
 ## Shadow Companion
 
 项目级 Shadow Companion 由 `context/shadow-companion-policy.json` 一次授权，不再
 逐任务询问。Agent 只在 validated milestone 或真实 handoff 自动维护一个 ignored
-`Bdd/ai/knowledge/shadow-companion/active.json`；SessionStart Hook校验后只注入短恢复指针。
+`artifacts/ai/knowledge/shadow-companion/active.json`；SessionStart Hook校验后只注入短恢复指针。
 完成即删除，未完成目标切换才进入最多 3 个、默认保留 7 天的 dormant recent。
 
 Capsule 不保存源码、终端原文、聊天或凭据，不操作 Git，也不限制搜索/读取/审查、
@@ -176,12 +132,7 @@ Capsule 不保存源码、终端原文、聊天或凭据，不操作 Git，也�
 
 ## 不属于本目录的内容
 
-- Recorder 的 Reconciler、Decision、Plan 和 transaction 实现在
-  `autowork_core/utils/debug_tools/recorder/`；协作/文档检查器位于相邻
-  `autowork_core/utils/debug_tools/`。
-- 生成后的 BDD 业务代码仍在 `Bdd/`。
-- 录屏原始 evidence 和单次事务工件仍在 `artifacts/recording_sessions/`。
+- 协作/文档检查器位于 `autowork_core/utils/debug_tools/`。
+- 生成后的 BDD 业务代码在 `Bdd/`。
 - 产品专属外部知识Provider及其运维说明由宿主项目文档维护；AI资产只保存受控的查询
   provenance，不复制外部数据库。
-
-本目录按资产生命周期组织，不重新定义 Recorder 代码的模块所有权。

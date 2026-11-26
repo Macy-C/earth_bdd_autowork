@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import uuid
 from datetime import datetime
@@ -13,169 +12,6 @@ from config.paths import Paths
 
 RUN_RESULT_VERSION = "1.3"
 SUPPORTED_RUN_RESULT_VERSIONS = {RUN_RESULT_VERSION}
-RUN_RESULT_PROVENANCE_VERSION = "1.1"
-CURRENT_RUN_RESULT_PROVENANCE_VERSION = RUN_RESULT_PROVENANCE_VERSION
-GENERATION_TRANSACTION_ENV = "AUTOWORK_GENERATION_TRANSACTION_REPORT"
-GENERATION_PROVENANCE_FIELDS = {
-    "provenance_version",
-    "request_id",
-    "request_fingerprint",
-    "evidence_fingerprint",
-    "revision_seal",
-    "annotation_snapshot_fingerprint",
-    "plan_id",
-    "plan_fingerprint",
-    "transaction_id",
-    "completion_fingerprint",
-    "result_fingerprint",
-    "runtime_code_snapshot_fingerprint",
-    "implementation_snapshot",
-    "runtime_risk_policy_fingerprint",
-}
-def generation_provenance_matches(run_result, expected):
-    if not isinstance(run_result, dict) or not isinstance(expected, dict):
-        return False
-    actual = run_result.get("generation_provenance")
-    return bool(
-        _generation_provenance_is_valid(actual)
-        and _generation_provenance_is_valid(expected)
-        and actual == expected
-    )
-
-
-def load_generation_provenance(report_path, *, project_root=None):
-    from autowork_core.utils.debug_tools.recorder.capability import (
-        validate_completed_transaction_artifact_source,
-    )
-    from autowork_core.utils.debug_tools.recorder.generation_job import (
-        generation_job_lease_is_valid,
-    )
-    from autowork_core.utils.debug_tools.recorder.workflow_state import (
-        load_workflow_state,
-    )
-
-    project_root = Path(project_root or Paths.BASE_DIR).resolve()
-    path = Path(str(report_path or ""))
-    path = path.resolve() if path.is_absolute() else (
-        project_root / path
-    ).resolve()
-    try:
-        path.relative_to(project_root)
-    except ValueError as error:
-        raise ValueError(
-            f"Generation transaction report 路径越界: {path}"
-        ) from error
-    try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(
-            f"无法读取 Generation transaction report: {path}"
-        ) from error
-    if not isinstance(report, dict):
-        raise ValueError("Generation transaction report 必须是 object")
-    job_lease = report.get("generation_job_lease") or {}
-    if not generation_job_lease_is_valid(job_lease):
-        raise ValueError("Generation transaction未绑定Generation Job")
-    session_dir, request, plan, _runtime_verification = (
-        validate_completed_transaction_artifact_source(
-            path,
-            report,
-            project_root=project_root,
-        )
-    )
-    state = load_workflow_state(
-        session_dir,
-        report.get("request_id"),
-    )
-    pointer = state.get("current_job") or {}
-    execution = state.get("job_execution") or {}
-    transaction = execution.get("transaction") or {}
-    if any((
-        state.get("status") != "running",
-        execution.get("phase") not in {"runtime", "oracle"},
-        pointer.get("job_id") != job_lease.get("job_id"),
-        pointer.get("job_fingerprint")
-        != job_lease.get("job_fingerprint"),
-        pointer.get("nonce") != job_lease.get("job_nonce"),
-        transaction.get("transaction_id")
-        != report.get("transaction_id"),
-        transaction.get("result_fingerprint")
-        != report.get("result_fingerprint"),
-    )):
-        raise ValueError(
-            "Generation Job runtime phase与Transaction不一致"
-        )
-    try:
-        session_dir.relative_to(project_root)
-    except ValueError as error:
-        raise ValueError("Generation transaction Session 路径越界") from error
-    provenance = generation_provenance_from_artifacts(
-        request,
-        plan,
-        report,
-    )
-    if not _generation_provenance_is_valid(provenance):
-        raise ValueError("Generation transaction provenance 不完整")
-    return provenance
-
-
-def generation_provenance_from_artifacts(request, plan, report):
-    request = request if isinstance(request, dict) else {}
-    plan = plan if isinstance(plan, dict) else {}
-    report = report if isinstance(report, dict) else {}
-    annotation = request.get("annotation_snapshot") or {}
-    policy_fingerprint = (
-        report.get("runtime_risk_policy") or {}
-    ).get("fingerprint")
-    if not policy_fingerprint:
-        raise ValueError(
-            "Current Run Result provenance 缺少 runtime risk policy fingerprint"
-        )
-    provenance = {
-        "provenance_version": CURRENT_RUN_RESULT_PROVENANCE_VERSION,
-        "request_id": request.get("request_id"),
-        "request_fingerprint": request.get("request_fingerprint"),
-        "evidence_fingerprint": request.get("evidence_fingerprint"),
-        "revision_seal": (
-            request.get("revision_snapshot") or {}
-        ).get("seal"),
-        "annotation_snapshot_fingerprint": annotation.get(
-            "snapshot_fingerprint"
-        ),
-        "plan_id": plan.get("plan_id"),
-        "plan_fingerprint": plan.get("plan_fingerprint"),
-        "transaction_id": report.get("transaction_id"),
-        "completion_fingerprint": report.get("completion_fingerprint"),
-        "result_fingerprint": report.get("result_fingerprint"),
-        "runtime_code_snapshot_fingerprint": report.get(
-            "runtime_code_snapshot_fingerprint"
-        ),
-        "implementation_snapshot": json.loads(json.dumps(
-            report.get("implementation_snapshot") or [],
-            ensure_ascii=False,
-        )),
-        "runtime_risk_policy_fingerprint": policy_fingerprint,
-    }
-    return provenance
-
-
-def _generation_provenance_is_valid(value):
-    if not isinstance(value, dict):
-        return False
-    if value.get("provenance_version") != CURRENT_RUN_RESULT_PROVENANCE_VERSION:
-        return False
-    expected_fields = GENERATION_PROVENANCE_FIELDS
-    fields = set(value)
-    if fields != expected_fields or not isinstance(
-            value.get("implementation_snapshot"), list):
-        return False
-    return all(
-        isinstance(value.get(field), str) and bool(value.get(field))
-        for field in expected_fields
-        - {"provenance_version", "implementation_snapshot"}
-    )
-
-
 
 
 def publish_run_result(report_data, *, report_path, project_root=None):
@@ -256,14 +92,6 @@ def publish_run_result(report_data, *, report_path, project_root=None):
         ),
         "features": features,
     }
-    transaction_report = str(
-        os.environ.get(GENERATION_TRANSACTION_ENV) or ""
-    ).strip()
-    if transaction_report:
-        payload["generation_provenance"] = load_generation_provenance(
-            transaction_report,
-            project_root=project_root,
-        )
     fingerprint = run_result_fingerprint(payload)
     payload["run_result_id"] = "run-result-" + fingerprint[:16]
     payload["fingerprint"] = fingerprint
@@ -283,7 +111,6 @@ def latest_matching_run_result(
         scenario_name,
         *,
         example_id=None,
-        generation_provenance=None,
         project_root=None,
 ):
     project_root = Path(project_root or Paths.BASE_DIR).resolve()
@@ -295,14 +122,6 @@ def latest_matching_run_result(
         except (OSError, json.JSONDecodeError):
             continue
         if not run_result_identity_is_valid(value):
-            continue
-        if (
-            generation_provenance is not None
-            and not generation_provenance_matches(
-                value,
-                generation_provenance,
-            )
-        ):
             continue
         for feature in value.get("features") or ():
             if _normalized_path(feature.get("source_relpath")) != _normalized_path(feature_relpath):

@@ -1,9 +1,6 @@
 .idea/
+.copilot/
 .vscode/
-!.vscode/
-.vscode/*
-!.vscode/settings.json
-!.vscode/launch.json
 
 *.bundle
 
@@ -21,8 +18,5 @@ venv/
 
 artifacts/
 framework_validation/output/
-.copilot/recorder-drafts/
-.copilot/recorder-routing/
-.copilot/recorder-runtime/
 
 messy/

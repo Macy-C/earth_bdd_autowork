@@ -206,16 +206,24 @@ def del_file_name(path,file):
 
 
 def get_screen_size():
+    if not hasattr(ctypes, "windll"):
+        return 0, 0
     try:
         # Windows 8.1+
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
-        ctypes.windll.user32.SetProcessDPIAware()
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
-    user32 = ctypes.windll.user32
-    width = user32.GetSystemMetrics(0)
-    height = user32.GetSystemMetrics(1)
-    return width, height
+    try:
+        user32 = ctypes.windll.user32
+        width = user32.GetSystemMetrics(0)
+        height = user32.GetSystemMetrics(1)
+        return width, height
+    except Exception:
+        return 0, 0
 
 
 if __name__ == '__main__':

@@ -1052,6 +1052,7 @@ def prepare_generation_context(
             referenced_view_attrs=referenced_view_attrs,
             scenario_tokens=scenario_tokens,
         )
+        bundle["knowledge_bases"] = _read_project_knowledge_bases(bdd_dir / "config.yaml")
         bundle["referenced_pages"] = referenced_pages
         bundle["other_pages"] = other_pages
         bundle["status"] = "ok"
@@ -1063,6 +1064,31 @@ def prepare_generation_context(
     finally:
         bundle["duration_seconds"] = time.perf_counter() - started
     return bundle
+
+
+def _read_project_knowledge_bases(config_path: Path) -> dict[str, str]:
+    if not config_path.is_file():
+        return {}
+    try:
+        import yaml
+
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8-sig")) or {}
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    weknora = raw.get("WEKNORA_SETTING") or raw.get("weknora_setting") or {}
+    if not isinstance(weknora, dict):
+        return {}
+    kb_map = weknora.get("KNOWLEDGE_BASES") or weknora.get("knowledge_bases") or {}
+    if not isinstance(kb_map, dict):
+        return {}
+    result: dict[str, str] = {}
+    for role in ("ENGINEERING_CASES", "FRAMEWORK_DOCS", "PRODUCT_DOCS", "STATIC_UI_DOCS"):
+        val = str(kb_map.get(role) or kb_map.get(role.lower()) or "").strip()
+        if val:
+            result[role] = val
+    return result
 
 
 def _read_companion_frontmatter_status(md_path: Path) -> str | None:
@@ -1243,6 +1269,10 @@ def format_generation_context(bundle: dict) -> str:
             f"Missing Parent Scope Files (create empty placeholder if needed): "
             f"{sel['missing_parent_scope_files']}"
         )
+    if bundle.get("knowledge_bases"):
+        kb_items = ", ".join(f"{k}={v}" for k, v in bundle["knowledge_bases"].items() if v)
+        if kb_items:
+            lines.append(f"Knowledge Bases (Bdd/config.yaml): {kb_items}")
     lines.append("\n[Scenario Steps]")
     for st in bundle["scenario_steps"]:
         shared = (
@@ -1272,7 +1302,7 @@ def format_generation_context(bundle: dict) -> str:
         for vd in rp["expanded_views"].values()
         for lmap in vd["locators"].values()
     )
-    compact_large_files = total_loc_count > 75
+    compact_large_files = total_loc_count > 45
     for rp in bundle["referenced_pages"]:
         aud = rp["resource_preflight_audit"]
         aud_str = aud["status"] if aud["status"] == "passed" else f"unverified ({aud.get('reason')})"

@@ -26,24 +26,24 @@ python -m Bdd.local_runner
 python -m Bdd.local_runner Bdd/test_features/test_debug.feature
 ```
 
-在 VS Code 多根工作区中，请把 `bdd_autowork` 作为独立工作区文件夹加入。仓库内 `.vscode` 配置会为右键运行和调试当前 Python 文件注入项目根，使深层文件中的 `Bdd`、`autowork_core` 和 `config` 导入正常工作。
+建议从项目根目录使用模块方式运行（如 `python -m Bdd.runner`），避免直接运行深层 `.py` 文件导致 `Bdd`、`autowork_core` 或 `config` 导入失败。`.vscode/`、`.idea/`、`.copilot/` 等编辑器目录均由 `.gitignore` 忽略、不进入 Git。
 
-安装、输出格式和调试方式见 [1.快速开始](docs/1.快速开始.md)。
+安装、输出格式和调试方式见 [1.快速开始](docs/说明文档/1.快速开始.md)。
 
 ## 使用文档
 
 | 文档 | 内容 |
 | --- | --- |
-| [docs/1.快速开始.md](docs/1.快速开始.md) | 安装、运行、本地调试和输出 |
-| [docs/2.编写自动化脚本.md](docs/2.编写自动化脚本.md) | Feature、Step、Page/View、Recorder 和 AI 生成 |
-| [docs/3.动作参考.md](docs/3.动作参考.md) | BasePage 动作签名、等待和断言 |
-| [docs/4.定位器与配置.md](docs/4.定位器与配置.md) | locator、data、Root 和运行配置 |
-| [docs/5.故障排查.md](docs/5.故障排查.md) | 日志、Recorder、视觉定位和依赖问题 |
-| [docs/6.版本与升级说明.md](docs/6.版本与升级说明.md) | 当前版本和最近三个版本的升级影响 |
-| [docs/7.运行知识采集.md](docs/7.运行知识采集.md) | 默认关闭的运行观察、独立案例构建、REST 发布与 Wiki 验收 |
-| [docs/8.内置Skill使用指南.md](docs/8.内置Skill使用指南.md) | 内置 Skill 总览、调用示例、适用范围及注意事项 |
-| [docs/skill架构理解.md](messy/skill架构理解.md) | 基础能力独立、Skill 可选入口及 AI 增强的职责边界 |
-| [docs/维护/1.维护者指南.md](docs/维护/1.维护者指南.md) | 框架架构、协议和 AI 治理入口 |
+| [docs/说明文档/1.快速开始.md](docs/说明文档/1.快速开始.md) | 安装、运行、本地调试和输出 |
+| [docs/说明文档/2.编写自动化脚本.md](docs/说明文档/2.编写自动化脚本.md) | Feature、Step、Page/View 和 AI 生成 |
+| [docs/说明文档/3.动作参考.md](docs/说明文档/3.动作参考.md) | BasePage 动作签名、等待和断言 |
+| [docs/说明文档/4.定位器与配置.md](docs/说明文档/4.定位器与配置.md) | locator、data、Root 和运行配置 |
+| [docs/说明文档/5.故障排查.md](docs/说明文档/5.故障排查.md) | 日志、视觉定位和依赖问题 |
+| [docs/说明文档/6.版本与升级说明.md](docs/说明文档/6.版本与升级说明.md) | 当前版本和最近三个版本的升级影响 |
+| [docs/说明文档/7.运行知识采集.md](docs/说明文档/7.运行知识采集.md) | 默认关闭的运行观察、独立案例构建、REST 发布与 Wiki 验收 |
+| [docs/说明文档/8.内置Skill使用指南.md](docs/说明文档/8.内置Skill使用指南.md) | 内置 Skill 总览、调用示例、适用范围及注意事项 |
+| [messy/skill架构理解.md](messy/skill架构理解.md) | 基础能力独立、Skill 可选入口及 AI 增强的职责边界 |
+| [docs/维护文档/1.维护者指南.md](docs/维护文档/1.维护者指南.md) | 框架架构、协议和 AI 治理入口 |
 | [ai/README.md](ai/README.md) | **AI 资产**：Context、Prompt、Knowledge 与协作复盘 |
 
 ## 目录概览
@@ -55,8 +55,8 @@ config/              # 框架配置加载代码和路径常量
 resources/           # OCR 模型、Allure 等资源
 artifacts/           # logs、reports、screenshots 输出产物
 docs/                # 框架详细文档
-ai/                  # 版本化 AI 上下文、Prompt 和本地知识
-.github/             # Copilot Skill、Agent、Prompt 和本地 Hook 发现入口
+ai/                  # 版本化 AI 上下文、Prompt 和工具
+.github/             # Copilot Skill、Prompt 和本地 Hook 发现入口
 framework_validation/ # 仅框架开发/发布使用，不同步宿主项目
 ```
 
@@ -66,7 +66,5 @@ framework_validation/ # 仅框架开发/发布使用，不同步宿主项目
 - step 保持轻薄，只调用 Page Object。
 - Page Object 写业务方法，locator/data 放 YAML。
 
-完整流程见 [2.编写自动化脚本](docs/2.编写自动化脚本.md)。动作与定位配置分别以
-[3.动作参考](docs/3.动作参考.md) 和 [4.定位器与配置](docs/4.定位器与配置.md) 为准；
-Recorder 普通使用见脚本文档，内部协议只在维护时查阅
-[维护/3.Recorder设计](docs/维护/3.Recorder设计.md)。
+完整流程见 [2.编写自动化脚本](docs/说明文档/2.编写自动化脚本.md)。动作与定位配置分别以
+[3.动作参考](docs/说明文档/3.动作参考.md) 和 [4.定位器与配置](docs/说明文档/4.定位器与配置.md) 为准。

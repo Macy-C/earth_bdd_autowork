@@ -179,7 +179,7 @@ def quote_id(value):
     return urllib.parse.quote(str(value), safe="")
 
 
-KB_ROLES = ("FRAMEWORK_DOCS", "ENGINEERING_CASES", "PRODUCT_DOCS")
+KB_ROLES = ("FRAMEWORK_DOCS", "ENGINEERING_CASES", "PRODUCT_DOCS", "STATIC_UI_DOCS")
 
 
 def _configured_kb_roles():
@@ -189,6 +189,7 @@ def _configured_kb_roles():
         "FRAMEWORK_DOCS": str(getattr(settings, "weknora_framework_docs_kb", "") or "").strip(),
         "ENGINEERING_CASES": str(getattr(settings, "weknora_engineering_cases_kb", "") or "").strip(),
         "PRODUCT_DOCS": str(getattr(settings, "weknora_product_docs_kb", "") or "").strip(),
+        "STATIC_UI_DOCS": str(getattr(settings, "weknora_static_ui_docs_kb", "") or "").strip(),
     }
     non_empty = [val for val in role_map.values() if val]
     if len(non_empty) != len(set(non_empty)):

@@ -32,22 +32,6 @@ RUN_INDICATOR_SETTING:
 KNOWLEDGE_CAPTURE_SETTING:
   ENABLED: false
 
-WEKNORA_SETTING:
-  API_URL: "http://130.147.129.74:1101"
-  API_KEY: "sk-50sXDdN1sM4TbuGnTBaGXA-DzA9Hm4jhzgcXb-4MD_0"
-  KNOWLEDGE_BASES:
-    FRAMEWORK_DOCS: "BDD框架知识库_demo"
-    ENGINEERING_CASES: "Earth工程案例库_demo"
-    PRODUCT_DOCS: "Earth正式资料库_demo"
-
-LLM_SETTING:
-  BASE_URL: "http://161.92.92.153:4000/v1"                  # OpenAI-compatible API base URL, usually ending in /v1
-  API_KEY: "sk-aJBOPAL_8TnXWyNOJ213Mg"                   # Keep credentials out of version control
-  MODEL: "qwen3"                     # Model identifier required by the endpoint
-  CONNECT_TIMEOUT_SECONDS: 5
-  READ_TIMEOUT_SECONDS: 45
-  ALLOW_INSECURE_HTTP: true     # Enable only for an explicitly trusted internal endpoint
-
 OCR_SETTING:
   MODE: "accurate"             # fast / balanced / accurate；只给未显式配置的字段提供预设默认值
   WARMUP: true                 # 启动时预加载 OCR 模型并跑一次小图识别
@@ -97,10 +81,22 @@ SUB_APP_SETTING: {} # 可选；按 Scenario/Feature tag 选择子项目应用，
 #   APP_PATH: "C:/SubProjectA/AppA.exe"
 #   PROCESS_TRACK_MODE: "snapshot"
 
+LLM_SETTING:
+  BASE_URL: "http://161.92.92.153:4000/v1"                  # OpenAI-compatible API base URL, usually ending in /v1
+  API_KEY: "sk-aJBOPAL_8TnXWyNOJ213Mg"                   # Keep credentials out of version control
+  MODEL: "qwen3"                     # Model identifier required by the endpoint
+  CONNECT_TIMEOUT_SECONDS: 5
+  READ_TIMEOUT_SECONDS: 45
+  ALLOW_INSECURE_HTTP: true     # Enable only for an explicitly trusted internal endpoint
 
-
-
-
+WEKNORA_SETTING:
+  API_URL: "http://130.147.129.74:1101"
+  API_KEY: "sk-50sXDdN1sM4TbuGnTBaGXA-DzA9Hm4jhzgcXb-4MD_0"
+  KNOWLEDGE_BASES:
+    FRAMEWORK_DOCS: "ee0b3c96-245a-44a0-b80e-3742023f973f"     # BDD框架知识库（建议填不可变 UUID，避免改名断联）
+    ENGINEERING_CASES: "f64317ea-7dd2-4657-b0a6-61be972b402d"  # Earth工程案例库
+    PRODUCT_DOCS: "b89fd405-4522-4286-aa51-11b153b30c20"       # Earth正式资料库
+    STATIC_UI_DOCS: "95180ce0-f870-4470-9170-e18c136c414a"     # Earth静态UI控件库（可选；留空保持原有三库行为）
 
 ###  数据库
 # mysql_conn_config:
@@ -124,3 +120,104 @@ SUB_APP_SETTING: {} # 可选；按 Scenario/Feature tag 选择子项目应用，
 #   user: "XXX"
 #   password: "XXX"
 #   database: "XXX"
+
+UI_INVENTORY_SETTING:       # 可选；静态 UI 控件多仓增量巡检与导出配置（不另建 Git，直接在本工程使用）
+  STORE_DIR: "artifacts/ui-inventory"  # 快照与导出缓存目录（已由 .gitignore 忽略，不入 Git）
+  DEFAULT_LOCALE: "en-US"              # 主选择器文案语言：en-US / zh-CN
+  REPO_CACHE_MODE: "persistent"        # 远端浅仓缓存策略：persistent（持久化增量 fetch，推荐） / ephemeral（用完即删）
+  BUILD_LISTS: []                      # 可选；发版 BuildList 文件路径列表（SY_CT_Projects 仓内的 *BuildList* 会自动缓存复用）
+  EXCLUDE_PATH_PATTERNS: []            # 可选；扫描排除路径/目录名/glob（如 ["CDViewer", "MIPPPKiller", "ChVirusScan"]）
+  REPOSITORIES:
+    # ── SY_CT_Projects 侧（Earth：BuildList 走 CT_WorkSpace，业务仓走 Dev）──
+    - ID: "SY_CT_Projects"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/SY_CT_Projects"
+      BRANCH: "CT_WorkSpace"
+      ROLE: "buildlist"
+      ENABLED: true
+    - ID: "PPTCommon"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/PPTCommon"
+      BRANCH: "Dev"
+      ROLE: "framework"
+      ENABLED: true
+    - ID: "MIF"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/MIF"
+      BRANCH: "Dev"
+      ROLE: "framework"
+      ENABLED: true
+    - ID: "MIC"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/MIC"
+      BRANCH: "Dev"
+      ROLE: "framework"
+      ENABLED: true
+    - ID: "MIA"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/MIA"
+      BRANCH: "Dev"
+      ROLE: "app"
+      ENABLED: true
+    - ID: "MIPPP"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/MIPPP"
+      BRANCH: "Dev"
+      ROLE: "shell"
+      ENABLED: true
+    - ID: "PPTForConsole"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/PPTForConsole"
+      BRANCH: "Dev"
+      ROLE: "app"
+      ENABLED: true
+    - ID: "2DImageFoundation"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/2DImageFoundation"
+      BRANCH: "Dev"
+      ROLE: "framework"
+      ENABLED: true
+    - ID: "VolumeEngine"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/VolumeEngine"
+      BRANCH: "Dev"
+      ROLE: "framework"
+      ENABLED: true
+    - ID: "ThirdParty"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/SY_CT_Projects/_git/ThirdParty"
+      BRANCH: "Dev"
+      ROLE: "third_party"
+      ENABLED: false
+    # ── CT-GlobalSW 侧（Earth Console 主线：统一走 main 分支）──
+    - ID: "CT_UWF"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/CT-GlobalSW/_git/CT_UWF"
+      BRANCH: "main"
+      ROLE: "shell"
+      ENABLED: true
+    - ID: "CT_ConsoleLocalizationStrings"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/CT-GlobalSW/_git/CT_ConsoleLocalizationStrings"
+      BRANCH: "main"
+      ROLE: "framework"
+      ENABLED: true
+    - ID: "CT_CommonServices"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/CT-GlobalSW/_git/CT_CommonServices"
+      BRANCH: "main"
+      ROLE: "framework"
+      ENABLED: true
+    - ID: "CT_Serviceability"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/CT-GlobalSW/_git/CT_Serviceability"
+      BRANCH: "main"
+      ROLE: "app"
+      ENABLED: true
+    - ID: "CT_Calibrations"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/CT-GlobalSW/_git/CT_Calibrations"
+      BRANCH: "main"
+      ROLE: "app"
+      ENABLED: true
+    - ID: "CT_Security"
+      URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/CT-GlobalSW/_git/CT_Security"
+      BRANCH: "main"
+      ROLE: "app"
+      ENABLED: true
+    # 可选边缘工具/装机仓（如需要自动化覆盖再按需启用）：
+    # - ID: "CT_Installations"
+    #   URL: "https://tfsemea1.ta.philips.com/tfs/TPC_Region26/CT-GlobalSW/_git/CT_Installations"
+    #   BRANCH: "main"
+    #   ROLE: "app"
+    #   ENABLED: true
+  # 示例：
+  # REPOSITORIES:
+  #   - ID: "LocalRepo"
+  #     LOCAL_PATH: "D:/work/LocalRepo"  # 仅本机已有目录时使用（不配 URL 则直接扫描本地，不克隆）
+  #     BRANCH: "Dev"

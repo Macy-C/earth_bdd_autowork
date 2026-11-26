@@ -7,7 +7,7 @@ work, reviews, and validation more accurate and efficient.
 This is a review workflow, not a rule mutation workflow. Do not modify source
 code, instructions, prompts, context, user memory, Git state, or existing
 knowledge. The only permitted artifact write is one new review JSON file under
-`Bdd/ai/knowledge/collaboration-reviews/`.
+`artifacts/ai/knowledge/collaboration-reviews/`.
 
 This workflow is manual and reserved for framework maintainers. Never invoke
 it from SessionStart, session counts, elapsed time, project activity, or a
@@ -24,9 +24,9 @@ the user explicitly asks for a cross-repository review.
 
 1. Read the current collaboration rules before proposing changes:
    - `.github/copilot-instructions.md`
-   - applicable `.github/instructions/*.instructions.md`
-   - `ai/context/project.md`
-  - `docs/维护/5.资产迁移与知识维护.md`
+   - applicable `.github/instructions/*.instructions.md` (if present)
+   - `docs/维护文档/2.架构设计.md`
+   - `docs/维护文档/5.资产迁移与知识维护.md`
    - relevant canonical prompts under `ai/prompts/`
 2. Use the Copilot session store read-only. Match the current repository by
    normalized `repository`, `cwd`, and `session_files`; do not rely on only one
@@ -83,8 +83,8 @@ existing rule over adding overlapping rules.
   credentials, personal/product data, absolute private paths, or media content.
 - Do not turn temporary task instructions, emotional wording, or a one-time
   workaround into a persistent preference.
-- Do not propose weakening Request, evidence, transaction, scope, PIC,
-  Plan-to-Code, test, or review validation merely to reduce friction.
+- Do not propose weakening evidence, scope, verification, test, or review
+  validation merely to reduce friction.
 - Set `repository.root` to `.`. Set `repository.remote` to `null` by default;
   when repository identity is required for a cross-repository review, store only
   a credential-free `host/owner/repository` slug with no scheme or query.
@@ -95,11 +95,11 @@ Create exactly one JSON report conforming to
 `ai/context/collaboration-review.schema.json` at:
 
 ```text
-Bdd/ai/knowledge/collaboration-reviews/<review-id>.json
+artifacts/ai/knowledge/collaboration-reviews/<review-id>.json
 ```
 
 Before writing, resolve the destination and prove it is a direct child of
-`Bdd/ai/knowledge/collaboration-reviews/`. Capture `git status --porcelain` as a
+`artifacts/ai/knowledge/collaboration-reviews/`. Capture `git status --porcelain` as a
 baseline. Do not write if the path escapes, already exists, or is not covered by
 the repository's ignore rules.
 

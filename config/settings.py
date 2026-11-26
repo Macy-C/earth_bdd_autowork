@@ -207,6 +207,14 @@ class Settings:
         self.weknora_framework_docs_kb = ""
         self.weknora_engineering_cases_kb = ""
         self.weknora_product_docs_kb = ""
+        self.weknora_static_ui_docs_kb = ""
+        self.ui_inventory_store_dir = "artifacts/ui-inventory"
+        self.ui_inventory_default_locale = "en-US"
+        self.ui_inventory_repo_cache_mode = "persistent"
+        self.ui_inventory_build_lists = []
+        self.ui_inventory_exclude_path_patterns = []
+        self.ui_inventory_reference_dll_dirs = []
+        self.ui_inventory_repositories = []
         self.llm_base_url = ""
         self.llm_api_key = ""
         self.llm_model = ""
@@ -327,16 +335,76 @@ class Settings:
         self.weknora_framework_docs_kb = str(kb_conf.get("FRAMEWORK_DOCS", "") or "").strip()
         self.weknora_engineering_cases_kb = str(kb_conf.get("ENGINEERING_CASES", "") or "").strip()
         self.weknora_product_docs_kb = str(kb_conf.get("PRODUCT_DOCS", "") or "").strip()
+        self.weknora_static_ui_docs_kb = str(kb_conf.get("STATIC_UI_DOCS", "") or "").strip()
         configured_kbs = [
             val for val in (
                 self.weknora_framework_docs_kb,
                 self.weknora_engineering_cases_kb,
                 self.weknora_product_docs_kb,
+                self.weknora_static_ui_docs_kb,
             )
             if val
         ]
         if len(configured_kbs) != len(set(configured_kbs)):
             raise ValueError("WEKNORA_SETTING.KNOWLEDGE_BASES roles must not point to the same knowledge base")
+
+        ui_inv_raw = data.get("UI_INVENTORY_SETTING") or data.get("ui_inventory_setting") or {}
+        if not isinstance(ui_inv_raw, dict):
+            raise ValueError("UI_INVENTORY_SETTING must be a mapping")
+        ui_inv_conf = _normalize_config_keys(ui_inv_raw)
+        store_dir_val = str(ui_inv_conf.get("STORE_DIR", self.ui_inventory_store_dir) or "").strip()
+        self.ui_inventory_store_dir = store_dir_val or "artifacts/ui-inventory"
+        locale_val = str(ui_inv_conf.get("DEFAULT_LOCALE", self.ui_inventory_default_locale) or "").strip()
+        self.ui_inventory_default_locale = locale_val or "en-US"
+        cache_mode_val = str(
+            ui_inv_conf.get("REPO_CACHE_MODE", self.ui_inventory_repo_cache_mode) or "persistent"
+        ).strip().lower()
+        if cache_mode_val not in ("persistent", "ephemeral"):
+            raise ValueError("UI_INVENTORY_SETTING.REPO_CACHE_MODE must be 'persistent' or 'ephemeral'")
+        self.ui_inventory_repo_cache_mode = cache_mode_val
+        raw_build_lists = ui_inv_conf.get("BUILD_LISTS", []) or []
+        if not isinstance(raw_build_lists, list):
+            raise ValueError("UI_INVENTORY_SETTING.BUILD_LISTS must be a list")
+        self.ui_inventory_build_lists = [str(item).strip() for item in raw_build_lists if str(item or "").strip()]
+        raw_excludes = ui_inv_conf.get("EXCLUDE_PATH_PATTERNS", []) or []
+        if not isinstance(raw_excludes, list):
+            raise ValueError("UI_INVENTORY_SETTING.EXCLUDE_PATH_PATTERNS must be a list")
+        self.ui_inventory_exclude_path_patterns = [str(item).strip() for item in raw_excludes if str(item or "").strip()]
+        raw_ref_dll_dirs = ui_inv_conf.get("REFERENCE_DLL_DIRS", []) or []
+        if not isinstance(raw_ref_dll_dirs, list):
+            raise ValueError("UI_INVENTORY_SETTING.REFERENCE_DLL_DIRS must be a list")
+        self.ui_inventory_reference_dll_dirs = [
+            str(item).strip() for item in raw_ref_dll_dirs if str(item or "").strip()
+        ]
+        raw_repos = ui_inv_conf.get("REPOSITORIES")
+        if raw_repos is None:
+            raw_repos = ui_inv_conf.get("REPOS")
+        if raw_repos is None:
+            raw_repos = []
+        if not isinstance(raw_repos, list):
+            raise ValueError("UI_INVENTORY_SETTING.REPOSITORIES must be a list")
+        parsed_repos = []
+        seen_repo_ids = set()
+        for entry in raw_repos:
+            if not isinstance(entry, dict):
+                raise ValueError("Each item in UI_INVENTORY_SETTING.REPOSITORIES must be a mapping")
+            norm_entry = _normalize_config_keys(entry)
+            repo_id = str(norm_entry.get("ID") or norm_entry.get("REPO_ID") or "").strip()
+            if not repo_id:
+                raise ValueError("Each item in UI_INVENTORY_SETTING.REPOSITORIES requires ID (or REPO_ID)")
+            if repo_id in seen_repo_ids:
+                raise ValueError(f"Duplicate repository ID in UI_INVENTORY_SETTING.REPOSITORIES: {repo_id}")
+            seen_repo_ids.add(repo_id)
+            parsed_repos.append({
+                "id": repo_id,
+                "url": str(norm_entry.get("URL", "") or "").strip(),
+                "branch": str(norm_entry.get("BRANCH", "master") or "master").strip(),
+                "role": str(norm_entry.get("ROLE", "app") or "app").strip(),
+                "local_path": str(norm_entry.get("LOCAL_PATH", "") or "").strip(),
+                "enabled": _as_bool(norm_entry.get("ENABLED", True), True),
+            })
+        self.ui_inventory_repositories = parsed_repos
+
         llm_conf = _normalize_config_keys(data.get("LLM_SETTING", {}) or {})
         self.llm_base_url = str(llm_conf.get("BASE_URL", "") or "").strip().rstrip("/")
         self.llm_api_key = str(llm_conf.get("API_KEY", "") or "").strip()
@@ -535,11 +603,14 @@ class Settings:
 
     @property
     def weknora_knowledge_bases(self):
-        return {
+        bases = {
             "FRAMEWORK_DOCS": self.weknora_framework_docs_kb,
             "ENGINEERING_CASES": self.weknora_engineering_cases_kb,
             "PRODUCT_DOCS": self.weknora_product_docs_kb,
         }
+        if self.weknora_static_ui_docs_kb:
+            bases["STATIC_UI_DOCS"] = self.weknora_static_ui_docs_kb
+        return bases
 
     def as_dict(self):
         return {
@@ -568,7 +639,11 @@ class Settings:
             "weknora_framework_docs_kb": self.weknora_framework_docs_kb,
             "weknora_engineering_cases_kb": self.weknora_engineering_cases_kb,
             "weknora_product_docs_kb": self.weknora_product_docs_kb,
+            "weknora_static_ui_docs_kb": self.weknora_static_ui_docs_kb,
             "weknora_knowledge_bases": self.weknora_knowledge_bases,
+            "ui_inventory_store_dir": self.ui_inventory_store_dir,
+            "ui_inventory_default_locale": self.ui_inventory_default_locale,
+            "ui_inventory_repositories_count": len(self.ui_inventory_repositories),
             "llm_base_url": self.llm_base_url,
             "llm_model": self.llm_model,
             "llm_connect_timeout_seconds": self.llm_connect_timeout_seconds,

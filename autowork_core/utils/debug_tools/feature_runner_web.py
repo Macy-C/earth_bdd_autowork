@@ -167,8 +167,8 @@ def compute_adaptive_window_geometry(role: str = "runner") -> dict[str, int | fl
     work_h = max(560, work_bottom - work_top)
 
     if role == "locator":
-        ratio_w, ratio_h = 0.54, 0.65
-        max_w, max_h = 1040, 660
+        ratio_w, ratio_h = 0.55, 0.65
+        max_w, max_h = 1056, 660
         offset_x, offset_y = 24, 24
     elif role == "action":
         ratio_w, ratio_h = 0.46, 0.58

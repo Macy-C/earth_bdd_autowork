@@ -20,12 +20,6 @@ from autowork_core.utils.debug_tools.shadow_companion import (
     STORE_PATH as SHADOW_COMPANION_STORE_PATH,
     load_shadow_companion_policy,
 )
-from autowork_core.utils.debug_tools.portable_knowledge import (
-    MAX_QUERY_BYTES,
-    MAX_QUERY_ITEMS,
-    PORTABLE_KNOWLEDGE_VERSION,
-    validate_portable_knowledge_schema,
-)
 
 DOCUMENTATION_CHECK_VERSION = "1.2"
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
@@ -49,8 +43,8 @@ MARKDOWN_PATTERNS = (
     ".github/skills/*/SKILL.md",
 )
 NAVIGATION_GROUPS = (
-    ("docs/1.快速开始.md", "docs"),
-    ("docs/维护/1.维护者指南.md", "docs/维护"),
+    ("docs/说明文档/1.快速开始.md", "docs/说明文档"),
+    ("docs/维护文档/1.维护者指南.md", "docs/维护文档"),
 )
 HUMAN_DOCUMENTATION_PATTERNS = (
     "README.md",
@@ -119,163 +113,12 @@ def inspect_documentation(project_root):
     manifest_references += 1
     if (
         project_assets_root_value != PROJECT_AI_ROOT.as_posix()
-        or not _contained(project_assets_root, root / "Bdd")
-        or not project_assets_root.is_dir()
+        or not _contained(project_assets_root, root / PROJECT_AI_ROOT.parts[0])
+        or (project_assets_root.exists() and not project_assets_root.is_dir())
     ):
         errors.append(
             f"project_assets_root 必须为 {PROJECT_AI_ROOT.as_posix()}"
         )
-    knowledge = manifest.get("knowledge") or {}
-    if not isinstance(knowledge, dict):
-        errors.append("knowledge 必须是 object")
-        knowledge = {}
-    knowledge_path = knowledge.get("path")
-    quarantine_path = knowledge.get("quarantine_path")
-    if not knowledge_path:
-        errors.append("knowledge.path 不能为空")
-        knowledge_root = project_assets_root / "__invalid_knowledge__"
-    else:
-        manifest_references += 1
-        knowledge_root = (project_assets_root / str(knowledge_path)).resolve()
-        if (
-            not _contained(knowledge_root, project_assets_root)
-            or not knowledge_root.is_dir()
-        ):
-            errors.append(f"knowledge.path 引用无效: {knowledge_path}")
-    if not quarantine_path:
-        errors.append("knowledge.quarantine_path 不能为空")
-    else:
-        manifest_references += 1
-        quarantine = (project_assets_root / str(quarantine_path)).resolve()
-        if not _contained(quarantine, knowledge_root):
-            errors.append(
-                f"knowledge.quarantine_path 引用无效: {quarantine_path}"
-            )
-    if knowledge.get("contains_raw_runtime_evidence") is not False:
-        errors.append("knowledge.contains_raw_runtime_evidence 必须为 false")
-    if knowledge.get("quarantine_in_portable_export") is not False:
-        errors.append("knowledge.quarantine_in_portable_export 必须为 false")
-    if knowledge.get("maintenance_requires_user_confirmation") is not True:
-        errors.append(
-            "knowledge.maintenance_requires_user_confirmation 必须为 true"
-        )
-    portable = manifest.get("portable_knowledge") or {}
-    if not isinstance(portable, dict):
-        errors.append("portable_knowledge 必须是 object")
-        portable = {}
-    portable_fields = {
-        "attributes",
-        "path",
-        "records_path",
-        "schema",
-        "source",
-        "version",
-        "automatic_publish",
-        "default_context_injection",
-        "automatic_stage",
-        "automatic_commit",
-        "automatic_push",
-        "sync_requires_user_confirmation",
-        "query_max_items",
-        "query_max_bytes",
-    }
-    if set(portable) != portable_fields:
-        errors.append("portable_knowledge 字段无效")
-    attributes_path = (root / str(
-        portable.get("attributes") or "__invalid_attributes__"
-    )).resolve()
-    manifest_references += 1
-    if (
-        portable.get("attributes") != ".gitattributes"
-        or attributes_path != (root / ".gitattributes").resolve()
-        or not attributes_path.is_file()
-    ):
-        errors.append("portable_knowledge.attributes 引用无效")
-    else:
-        attributes = attributes_path.read_text(encoding="utf-8").splitlines()
-        required_attribute = (
-            "Bdd/ai/portable-knowledge/records/*.json text eol=lf"
-        )
-        if required_attribute not in attributes:
-            errors.append(
-                "portable_knowledge.attributes 缺少 records LF 规则"
-            )
-    portable_root = (project_assets_root / str(
-        portable.get("path") or "__invalid_portable__"
-    )).resolve()
-    records_root = (project_assets_root / str(
-        portable.get("records_path") or "__invalid_records__"
-    )).resolve()
-    portable_schema_path = (root / FRAMEWORK_AI_ROOT / str(
-        portable.get("schema") or "__invalid_portable_schema__"
-    )).resolve()
-    portable_source = (project_assets_root / str(
-        portable.get("source") or "__invalid_portable_source__"
-    )).resolve()
-    manifest_references += 4
-    if (
-        portable.get("path") != "portable-knowledge"
-        or not _contained(portable_root, project_assets_root)
-        or not portable_root.is_dir()
-    ):
-        errors.append("portable_knowledge.path 引用无效")
-    if (
-        portable.get("records_path") != "portable-knowledge/records"
-        or not _contained(records_root, portable_root)
-    ):
-        errors.append("portable_knowledge.records_path 引用无效")
-    if (
-        portable.get("schema") != "context/portable-knowledge.schema.json"
-        or not _contained(portable_schema_path, root / FRAMEWORK_AI_ROOT)
-        or not portable_schema_path.is_file()
-    ):
-        errors.append("portable_knowledge.schema 引用无效")
-    if (
-        portable.get("source") != "knowledge/capabilities"
-        or not _contained(portable_source, root / PROJECT_KNOWLEDGE_ROOT)
-    ):
-        errors.append("portable_knowledge.source 引用无效")
-    if portable.get("version") != PORTABLE_KNOWLEDGE_VERSION:
-        errors.append("portable_knowledge.version 必须为 1.0")
-    for field in (
-        "automatic_publish",
-        "default_context_injection",
-        "automatic_stage",
-        "automatic_commit",
-        "automatic_push",
-    ):
-        if portable.get(field) is not False:
-            errors.append(f"portable_knowledge.{field} 必须为 false")
-    if portable.get("sync_requires_user_confirmation") is not True:
-        errors.append(
-            "portable_knowledge.sync_requires_user_confirmation 必须为 true"
-        )
-    if portable.get("query_max_items") != MAX_QUERY_ITEMS:
-        errors.append(
-            f"portable_knowledge.query_max_items 必须为 {MAX_QUERY_ITEMS}"
-        )
-    if portable.get("query_max_bytes") != MAX_QUERY_BYTES:
-        errors.append(
-            f"portable_knowledge.query_max_bytes 必须为 {MAX_QUERY_BYTES}"
-        )
-    if portable_schema_path.is_file():
-        try:
-            portable_schema = json.loads(
-                portable_schema_path.read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError) as error:
-            errors.append(
-                "Portable Knowledge schema 无法读取: "
-                f"{type(error).__name__}: {error}"
-            )
-        else:
-            schema_errors = validate_portable_knowledge_schema(
-                portable_schema
-            )
-            if schema_errors:
-                errors.append(
-                    f"Portable Knowledge schema 无效: {schema_errors}"
-                )
     for relative in [
         *(manifest.get("context") or []),
         *(manifest.get("prompts") or []),
@@ -290,44 +133,6 @@ def inspect_documentation(project_root):
         path = (root / str(relative)).resolve()
         if not _contained(path, root) or not path.is_file():
             errors.append(f"AI discovery adapter 无效: {relative}")
-    host_control = manifest.get("recorder_host_control")
-    if not isinstance(host_control, dict):
-        errors.append("recorder_host_control 必须是 object")
-        host_control = {}
-    host_control_expected = {
-        "version": "1.9",
-        "skill": ".github/skills/recorder-generate/SKILL.md",
-        "agent": ".github/agents/recorder-generation.agent.md",
-        "hook_scope": "agent",
-        "windows_hook_wrapper": (
-            ".github/hooks/messy/recorder-generation.ps1"
-        ),
-        "trigger": "select Recorder Generation Agent and submit <job-path>",
-        "scope": "bound_generation_job",
-        "workspace_write_owner": "current_chat_native_edit",
-        "workflow_state_authoritative": True,
-        "baseline_role": "system_owned_when_proven_else_ai_seed",
-        "business_questions": "single_combined_batch_after_claim",
-        "task_bundle_role": "large_job_read_only_pages",
-        "mcp_required": False,
-    }
-    if set(host_control) != set(host_control_expected):
-        errors.append("recorder_host_control 字段无效")
-    for key, expected_value in host_control_expected.items():
-        if host_control.get(key) != expected_value:
-            errors.append(f"recorder_host_control.{key} 无效")
-    for key in (
-        "skill",
-        "agent",
-        "windows_hook_wrapper",
-    ):
-        relative = host_control.get(key)
-        if not relative:
-            continue
-        manifest_references += 1
-        path = (root / str(relative)).resolve()
-        if not _contained(path, root) or not path.is_file():
-            errors.append(f"recorder_host_control.{key} 引用无效")
     collaboration = manifest.get("collaboration_learning") or {}
     collaboration_fields = {
         "review_schema",
@@ -431,7 +236,7 @@ def inspect_documentation(project_root):
         "session_start_hook": (root, root / ".github" / "hooks", True),
         "session_start_hook_windows_wrapper": (
             root,
-            root / ".github" / "hooks" / "messy",
+            root / ".github" / "hooks" / "scripts",
             True,
         ),
     }
@@ -458,7 +263,7 @@ def inspect_documentation(project_root):
             ).as_posix(),
             "session_start_hook": ".github/hooks/shadow-companion.json",
             "session_start_hook_windows_wrapper": (
-                ".github/hooks/messy/shadow-companion.ps1"
+                ".github/hooks/scripts/shadow-companion.ps1"
             ),
             "enabled": True,
             "scope": "project_engineering_work",
@@ -548,60 +353,9 @@ def inspect_documentation(project_root):
             if hygiene.get(key) is not False:
                 errors.append(f"project_context_hygiene.{key} 必须为 false")
 
-    adaptive = manifest.get("adaptive_work_loop")
-    if not isinstance(adaptive, dict):
-        errors.append("adaptive_work_loop 必须是 object")
-        adaptive = {}
-    adaptive_fields = {
-        "enabled",
-        "mode",
-        "scope",
-        "milestone_driven",
-        "persistent_runtime_state",
-        "fixed_turn_or_tool_cutoff",
-        "restrict_search",
-        "restrict_file_reads",
-        "skip_tests",
-        "reuse_stale_validation",
-        "allow_validation_escalation",
-        "raw_output_in_default_context",
-        "shadow_handoff_optional",
-        "full_fallback",
-    }
-    if set(adaptive) != adaptive_fields:
-        errors.append("adaptive_work_loop 字段无效")
-    if adaptive:
-        if adaptive.get("mode") != "adaptive_advisory":
-            errors.append(
-                "adaptive_work_loop.mode 必须为 adaptive_advisory"
-            )
-        if adaptive.get("scope") != "recorder_maintenance":
-            errors.append(
-                "adaptive_work_loop.scope 必须为 recorder_maintenance"
-            )
-        for key in (
-            "enabled",
-            "milestone_driven",
-            "allow_validation_escalation",
-            "shadow_handoff_optional",
-            "full_fallback",
-        ):
-            if adaptive.get(key) is not True:
-                errors.append(f"adaptive_work_loop.{key} 必须为 true")
-        for key in (
-            "persistent_runtime_state",
-            "fixed_turn_or_tool_cutoff",
-            "restrict_search",
-            "restrict_file_reads",
-            "skip_tests",
-            "reuse_stale_validation",
-            "raw_output_in_default_context",
-        ):
-            if adaptive.get(key) is not False:
-                errors.append(f"adaptive_work_loop.{key} 必须为 false")
-
     retired_collaboration_hooks = (
         ".github/hooks/collaboration-review.json",
+        ".github/hooks/scripts/collaboration-review.ps1",
         ".github/hooks/messy/collaboration-review.ps1",
     )
     for relative in retired_collaboration_hooks:
@@ -738,21 +492,21 @@ def _link_target(raw_target):
 def _contained(path, root):
     try:
         Path(path).resolve().relative_to(Path(root).resolve())
+        return True
     except ValueError:
         return False
-    return True
 
 
 def _relative(path, root):
     try:
-        return Path(path).resolve().relative_to(root).as_posix()
+        return Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
     except ValueError:
-        return str(Path(path).resolve())
+        return str(path)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Check BDD Autowork documentation links and indexes",
+        description="Inspect documentation links, code blocks, and AI manifest",
     )
     parser.add_argument("--project-root", default=".")
     args = parser.parse_args(argv)

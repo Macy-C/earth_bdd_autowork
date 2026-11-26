@@ -1,86 +1,54 @@
 # BDD Autowork Repository Instructions
 
-For architecture or Recorder maintenance, read `ai/context/project.md`; for
-asset lifecycle, migration, or host sync, read
-`docs/维护/5.资产迁移与知识维护.md`. Current code, tests, and Recorder evidence are
-the source of truth; local Copilot memory is only a cache.
-Ordinary Feature/Scenario implementation uses
-`ai/prompts/bdd-knowledge-generate.md` and project source guidance in
-`Bdd/ai/README.md`. Do not load Recorder-only generation instructions for ordinary
-generation: `ai/instructions/bdd-generation.md` and
-`ai/prompts/recorder-generate.md` belong to a bound Recorder Job, not a generic
-BDD coding guide. Shared API implementation lookup remains allowed when relevant.
-Recorder Generation uses the explicitly selected workspace Agent and its
-internal `recorder-generate` Skill, which
-delegates to `ai/prompts/recorder-generate.md`,
-`ai/instructions/bdd-generation.md`, the compact Job context, and named
-evidence/code candidates.
+Current code, tests, and runtime artifacts are the source of truth; local Copilot
+memory and Shadow recovery pointers are advisory caches.
 
-- For AI asset placement and new Skill/Prompt/Agent entry decisions, use
-  `ai/README.md` and `.github/README.md`; task workflows have one canonical body,
-  while platform entries remain thin adapters and AI tools are grouped by capability.
-- Preserve immutable raw evidence and append-only timeline edits. Keep V5
-  file-based and fail-closed; never weaken Request, projection, Decision, Plan,
-  transaction, PIC, scope, or Plan-to-Code validation to pass a workflow.
-- Rules provide evidence, candidates, and safety gates; AI owns implementation
-  reasoning. Reuse established owners such as `CaptureRuntime`,
-  `RecorderWorkbench`, and `OperationCoordinator`.
-- Reuse the user's existing execution environment. Use an interpreter explicitly
-  supplied for the task or the existing workspace selection; check its path
-  read-only and invoke that executable directly. If the choice is unresolved,
-  ask which existing interpreter to use. Missing `uv` is not evidence of a broken
-  project environment. Unless the user explicitly requests the relevant
-  environment change, do not invoke setup/configuration or installation tools,
-  install Python, uv, dependencies or extensions, create environments, or change
-  the interpreter selection, PATH or environment settings. Missing dependencies
-  require reporting and user direction, not automatic environment repair.
-- Before claiming current behavior, inspect its owner and a direct call path or
-  relevant test. For material uncertainty, first use current evidence or one
-  low-risk check; if unresolved, ask a concrete question with alternatives and
-  consequences. Never guess or ask the user to settle evidence-checkable facts.
-- Before substantial work, state one work package: user-visible outcome,
-  authoritative evidence, allowed and excluded scope, next mutable action, and
-  completion proof. A failed check may repair the same owner only; if it changes
-  the goal, owner, protocol, attempt identity, allowed scope, or acceptance
-  model, stop and seek approval before expanding work. A bare "continue", "next",
-  "ok", or "try again" only performs the uniquely stated next action in the
-  current work package; otherwise ask.
-- Exception: inside the explicitly selected Recorder Generation Agent for a
-  Workbench-created Job or inside the `bdd-knowledge-generate` product
-  generation workflow, do not output maintenance work packages, hypothesis
-  narration, recovery/control-plane commentary, or per-Step progress. Those
-  journeys are product generation: for a Recorder Job, consume the
-  already-claimed Job, ask at most one business batch, use batch
-  context/candidates, and return the terminal Job result.
-- If investigation no longer produces a falsifiable owner hypothesis, cheapest
-  discriminating check, and small reversible edit, treat it as drift. Stop
-  expanding searches, diagnostics, and adjacent fixes; restate the hypothesis
-  and make the smallest testable change, or ask the user to choose among
-  concrete scope alternatives. Do not present broad exploration or repeated
-  failed patch attempts as progress.
-- Before changing a user-facing workflow, state the normal user goal, action,
-  automated system/AI responsibility, observable result, and remaining manual
-  work. Do not call hidden, relocated, or renamed technical controls an
-  optimization while users still perform their work; automate it or explain why
-  it remains necessary and provide a safe path.
-- Tests, budgets, benchmarks, replay, generated artifacts, and static checks
-  are evidence, not product goals. Do not create a replacement Job, Transaction,
-  or Run, or claim success solely to improve a proxy metric; a new attempt cannot
-  reset, replace, or satisfy an earlier attempt's timing or outcome.
-- Analysis, review, retrospective, design, and rollback planning are read-only
-  unless the user explicitly authorizes implementation. Rollback requires an
-  approved commit, change-set, path set, or hunk boundary; never infer a broader
-  boundary from timestamps or conversation wording. Never revert unrelated
-  changes; after an edit, validate the narrow behavior before expanding scope.
-- For substantive project engineering, follow `project.md`'s context hygiene,
-  Shadow, and validation workflow; Recorder maintenance also follows its
-  Adaptive Work Loop. Do not apply fixed context/tool cutoffs or auto-treat a
-  restored state as truth.
-- Collaboration Review/Promotion run only on explicit request. Reports are
-  proposals; rules change only for exact candidate IDs approved in the current
-  request.
-- For approval, authorization, rollback, Recorder Decision, and Collaboration
-  Promotion requests, also apply [Approval Governance](instructions/approval-governance.instructions.md).
-- Recorder lifecycle rules apply only while executing a bound Recorder
-  Generation Job. Ordinary edits under `Bdd/` do not activate the
-  Recorder Job protocol.
+## Architecture Red Lines
+
+- **Layer separation**: `Bdd/` owns host project assets (Features, Steps,
+  WindowPage/WindowView, locators/data YAML). `autowork_core/` owns reusable
+  framework internals with no product-specific semantics. Neither `autowork_core/`
+  nor `Bdd/` may import `framework_validation/`.
+- **Single run-evidence owner**: `RunEvidenceCollector` owns normal BDD execution
+  evidence, failure screenshots, and recording; reports and knowledge export read
+  its sealed snapshot instead of re-capturing, and lightweight debug tools do not
+  implicitly create a capture run.
+- **Decoupled AI layer**: Core capabilities keep standalone Python/CLI entrypoints
+  and must not depend on AI or a specific IDE. Keep one canonical workflow body per
+  task under `ai/prompts/`, thin platform adapters under `.github/`, and AI-only
+  helpers grouped by capability under `ai/tools/`.
+
+## Reference Routing
+
+- Detailed architecture and runtime lifecycle: `docs/维护文档/2.架构设计.md`.
+- Asset lifecycle, migration, or host sync: `docs/维护文档/5.资产迁移与知识维护.md`.
+- AI asset placement and entry index: `ai/README.md` and `.github/COPILOT.md`.
+- Ordinary Feature/Scenario implementation: `ai/prompts/bdd-knowledge-generate.md`
+  and knowledge-base role bindings in `Bdd/config.yaml` (`WEKNORA_SETTING.KNOWLEDGE_BASES`).
+
+## Working & Approval Boundaries
+
+- **Evidence before claims or questions**: Inspect the owning code and a direct
+  call path or test before claiming behavior. Resolve checkable facts with low-risk
+  checks first; ask one concrete question with options and consequences only when
+  material ambiguity remains.
+- **Read-only default and scoped edits**: Analysis, review, retrospective, design,
+  and rollback planning are read-only unless implementation is requested. Keep edits
+  within scope and preserve unrelated working-tree changes.
+- **Explicit approval & rollback scope**: Approval defines scope, never substitutes
+  for missing runtime facts or validation. A bare "继续" / "continue" / "ok" runs
+  only the single explicitly stated next step; confirm before expanding goal, owner,
+  or scope. Rollback or destructive changes require an explicit commit, file set, or
+  hunk boundary. Collaboration Review/Promotion run only on explicit request, and
+  rules change only for exact candidate IDs approved in the current turn (vague
+  phrases like "都行" or "应用有益规则" are not approval).
+- **Environment reuse**: Check the supplied or workspace-selected Python interpreter
+  read-only and invoke it directly; if unresolved, ask which existing interpreter to
+  use. Unless explicitly requested, do not run setup/install tools, create or switch
+  environments, install Python/`uv`/packages/extensions, or modify interpreter/PATH
+  settings; report missing dependencies for user direction.
+- **Focused validation & honest delivery**: Run narrow checks covering the change
+  and widen scope only when crossing public contracts, lifecycle boundaries, or
+  conflicting results. Report unverified runtime or external device checks explicitly.
+- **Context hygiene**: Use semantic milestones and Shadow recovery without fixed
+  turn/tool cutoffs; never auto-treat a restored state as truth.

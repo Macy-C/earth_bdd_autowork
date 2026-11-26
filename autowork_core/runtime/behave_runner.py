@@ -27,9 +27,6 @@ from autowork_core.runtime.step_validation import (
     preflight_feature_steps,
     reset_behave_step_state,
 )
-from autowork_core.runtime.reporting.run_result_bridge import (
-    GENERATION_TRANSACTION_ENV,
-)
 from autowork_core.utils.bus import del_all_file
 
 
@@ -234,31 +231,6 @@ def requested_output_preparation(clear_screenshots):
         OUTPUT_PREPARATION.reset(token)
 
 
-@contextmanager
-def requested_generation_transaction(report_path):
-    if report_path is None:
-        yield
-        return
-    path = Path(report_path)
-    if not path.is_absolute():
-        path = (Paths.BASE_DIR / path).resolve()
-    else:
-        path = path.resolve()
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Generation transaction report 不存在: {path}"
-        )
-    previous = os.environ.get(GENERATION_TRANSACTION_ENV)
-    os.environ[GENERATION_TRANSACTION_ENV] = str(path)
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(GENERATION_TRANSACTION_ENV, None)
-        else:
-            os.environ[GENERATION_TRANSACTION_ENV] = previous
-
-
 def _as_feature_path(feature_path):
     path = Path(feature_path)
     if not path.is_absolute():
@@ -295,8 +267,7 @@ def build_behave_args(feature_path, tags=None, verbose=True, formatter=None):
 
 def run_behave(feature_path, *, settings_overrides=None, tags=None, verbose=True, formatter=None,
                clear_screenshots=True, step_scope_source=None,
-               step_scope=None,
-               generation_transaction_report=None):
+               step_scope=None):
     os.chdir(Paths.BASE_DIR)
     feature_path = _as_feature_path(feature_path)
     scope = step_scope
@@ -308,10 +279,7 @@ def run_behave(feature_path, *, settings_overrides=None, tags=None, verbose=True
         )
 
     with temporary_settings(**(settings_overrides or {})):
-        with requested_output_preparation(clear_screenshots), \
-                requested_generation_transaction(
-                    generation_transaction_report
-                ):
+        with requested_output_preparation(clear_screenshots):
             return _run_single_behave(
                 feature_path,
                 scope=scope,
@@ -343,31 +311,9 @@ def main(argv=None):
     )
     parser.add_argument("--tags")
     parser.add_argument("--formatter")
-    parser.add_argument("--generation-transaction-report")
-    parser.add_argument("--execution-request")
     args = parser.parse_args(argv)
-    if bool(args.generation_transaction_report) != bool(
-            args.execution_request
-    ):
-        parser.error(
-            "--generation-transaction-report与--execution-request必须同时提供"
-        )
-    settings_overrides = None
-    if args.execution_request:
-        from autowork_core.utils.debug_tools.recorder.execution_profile import (
-            execution_settings_for_request,
-        )
-
-        settings_overrides = execution_settings_for_request(
-            args.execution_request,
-            args.generation_transaction_report,
-        )
     return run_behave(
         args.feature_path,
-        settings_overrides=settings_overrides,
         tags=args.tags,
         formatter=args.formatter,
-        generation_transaction_report=(
-            args.generation_transaction_report
-        ),
     )

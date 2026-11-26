@@ -113,18 +113,9 @@ workflow rules before acceptance/retention writes; acceptance deletes nothing.
 Retirement/cleanup require explicit scope and original gates. Report processing,
 pending retirements and errors truthfully, without polling or blind retries.
 
-This Skill is an optional natural-language adapter, not the owner of capture,
-Markdown export, verification, publication, or retention. Those deterministic
-capabilities live in [autowork_core/knowledge](../../../autowork_core/knowledge/).
-Core functions and `python -B -m autowork_core.knowledge` are usable without this Skill.
-
-Select only the actions requested by the user. Local analysis, verification, and
-polishing do not require a knowledge base or network. A polish-only task ends at
-the verified copy. Uploading does not imply polishing or Wiki review. Explicit
-requests take precedence over filename conventions.
-
-AI-specific protected prose editing is provided by
-[artifact_polisher.py](../../../ai/tools/knowledge/artifact_polisher.py); local input
-resolution is provided by [case_workflow.py](../../../ai/tools/knowledge/case_workflow.py).
-Use an existing confirmed interpreter, preserve selected source files, and do
-not perform environment setup, automatic installation, or unrelated maintenance.
+Deterministic capture, export, verification, publication, and retention live in
+[autowork_core/knowledge](../../../autowork_core/knowledge/) (`python -B -m autowork_core.knowledge`),
+while protected prose editing lives in [artifact_polisher.py](../../../ai/tools/knowledge/artifact_polisher.py)
+and local input resolution in [case_workflow.py](../../../ai/tools/knowledge/case_workflow.py).
+Compose only the actions requested by the user; for full boundary, recovery, and
+retention rules, consult [ai/prompts/knowledge-assist.md](../../../ai/prompts/knowledge-assist.md).

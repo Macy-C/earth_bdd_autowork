@@ -795,3 +795,27 @@ def get_open_windows(backend="uia"):
             continue
 
     return result
+
+
+def _uia_wrapper_from_point(x, y):
+    from comtypes.gen.UIAutomationClient import tagPOINT
+    from pywinauto.controls.uiawrapper import UIAWrapper
+    from pywinauto.uia_defines import IUIA
+    from pywinauto.uia_element_info import UIAElementInfo
+
+    raw_element = IUIA().iuia.ElementFromPoint(tagPOINT(int(x), int(y)))
+    return UIAWrapper(UIAElementInfo(raw_element))
+
+
+def _win32_wrapper_from_point(x, y):
+    import win32gui
+    from pywinauto.controls.hwndwrapper import HwndWrapper
+
+    handle = win32gui.WindowFromPoint((int(x), int(y)))
+    return HwndWrapper(handle)
+
+
+def _wrapper_from_point(x, y, backend):
+    if backend == "win32":
+        return _win32_wrapper_from_point(x, y)
+    return _uia_wrapper_from_point(x, y)

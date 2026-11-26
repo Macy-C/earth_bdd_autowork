@@ -50,11 +50,8 @@ python -B -m autowork_core.knowledge processing-status --receipt "所选发布�
 
 ## 执行环境
 
-- 复用当前任务中用户已指定或工作区已选择的现有 Python 解释器；只读确认路径存在后，直接用该可执行文件运行命令。
-- 没有确认解释器，或多个现有解释器无法确定使用哪一个时，只问用户使用哪个现有解释器或提供其路径，不默认新建环境。
-- 知识任务不调用环境配置、环境创建、Python 安装或包安装工具，不安装 `uv`、Python、依赖或扩展，不修改解释器选择、PATH 或环境设置。
-- 缺少 `uv` 仅表示相关环境管理器不可用，不证明现有 Python 不可用。环境工具要求安装或配置才能继续时，停止该工具路径，不触发安装向导。
-- 现有解释器确实缺少所需依赖时，明确报告解释器路径和缺失项，等待用户指示；不得把上传请求扩展为环境修复。用户明确要求环境维护时，才在另一个明确范围内执行该维护。
+- 只读确认并复用任务已指定或工作区已选的现有 Python 解释器；无法确定时仅询问现有解释器路径，不新建环境。
+- 不调用环境配置或包安装工具，不修改解释器/PATH 设置；缺失依赖时报告解释器路径与缺失包并等待用户指示。
 
 ## 连接配置
 
@@ -62,17 +59,18 @@ python -B -m autowork_core.knowledge processing-status --receipt "所选发布�
 
 ```yaml
 WEKNORA_SETTING:
-	API_URL: "http://130.147.129.74:1101"
-	API_KEY: "你的 WeKnora REST API Key"
-	KNOWLEDGE_BASES:
-		FRAMEWORK_DOCS: "BDD框架知识库_demo"
-		ENGINEERING_CASES: "Earth工程案例库_demo"
-		PRODUCT_DOCS: "Earth正式资料库_demo"
+  API_URL: "http://weknora.example.internal:1101"
+  API_KEY: "你的 WeKnora REST API Key"
+  KNOWLEDGE_BASES:
+    FRAMEWORK_DOCS: "<框架知识库 UUID>"       # BDD框架知识库（推荐填不可变 UUID，避免改名断联）
+    ENGINEERING_CASES: "<工程案例库 UUID>"    # 项目工程案例库
+    PRODUCT_DOCS: "<产品资料库 UUID>"         # 项目正式资料库
+    STATIC_UI_DOCS: "<静态UI控件库 UUID>"     # 可选；项目静态UI控件库
 ```
 
 - `API_URL` 是 WeKnora 服务根地址，不是 `/api/v1` 路径，也不是 `/mcp/...` 地址。
 - `API_KEY` 是 REST API Key；不出现在 `Settings.as_dict()`、运行日志、错误回执、Markdown 或聊天中。
-- `KNOWLEDGE_BASES` 按角色绑定项目默认知识库：`ENGINEERING_CASES` 供本工作流默认使用（省略 `--kb` 时自动采用），`FRAMEWORK_DOCS` 供 `/document-sync` 使用，`PRODUCT_DOCS` 为产品正式资料库。三个角色不得指向同一个知识库；案例发布/审阅/退役预检会拒绝指向 `FRAMEWORK_DOCS` 或 `PRODUCT_DOCS` 的跨角色写入（只读 `processing-status` 不受此限制）。未配置默认角色库时，仍由用户请求或 `--kb "知识库名称或 ID"` 明确指定。
+- `KNOWLEDGE_BASES` 按角色绑定项目默认知识库（支持填 UUID 或精确名称，推荐填不可变 UUID 并附 `# 名称` 注释）：`ENGINEERING_CASES` 供本工作流默认使用（省略 `--kb` 时自动采用），`FRAMEWORK_DOCS` 供 `/document-sync` 使用，`PRODUCT_DOCS` 为产品正式资料库，`STATIC_UI_DOCS` 为可选静态 UI 控件库。各角色不得指向同一个知识库；案例发布/审阅/退役预检会拒绝指向其他角色的跨角色写入（只读 `processing-status` 不受此限制）。未配置默认角色库时，仍由用户请求或 `--kb "知识库名称或 ID"` 明确指定。
 - 不读取 VS Code `mcp.json`，不从 MCP 地址推断服务器，不把 `mcp_...` 令牌当 REST API Key。
 - `preflight` 仅用于请求自动发布时验证配置、可访问知识库、角色防呆和 REST 身份；采集和本地 Markdown 导出不依赖远端连接。
 

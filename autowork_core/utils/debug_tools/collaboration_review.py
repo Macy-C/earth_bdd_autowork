@@ -824,7 +824,21 @@ def _contained_artifact(path, project_root, relative_root, prefix, errors):
 
 
 def _resolve_relative(value, project_root, errors, label):
-    if not _safe_relative(value):
+    if not isinstance(value, str) or "\\" in value:
+        errors.append(f"{label} 必须是安全仓库相对路径")
+        return project_root / "__invalid__"
+    pure = PurePosixPath(value)
+    if (
+        pure.is_absolute()
+        or ".." in pure.parts
+        or not pure.parts
+        or pure.parts[0] not in {
+            ".github",
+            "ai",
+            "Bdd",
+            PROJECT_KNOWLEDGE_ROOT.parts[0],
+        }
+    ):
         errors.append(f"{label} 必须是安全仓库相对路径")
         return project_root / "__invalid__"
     resolved = (project_root / value).resolve()

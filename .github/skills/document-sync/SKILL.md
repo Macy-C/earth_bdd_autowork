@@ -72,8 +72,8 @@ Summary omits history only, retaining current failures, warnings and worker stat
 Omit `--summary` when the user requests history or a detailed task investigation.
 
 Reuse [the document sync core](../../../autowork_core/knowledge/document_sync.py) and
-[durable update tasks](../../../autowork_core/knowledge/document_update.py).
-Return task IDs without waiting for parsing. Report every stage and exception;
-accepted uploads and accepted deletions are not completed updates.
-keys; its independent worker is not a new service, Agent or Hook. Do not install
-dependencies, alter environments, change KB settings or auto-configure startup.
+[durable update tasks](../../../autowork_core/knowledge/document_update.py), which remain
+usable as standalone CLI commands outside Copilot. Return task IDs without waiting for
+parsing, and report every stage and exception truthfully (accepted uploads and accepted
+deletions are not completed updates). Do not expose API keys, register persistent system
+services, alter environments, or modify KB settings.

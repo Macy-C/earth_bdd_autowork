@@ -1,0 +1,255 @@
+# Azure DevOps Server (ADS) Pipeline: CT 静态 UI 控件多仓增量巡检与 WeKnora 同步
+#
+# 使用说明：
+# 1. 在 ADS 中新建 Pipeline -> 选择 "Existing Azure Pipelines YAML file" -> 指向 `/pipelines/ui-inventory-sync.yml`。
+# 2. 仓库清单与目标知识库统一维护在 `Bdd/config.yaml`（`WEKNORA_SETTING.KNOWLEDGE_BASES.STATIC_UI_DOCS` 与 `UI_INVENTORY_SETTING`）。
+# 3. 同 Project（SY_CT_Projects）跨仓访问使用 ADS 内置 `$(System.AccessToken)`：
+#    请确保 Project Settings -> Pipelines -> Settings 中未开启“限制作业授权范围仅当前仓库”（Limit job authorization scope to referenced Azure DevOps repositories）。
+# 4. 机制说明（纯标准 Git 持久化浅仓 + 三层无状态自愈收敛）：
+#    - 首次冷启动会在执行机缓存目录做一次单深度浅克隆（大仓首次耗时较长属正常，每扫完 1 仓即落盘断点，中途取消不白跑）；
+#    - 后续每日巡检：无提交 ~5 秒跳过；有提交仅 `git fetch --depth 1` 差异对象（几秒~几十秒）并仅替换 SHA-256 变化的模块文档；
+#    - 多项目共用同一个 Agent Pool 时，缓存按 `$(System.DefinitionId)` 自动隔离；单机防重叠由 `.poll-sync.lock` 保证；
+#    - 若未来将 `Astra_BDD_Autowork` 池扩充为多台执行机，建议在 ADS 上配置 Environment Exclusive Lock 防止多机并发写同一知识库。
+#    - 若执行机 C 盘紧张，可在 ADS Pipeline Variables 里新建 `UI_INVENTORY_CACHE_ROOT` 覆写到其他盘（例如 `D:\ui-inv`）。
+
+# ==============================================================================
+# 本次构建的显示名称格式：例如 UI-Inventory-Sync_20261123.1
+# ==============================================================================
+name: UI-Inventory-Sync_$(Date:yyyyMMdd)$(Rev:.r)
+
+# 关闭代码提交（CI）与合并请求（PR）自动触发，避免平时改 BDD 测试脚本时反复触发 UI 巡检
+trigger: none
+pr: none
+
+# ==============================================================================
+# 定时触发策略：每天中午 12:00（北京时间）自动巡检一次
+# 注意：branches.include 仅保留单一主分支（避免同时存在 main/Dev 时 12:00 重复双发撞锁）；
+# 未来新项目复用本 YAML 时，请按该 BDD 仓的实际默认分支名修改下面这一行。
+# ==============================================================================
+schedules:
+  - cron: "0 4 * * *" # ADS 的 cron 使用 UTC 时间：UTC 04:00 = 北京时间（UTC+8）12:00
+    displayName: "Daily Earth UI Inventory Sync (12:00 CST)"
+    branches:
+      include:
+        - main        # 仅保留单一默认分支，防止多分支重复触发
+    always: true      # 即使 BDD 仓本身没有新提交，也按时触发去检查外部 CT 源码仓有没有更新
+
+# ==============================================================================
+# 手动触发时的可选运行参数（点击 ADS 页面 “Run pipeline” 时可在界面勾选/填写）
+# 定时触发时会自动使用下面每一项的 default 默认值
+# ==============================================================================
+parameters:
+  - name: forceRescan
+    displayName: "强制重扫所有仓库（忽略指纹缓存）"
+    type: boolean
+    default: false    # 默认走增量：commit/配置/BuildList 任一变动均自动重扫；仅排查异常时才需手动强制全刷
+  - name: dryRun
+    displayName: "Dry-Run 预演模式（仅检查差异，不写入 WeKnora）"
+    type: boolean
+    default: false    # 首次上线排查问题时可手动勾选 true；取消 dryRun 再跑时，层 3 会自动识别空库/差异并补齐上传
+  - name: pruneRemoved
+    displayName: "自动清理远端已移除/被排除的孤儿文档"
+    type: boolean
+    default: true     # 本地不再生成的旧文档（如模块删除或改名后）自动从 WeKnora 清理；若当次有任意仓/文档失败会自动跳过清理
+  - name: concurrency
+    displayName: "WeKnora 并发上传/轮询数"
+    type: number
+    default: 6        # 滑窗并发基准数（同时解析上限为 concurrency * 2，兼顾冷启动速度与 WeKnora 服务端稳定）
+  - name: onlyRepo
+    displayName: "仅巡检指定单个仓库 ID（填 all 表示全部仓库）"
+    type: string
+    default: "all"    # 排查单个仓时可填具体仓名（如 MIA），日常填 all 巡检 Bdd/config.yaml 中的全部启用仓
+  - name: pythonExe
+    displayName: "执行机 Python 命令或绝对路径（默认使用系统 PATH 中的 python）"
+    type: string
+    default: "python" # 默认直接调系统 PATH 里的 python（步骤 2 会自动绕过 WindowsApps 9009 空壳）
+
+# ==============================================================================
+# 指定执行本 Pipeline 的自建 Agent 池
+# 初期注册你的个人电脑到此池，后续换成远程构建服务器时无需改本 YAML
+# ==============================================================================
+pool:
+  name: Astra_BDD_Autowork
+
+# ==============================================================================
+# 跨次构建持久化缓存目录（短路径 + 按 Pipeline DefinitionId 物理隔离多项目）
+# 用来保存 manifest.json、snapshots/、buildlists/ 和 persistent 浅仓 repos/：
+# 确保多项目共用同一执行机池绝不互踩，且尽量缩短路径避免 Windows 260 字符问题
+# ==============================================================================
+variables:
+  UI_INVENTORY_CACHE_ROOT: "$(Agent.WorkFolder)\\ui-inv"
+  UI_INVENTORY_CACHE_DIR: "$(UI_INVENTORY_CACHE_ROOT)\\$(System.DefinitionId)"
+
+jobs:
+  - job: SyncStaticUiInventory
+    displayName: "Incremental Scan, Build & Sync WeKnora STATIC_UI_DOCS"
+    timeoutInMinutes: 180 # 预留 180 分钟以兼容新项目首次拉取十余 GB 大仓并保持 $(System.AccessToken) 全程有效（日常仅 ~5~60 秒）
+    steps:
+      # ------------------------------------------------------------------------
+      # 步骤 1：拉取 BDD 仓库自身（拿到 Bdd/config.yaml 配置与 autowork_core 扫描同步工具）
+      # 注：外部 CT 源码仓（MIA/MIF/MIPPP 等）不在这里拉，交给步骤 3 按需增量浅克隆
+      # ------------------------------------------------------------------------
+      - checkout: self
+        fetchDepth: 1            # 只拉最新 1 个 commit，加快检出速度
+        persistCredentials: false # 不把认证凭据持久化写进 .git/config（步骤 3 改用内存环境变量临时注入）
+        displayName: "Checkout BDD Repository"
+
+      # ------------------------------------------------------------------------
+      # 步骤 2：环境前置体检 & 自动绕过 WindowsApps 空壳占位符
+      # 1. 自动识别真实可用的 Python（默认跳过 Windows Store 的 WindowsApps\python.exe 假壳，避免 9009）
+      # 2. 严格校验每个外部命令的 $LASTEXITCODE，确保缺 Python / 缺 PyYAML / 缺 Git 时立刻在本步报错
+      # 3. 将验证通过的绝对路径写入 $(RESOLVED_PYTHON_EXE) 供步骤 3 直接复用
+      # ------------------------------------------------------------------------
+      - powershell: |
+          $ErrorActionPreference = "Stop"
+          $pyParam = "${{ parameters.pythonExe }}".Trim()
+          $resolvedPy = $null
+
+          if ($pyParam -match "[\\/]") {
+            if (-not (Test-Path $pyParam)) {
+              Write-Host "##vso[task.logissue type=error]Specified pythonExe does not exist: $pyParam"
+              exit 1
+            }
+            $resolvedPy = $pyParam
+          } else {
+            $allCmds = @(Get-Command $pyParam -CommandType Application -All -ErrorAction SilentlyContinue)
+            $realCmds = @($allCmds | Where-Object { $_.Source -notlike "*\WindowsApps\*" })
+            if ($realCmds.Count -eq 0) {
+              $foundList = ($allCmds | ForEach-Object { $_.Source }) -join "; "
+              Write-Host "##vso[task.logissue type=error]No real '$pyParam' found in PATH (skipped WindowsApps store stub). Found: [$foundList]. Please add real Python to PATH and restart the ADS Agent, or pass pythonExe explicitly."
+              exit 1
+            }
+            # 若 PATH 中存在多个真 Python，优先选用已安装 PyYAML 的那个（临时切 Continue 避免 PS 5.1 把探测失败 stderr 升为终止异常）
+            foreach ($cand in $realCmds) {
+              $prevEap = $ErrorActionPreference
+              $ErrorActionPreference = "Continue"
+              $null = & $cand.Source -B -c "import yaml" 2>$null
+              $probeExit = $LASTEXITCODE
+              $ErrorActionPreference = $prevEap
+              if ($probeExit -eq 0) {
+                $resolvedPy = $cand.Source
+                break
+              }
+            }
+            if (-not $resolvedPy) {
+              $resolvedPy = $realCmds[0].Source
+            }
+          }
+
+          Write-Host "Resolved Python executable: $resolvedPy"
+          & $resolvedPy --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "##vso[task.logissue type=error]Python '--version' failed with exit code $LASTEXITCODE ($resolvedPy)"
+            exit $LASTEXITCODE
+          }
+
+          # 验证 PyYAML 已安装并打印实际命中的 Python 绝对路径，方便排查环境问题
+          & $resolvedPy -B -c "import yaml, sys; print('Python OK:', sys.executable, '| PyYAML:', yaml.__version__)"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "##vso[task.logissue type=error]PyYAML check failed with exit code $LASTEXITCODE ($resolvedPy). Install PyYAML or select the BDD Python interpreter."
+            exit $LASTEXITCODE
+          }
+
+          git --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "##vso[task.logissue type=error]git '--version' failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+          $cacheDir = '$(UI_INVENTORY_CACHE_DIR)'
+          if (-not $cacheDir -or $cacheDir.Contains('$(')) {
+            Write-Host "##vso[task.logissue type=error]UI_INVENTORY_CACHE_DIR was not fully expanded: $cacheDir"
+            exit 1
+          }
+
+          Write-Host "##vso[task.setvariable variable=RESOLVED_PYTHON_EXE]$resolvedPy"
+          Write-Host "Persistent UI inventory cache dir: $cacheDir"
+        displayName: "Preflight Check (Python, PyYAML & Git)"
+
+      # ------------------------------------------------------------------------
+      # 步骤 3：核心执行 —— 三层独立收敛（单机进程锁 + 持久化浅仓 + 原子发布闸门 + 无状态同步）
+      #   3.1 获取独占文件锁 (.poll-sync.lock) 并检查磁盘剩余空间
+      #   3.2 层 1（源码与快照）：优先 BuildList 仓 -> 核心 UI 仓 -> third_party 仓（最后）；
+      #       首次浅克隆（.staging 原子切换），日常仅 git fetch --depth 1 增量差异；规则变更时 0 网络本地重扫；
+      #       单仓扫完立刻落盘保存断点，任意仓失败或缺失则阻断层 2/3（绝不发布残缺清单）
+      #   3.3 层 2（跨仓构建）：按全仓快照集合指纹决定是否重建 Excel & 模块级 Markdown（.kb_docs.tmp 原子切换）
+      #   3.4 层 3（WeKnora 同步）：先做目标 KB 防呆体检，再以远端真实 SHA-256 为唯一真相滑窗并发收敛
+      #       （新项目空库、dryRun 切正式、同步中断、远端误删均自动补齐）
+      # ------------------------------------------------------------------------
+      - powershell: |
+          # 使用 Continue 是为了捕获 python 真实退出码，确保哪怕失败也能先收集完报告与 Excel 再标红退出
+          $ErrorActionPreference = "Continue"
+          $py = '$(RESOLVED_PYTHON_EXE)'
+          if (-not $py -or $py.Contains('$(')) {
+            $py = "${{ parameters.pythonExe }}"
+          }
+          $storeDir = '$(UI_INVENTORY_CACHE_DIR)'
+          $stagingDir = '$(Build.ArtifactStagingDirectory)' # ADS 临时产物打包目录，供步骤 4 上传归档
+          New-Item -ItemType Directory -Force -Path $storeDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+
+          # 完整 JSON 报告保存路径（--report-out 同时会在控制台打印易读的精简摘要）
+          $reportPath = Join-Path $stagingDir "poll-sync-report.json"
+
+          # 组装 poll-sync 命令行参数
+          $cmdArgs = @(
+            "-B", "-m", "autowork_core.ui_inventory", "poll-sync",
+            "--store-dir", $storeDir,
+            "--concurrency", "${{ parameters.concurrency }}",
+            "--report-out", $reportPath
+          )
+          if ("${{ parameters.forceRescan }}" -eq "True") {
+            $cmdArgs += "--force"
+          }
+          if ("${{ parameters.dryRun }}" -eq "True") {
+            $cmdArgs += "--dry-run"
+          }
+          if ("${{ parameters.pruneRemoved }}" -eq "True") {
+            $cmdArgs += "--prune-removed"
+          }
+          $onlyRepo = "${{ parameters.onlyRepo }}".Trim()
+          if ($onlyRepo -and $onlyRepo.ToLower() -ne "all") {
+            $cmdArgs += @("--repo", $onlyRepo)
+          }
+
+          Write-Host "Running: $py $($cmdArgs -join ' ')"
+          & $py @cmdArgs
+          $exitCode = $LASTEXITCODE # 0 表示全部成功；非 0 表示存在仓库拉取失败或文档同步失败
+
+          # 若缓存目录里存在最新生成的 Excel 审计表，复制到产物目录供步骤 4 发布下载
+          $distDir = Join-Path $storeDir "dist"
+          if (Test-Path $distDir) {
+            $latestXlsx = Get-ChildItem -Path $distDir -Filter "ui_inventory_audit*.xlsx" -File |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            if ($latestXlsx) {
+              Copy-Item -Path $latestXlsx.FullName -Destination (Join-Path $stagingDir "ui_inventory_audit.xlsx") -Force
+              Write-Host "Staged Excel audit workbook: $($latestXlsx.Name)"
+            }
+          }
+
+          # 若执行返回非 0，向 ADS 上报错误告警并让本步骤标红失败
+          if ($exitCode -ne 0) {
+            Write-Host "##vso[task.logissue type=error]UI inventory poll-sync exited with code $exitCode"
+            exit $exitCode
+          }
+        displayName: "Poll Repos, Build Inventory & Sync WeKnora"
+        env:
+          # 把 ADS 当次颁发的临时令牌传给 remote_poller，用于无交互认证拉取同 Project（SY_CT_Projects）下的其他 CT 仓
+          UI_INVENTORY_GIT_TOKEN: $(System.AccessToken)
+          # 强制 Python 在 Windows 执行机上使用 UTF-8 读写与输出，防止中文模块名/知识库名乱码
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+
+      # ------------------------------------------------------------------------
+      # 步骤 4：发布构建产物（Artifact）
+      # 只要步骤 2 体检已通过（存在产出），无论步骤 3 成功还是失败都会上传报告与 Excel，
+      # 方便在 ADS 页面直接下载 poll-sync-report.json 排查原因或下载最新 ui_inventory_audit.xlsx
+      # ------------------------------------------------------------------------
+      - task: PublishBuildArtifacts@1
+        displayName: "Publish Audit Excel & Sync Report"
+        condition: and(succeededOrFailed(), ne(variables['RESOLVED_PYTHON_EXE'], ''))
+        inputs:
+          PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+          ArtifactName: "ui-inventory-report"
+          publishLocation: "Container"

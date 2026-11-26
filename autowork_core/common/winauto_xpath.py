@@ -8,7 +8,12 @@ from autowork_core.common.element_properties import (
     read_accessible_name,
 )
 from autowork_core.common.uia_tree import iter_descendants_via_children
-from pywinauto.uia_defines import NoPatternInterfaceError
+
+try:
+    from pywinauto.uia_defines import NoPatternInterfaceError
+except ImportError:
+    class NoPatternInterfaceError(Exception):  # type: ignore[no-redef]
+        """Fallback placeholder when static tools run on headless CI agents without pywinauto."""
 
 
 def find_by_xpath(root, xpath, first_only):
